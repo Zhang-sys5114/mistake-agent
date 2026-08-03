@@ -1,0 +1,10 @@
+/target/
+/gen/
+/web/dist/
+node_modules/
+.scratch/
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

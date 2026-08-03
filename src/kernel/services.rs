@@ -1,0 +1,637 @@
+//! 内核服务契约与受控句柄（ADR-0001/0014/0016；Q5/Q6/Q8/Q9/Q10 定稿）。
+//!
+//! - `ServiceHandles` 是类型化封闭容器，只装四个服务；
+//! - 注入给插件的 `*Handle` 是受控视图（如 StorageHandle 只有错题本）。
+
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use futures_core::Stream;
+use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
+
+use crate::kernel::audit::{AuditRecord, Auditor};
+use crate::kernel::message::Message;
+
+/// 服务标识：v2 封闭集合（ADR-0014）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceId {
+    Storage,
+    Memory,
+    Compute,
+    Model,
+}
+
+// ---------- 取消信号（SIGTERM 通道；SIGKILL 由 dispatch 任务 abort 承担） ----------
+
+#[derive(Clone)]
+pub struct AbortSignal {
+    token: CancellationToken,
+}
+
+impl AbortSignal {
+    pub fn new() -> Self {
+        Self {
+            token: CancellationToken::new(),
+        }
+    }
+
+    pub fn from_token(token: CancellationToken) -> Self {
+        Self { token }
+    }
+
+    pub fn cancel(&self) {
+        self.token.cancel();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled()
+    }
+
+    pub fn cancelled(&self) -> CancellationToken {
+        self.token.clone()
+    }
+}
+
+impl Default for AbortSignal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------- Model 契约（Q6 + ADR-0014/0020） ----------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelKind {
+    Main,
+    Vision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseFormat {
+    JsonObject,
+    /// DeepSeek Responses API `text.format` 的 json_schema 模式（服务端强制结构）。
+    JsonSchema {
+        name: String,
+        schema: serde_json::Value,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelRequest {
+    pub model: ModelKind,
+    pub messages: Vec<Message>,
+    pub tools: Option<Vec<ToolSchema>>,
+    /// DeepSeek 思考模式 effort（none/minimal/low/medium/high/xhigh/max）。
+    pub reasoning_effort: Option<String>,
+    pub response_format: Option<ResponseFormat>,
+}
+
+impl ModelRequest {
+    pub fn chat(model: ModelKind, messages: Vec<Message>) -> Self {
+        Self {
+            model,
+            messages,
+            tools: None,
+            reasoning_effort: None,
+            response_format: None,
+        }
+    }
+}
+
+/// 模型可见工具（wire name + JSON Schema）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolSchema {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+pub enum ItemKind {
+    Message,
+    FunctionCall,
+}
+
+#[derive(Debug, Clone)]
+pub enum ModelChunk {
+    TextDelta(String),
+    ReasoningDelta(String),
+    ToolCallStart {
+        index: usize,
+        call_id: String,
+        name: String,
+    },
+    ToolCallDelta {
+        index: usize,
+        data: String,
+    },
+    ItemDone {
+        kind: ItemKind,
+    },
+    /// 完整响应中的 token 用量（response.completed 携带）。
+    Usage(TokenUsage),
+    Done,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallSpec {
+    pub call_id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TokenUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cached_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModelResponse {
+    pub text: String,
+    pub tool_calls: Vec<ToolCallSpec>,
+    pub usage: Option<TokenUsage>,
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ModelError {
+    #[error("鉴权失败：{0}")]
+    AuthFailed(String),
+    #[error("余额或配额不足：{0}")]
+    QuotaExceeded(String),
+    #[error("模型不存在或已下架：{0}")]
+    ModelNotFound(String),
+    #[error("请求超时")]
+    Timeout,
+    #[error("被取消")]
+    Cancelled,
+    #[error("限流：{0}")]
+    RateLimited(String),
+    #[error("传输错误：{0}")]
+    Transport(String),
+    #[error("协议错误：{0}")]
+    Protocol(String),
+    #[error("配置缺失：{0}")]
+    Config(String),
+}
+
+impl ModelError {
+    /// 系统性错误：重试/换参数无意义，应中断回合（Q17c）。
+    pub fn is_systemic(&self) -> bool {
+        matches!(
+            self,
+            ModelError::AuthFailed(_) | ModelError::QuotaExceeded(_) | ModelError::ModelNotFound(_)
+        )
+    }
+}
+
+pub type ModelStream = Box<dyn Stream<Item = Result<ModelChunk, ModelError>> + Send + Unpin>;
+
+/// 纯净 provider 抽象（不管超时/审计；护栏在包装层与 loop）。
+#[async_trait]
+pub trait ModelService: Send + Sync {
+    async fn stream(
+        &self,
+        request: &ModelRequest,
+        signal: &AbortSignal,
+    ) -> Result<ModelStream, ModelError>;
+
+    async fn complete(
+        &self,
+        request: &ModelRequest,
+        signal: &AbortSignal,
+    ) -> Result<ModelResponse, ModelError> {
+        use futures_util::StreamExt;
+
+        let mut stream = self.stream(request, signal).await?;
+        let mut text = String::new();
+        let mut calls: Vec<(usize, ToolCallSpec)> = Vec::new();
+        let mut usage_holder: Option<TokenUsage> = None;
+        while let Some(chunk) = stream.next().await {
+            match chunk? {
+                ModelChunk::TextDelta(d) => text.push_str(&d),
+                ModelChunk::ToolCallStart {
+                    index,
+                    call_id,
+                    name,
+                } => {
+                    calls.push((
+                        index,
+                        ToolCallSpec {
+                            call_id,
+                            name,
+                            arguments: String::new(),
+                        },
+                    ));
+                }
+                ModelChunk::ToolCallDelta { index, data } => {
+                    if let Some((_, spec)) = calls.iter_mut().find(|(i, _)| *i == index) {
+                        spec.arguments.push_str(&data);
+                    }
+                }
+                ModelChunk::Usage(usage) => {
+                    usage_holder = Some(usage);
+                }
+                _ => {}
+            }
+        }
+        Ok(ModelResponse {
+            text,
+            tool_calls: calls.into_iter().map(|(_, spec)| spec).collect(),
+            usage: usage_holder,
+        })
+    }
+}
+
+/// 注入用户插件的模型受控句柄：只暴露带超时 + abort + 审计的 complete。
+#[derive(Clone)]
+pub struct ModelHandle {
+    inner: Arc<dyn ModelService>,
+    timeout: Duration,
+    auditor: Auditor,
+}
+
+impl ModelHandle {
+    pub fn new(inner: Arc<dyn ModelService>, timeout: Duration, auditor: Auditor) -> Self {
+        Self {
+            inner,
+            timeout,
+            auditor,
+        }
+    }
+
+    pub async fn complete(
+        &self,
+        request: &ModelRequest,
+        signal: &AbortSignal,
+    ) -> Result<ModelResponse, ModelError> {
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(self.timeout, self.inner.complete(request, signal)).await;
+        let duration_ms = started.elapsed().as_millis() as u64;
+        match result {
+            Ok(Ok(resp)) => {
+                self.auditor.record(AuditRecord::LlmCall {
+                    provider: "handle".into(),
+                    model: match request.model {
+                        ModelKind::Main => "main".into(),
+                        ModelKind::Vision => "vision".into(),
+                    },
+                    kind: "complete".into(),
+                    tokens_in: resp.usage.as_ref().and_then(|u| u.input_tokens),
+                    tokens_out: resp.usage.as_ref().and_then(|u| u.output_tokens),
+                    duration_ms,
+                    ok: true,
+                });
+                Ok(resp)
+            }
+            Ok(Err(e)) => {
+                self.auditor.record(AuditRecord::LlmCall {
+                    provider: "handle".into(),
+                    model: match request.model {
+                        ModelKind::Main => "main".into(),
+                        ModelKind::Vision => "vision".into(),
+                    },
+                    kind: "complete".into(),
+                    tokens_in: None,
+                    tokens_out: None,
+                    duration_ms,
+                    ok: false,
+                });
+                Err(e)
+            }
+            Err(_) => Err(ModelError::Timeout),
+        }
+    }
+}
+
+// ---------- Storage 契约（Q8：角色拆分，插件只见 MistakeStore） ----------
+
+use crate::kernel::session::{Goal, SessionKey, SessionMeta};
+
+#[derive(Debug, thiserror::Error)]
+pub enum StorageError {
+    #[error("会话不存在：{0}")]
+    SessionNotFound(SessionKey),
+    #[error("错题不存在：{0}")]
+    MistakeNotFound(String),
+    #[error("已存在：{0}")]
+    AlreadyExists(String),
+    #[error("数据损坏：{0}")]
+    Corrupt(String),
+    #[error("IO 错误：{0}")]
+    Io(String),
+    #[error("内部错误：{0}")]
+    Internal(String),
+}
+
+/// 会话持久化：只给 kernel 内部（Session scheduler / loop / 压缩）。
+#[async_trait]
+pub trait SessionStore: Send + Sync {
+    async fn create_session(
+        &self,
+        key: &SessionKey,
+        meta: &SessionMeta,
+    ) -> Result<(), StorageError>;
+    async fn get_session(&self, key: &SessionKey) -> Result<Option<SessionMeta>, StorageError>;
+    async fn append_message(&self, key: &SessionKey, msg: &Message) -> Result<(), StorageError>;
+    async fn read_path(&self, key: &SessionKey) -> Result<Vec<Message>, StorageError>;
+    async fn read_all(&self, key: &SessionKey) -> Result<Vec<Message>, StorageError>;
+    async fn set_goal(&self, key: &SessionKey, goal: &Goal) -> Result<(), StorageError>;
+    async fn archive(&self, key: &SessionKey) -> Result<(), StorageError>;
+    async fn list_sessions(&self) -> Result<Vec<SessionMeta>, StorageError>;
+    async fn set_last_activity(
+        &self,
+        key: &SessionKey,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), StorageError>;
+}
+
+// ---------- 错题模型 ----------
+
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MistakeId(pub Uuid);
+
+impl std::fmt::Display for MistakeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Mistake {
+    pub id: MistakeId,
+    pub subject: String,
+    pub knowledge_point: String,
+    pub question: String,
+    pub student_answer: String,
+    pub reference_answer: Option<String>,
+    pub is_correct: bool,
+    pub analysis: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MistakeFilter {
+    pub subject: Option<String>,
+    pub knowledge_point: Option<String>,
+    pub is_correct: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MistakePatch {
+    pub knowledge_point: Option<String>,
+    pub analysis: Option<String>,
+    pub is_correct: Option<bool>,
+}
+
+/// 错题本：用户插件唯一可见的 storage 面。
+#[async_trait]
+pub trait MistakeStore: Send + Sync {
+    async fn save(&self, mistake: &Mistake) -> Result<MistakeId, StorageError>;
+    async fn get(&self, id: &MistakeId) -> Result<Option<Mistake>, StorageError>;
+    async fn list(&self, filter: &MistakeFilter) -> Result<Vec<Mistake>, StorageError>;
+    async fn update(&self, id: &MistakeId, patch: &MistakePatch) -> Result<(), StorageError>;
+    async fn remove(&self, id: &MistakeId) -> Result<(), StorageError>;
+}
+
+/// Storage 服务组合接口：kernel 持有全量，插件拿 StorageHandle 视图。
+pub trait StorageService: SessionStore + MistakeStore + crate::kernel::audit::AuditSink {}
+
+/// 注入插件的 storage 受控句柄：只有错题本。
+#[derive(Clone)]
+pub struct StorageHandle {
+    inner: Arc<dyn MistakeStore>,
+}
+
+impl StorageHandle {
+    pub fn new(inner: Arc<dyn MistakeStore>) -> Self {
+        Self { inner }
+    }
+    pub async fn save(&self, m: &Mistake) -> Result<MistakeId, StorageError> {
+        self.inner.save(m).await
+    }
+    pub async fn get(&self, id: &MistakeId) -> Result<Option<Mistake>, StorageError> {
+        self.inner.get(id).await
+    }
+    pub async fn list(&self, f: &MistakeFilter) -> Result<Vec<Mistake>, StorageError> {
+        self.inner.list(f).await
+    }
+    pub async fn update(&self, id: &MistakeId, p: &MistakePatch) -> Result<(), StorageError> {
+        self.inner.update(id, p).await
+    }
+    pub async fn remove(&self, id: &MistakeId) -> Result<(), StorageError> {
+        self.inner.remove(id).await
+    }
+}
+
+// ---------- Memory 契约（Q9） ----------
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MemoryPath {
+    segments: Vec<String>,
+}
+
+impl MemoryPath {
+    pub fn parse(raw: &str) -> Result<Self, MemoryError> {
+        let raw_segments: Vec<&str> = raw.split('/').collect();
+        if raw_segments.is_empty() || raw_segments.iter().any(|s| s.trim().is_empty()) {
+            return Err(MemoryError::InvalidPath(
+                "路径不能为空、不能以 / 开头或结尾，也不能含空段".into(),
+            ));
+        }
+        let segments: Vec<String> = raw_segments.iter().map(|s| s.trim().to_string()).collect();
+        if segments
+            .iter()
+            .any(|s| s == ".." || s.contains('\\') || s.chars().any(|c| c.is_control()))
+        {
+            return Err(MemoryError::InvalidPath(format!("非法路径段：{raw}")));
+        }
+        Ok(Self { segments })
+    }
+
+    pub fn as_str(&self) -> String {
+        self.segments.join("/")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryView {
+    Listing(Vec<String>),
+    Entry { path: MemoryPath, content: String },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MemoryError {
+    #[error("非法路径：{0}")]
+    InvalidPath(String),
+    #[error("条目不存在：{0}")]
+    NotFound(String),
+    #[error("IO 错误：{0}")]
+    Io(String),
+}
+
+#[async_trait]
+pub trait MemoryService: Send + Sync {
+    async fn save(&self, path: &MemoryPath, content: &str) -> Result<(), MemoryError>;
+    async fn show(&self, path: Option<&MemoryPath>) -> Result<MemoryView, MemoryError>;
+    /// 删除整棵子树（Q9 语义）。
+    async fn remove(&self, path: &MemoryPath) -> Result<(), MemoryError>;
+}
+
+#[derive(Clone)]
+pub struct MemoryHandle {
+    inner: Arc<dyn MemoryService>,
+}
+
+impl MemoryHandle {
+    pub fn new(inner: Arc<dyn MemoryService>) -> Self {
+        Self { inner }
+    }
+    pub async fn save(&self, p: &MemoryPath, c: &str) -> Result<(), MemoryError> {
+        self.inner.save(p, c).await
+    }
+    pub async fn show(&self, p: Option<&MemoryPath>) -> Result<MemoryView, MemoryError> {
+        self.inner.show(p).await
+    }
+    pub async fn remove(&self, p: &MemoryPath) -> Result<(), MemoryError> {
+        self.inner.remove(p).await
+    }
+}
+
+// ---------- Compute 契约（Q10） ----------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComputeRequest {
+    pub code: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComputeResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ComputeError {
+    #[error("执行端不可用（GUI/Pyodide 未连接）")]
+    BackendUnavailable,
+    #[error("执行超时")]
+    Timeout,
+    #[error("超出资源限制：{0}")]
+    ResourceLimit(String),
+    #[error("传输错误：{0}")]
+    Transport(String),
+}
+
+/// 代码执行失败（Python traceback）走结果，不走错误（Q10）。
+#[async_trait]
+pub trait ComputeService: Send + Sync {
+    async fn run(
+        &self,
+        request: &ComputeRequest,
+        signal: &AbortSignal,
+    ) -> Result<ComputeResult, ComputeError>;
+}
+
+#[derive(Clone)]
+pub struct ComputeHandle {
+    inner: Arc<dyn ComputeService>,
+}
+
+impl ComputeHandle {
+    pub fn new(inner: Arc<dyn ComputeService>) -> Self {
+        Self { inner }
+    }
+    pub async fn run(
+        &self,
+        request: &ComputeRequest,
+        signal: &AbortSignal,
+    ) -> Result<ComputeResult, ComputeError> {
+        self.inner.run(request, signal).await
+    }
+}
+
+// ---------- ServiceHandles：类型化封闭容器（Q5 修订） ----------
+
+#[derive(Default, Clone)]
+pub struct ServiceHandles {
+    storage: Option<StorageHandle>,
+    memory: Option<MemoryHandle>,
+    compute: Option<ComputeHandle>,
+    model: Option<ModelHandle>,
+}
+
+impl ServiceHandles {
+    pub fn storage(&self) -> Option<&StorageHandle> {
+        self.storage.as_ref()
+    }
+    pub fn memory(&self) -> Option<&MemoryHandle> {
+        self.memory.as_ref()
+    }
+    pub fn compute(&self) -> Option<&ComputeHandle> {
+        self.compute.as_ref()
+    }
+    pub fn model(&self) -> Option<&ModelHandle> {
+        self.model.as_ref()
+    }
+
+    pub fn with_storage(mut self, h: StorageHandle) -> Self {
+        self.storage = Some(h);
+        self
+    }
+    pub fn with_memory(mut self, h: MemoryHandle) -> Self {
+        self.memory = Some(h);
+        self
+    }
+    pub fn with_compute(mut self, h: ComputeHandle) -> Self {
+        self.compute = Some(h);
+        self
+    }
+    pub fn with_model(mut self, h: ModelHandle) -> Self {
+        self.model = Some(h);
+        self
+    }
+
+    pub fn available(&self) -> HashSet<ServiceId> {
+        let mut set = HashSet::new();
+        if self.storage.is_some() {
+            set.insert(ServiceId::Storage);
+        }
+        if self.memory.is_some() {
+            set.insert(ServiceId::Memory);
+        }
+        if self.compute.is_some() {
+            set.insert(ServiceId::Compute);
+        }
+        if self.model.is_some() {
+            set.insert(ServiceId::Model);
+        }
+        set
+    }
+
+    /// 按能力声明过滤：插件只拿到声明过的服务（结构上受限）。
+    pub fn filter(&self, requires: &[ServiceId]) -> ServiceHandles {
+        let mut out = ServiceHandles::default();
+        for id in requires {
+            match id {
+                ServiceId::Storage => out.storage = self.storage.clone(),
+                ServiceId::Memory => out.memory = self.memory.clone(),
+                ServiceId::Compute => out.compute = self.compute.clone(),
+                ServiceId::Model => out.model = self.model.clone(),
+            }
+        }
+        out
+    }
+}
