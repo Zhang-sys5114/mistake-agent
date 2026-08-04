@@ -73,6 +73,14 @@ pub struct Message {
 }
 
 impl Message {
+    /// 会话切换控制调用：只作调度动作，不落会话树、不随历史携带（ADR-0034）。
+    pub fn is_switch_tool_call(&self) -> bool {
+        matches!(
+            &self.kind,
+            MessageKind::ToolCall { entry, .. } if entry == "session::switch"
+        )
+    }
+
     pub fn user(text: impl Into<String>) -> Self {
         Self {
             id: MessageId::new(),

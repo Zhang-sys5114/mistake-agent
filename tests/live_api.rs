@@ -9,6 +9,7 @@ use std::time::Duration;
 use mistake_agent::kernel::dispatch::Caller;
 use mistake_agent::kernel::events::MemoryEventSink;
 use mistake_agent::kernel::rpc::{ForcedToolRequest, Kernel, Method, RpcRequest};
+use mistake_agent::kernel::session::SessionKey;
 use mistake_agent::kernel::settings::Settings;
 use serde_json::json;
 
@@ -510,5 +511,136 @@ async fn pre_turn_context_decision_real_api() {
     eprintln!(
         "预决策 + 双回合真实链路通过：主模型 {} 次调用，缓存命中率 {}",
         stats["main"]["calls"], stats["main"]["hit_rate"]
+    );
+}
+
+/// 链路 7：session::switch 不污染新上下文 —— 强制切换后新会话不含切换控制消息，
+/// 后续普通回合模型不再重复切换。
+#[tokio::test]
+#[ignore]
+async fn switch_tool_call_not_polluting_next_context() {
+    if !real_api_ready() {
+        eprintln!("SKIP: 未配置真实 API key");
+        return;
+    }
+    let events = Arc::new(MemoryEventSink::default());
+    let kernel = Kernel::new(events.clone()).await.expect("kernel 启动失败");
+
+    let send = |id: u64, text: &str, force_tool: Option<ForcedToolRequest>| RpcRequest {
+        id,
+        method: Method::SendUserMessage {
+            text: text.to_string(),
+            force_tool,
+        },
+    };
+    let rpc = |id: u64, method: Method| RpcRequest { id, method };
+    async fn session_count(kernel: &Arc<Kernel>) -> usize {
+        let frame = kernel
+            .handle(RpcRequest {
+                id: 99,
+                method: Method::ListSessions,
+            })
+            .await
+            .expect("list_sessions 失败")
+            .expect("应有响应帧");
+        match frame {
+            mistake_agent::kernel::rpc::RpcFrame::Response { result, .. } => {
+                result.unwrap()["sessions"].as_array().unwrap().len()
+            }
+            _ => panic!("list_sessions 应返回 response 帧"),
+        }
+    }
+
+    kernel
+        .handle(send(30, "你好", None))
+        .await
+        .expect("回合 1 失败");
+    assert!(
+        wait_idle(&kernel, Duration::from_secs(120)).await,
+        "回合 1 120s 内未结束"
+    );
+
+    // 回合 2：强制调用 session::switch（模拟主模型主动切换上下文）。
+    kernel
+        .handle(send(
+            31,
+            "切换",
+            Some(ForcedToolRequest {
+                entry: "session::switch".into(),
+                hint: Some("批改英语作业".into()),
+                asset: None,
+            }),
+        ))
+        .await
+        .expect("回合 2 失败");
+    assert!(
+        wait_idle(&kernel, Duration::from_secs(120)).await,
+        "回合 2 120s 内未结束"
+    );
+
+    let count_before = session_count(&kernel).await;
+    assert!(count_before >= 2, "切换后应至少 2 个会话：{count_before}");
+
+    // 读取活动会话：不得含 session::switch 控制消息，且切换后的回答应落在新会话。
+    let list_frame = kernel
+        .handle(rpc(32, Method::ListSessions))
+        .await
+        .unwrap()
+        .unwrap();
+    let list = match list_frame {
+        mistake_agent::kernel::rpc::RpcFrame::Response { result, .. } => {
+            result.expect("应有会话列表")
+        }
+        _ => panic!("list_sessions 应返回 response 帧"),
+    };
+    let active = list["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["status"] == "active")
+        .expect("应有活动会话");
+    let active_key: SessionKey =
+        serde_json::from_str(&format!("\"{}\"", active["key"].as_str().unwrap()))
+            .expect("解析活动会话 key");
+    let detail_frame = kernel
+        .handle(rpc(33, Method::ReadSession { key: active_key }))
+        .await
+        .unwrap()
+        .unwrap();
+    let detail = match detail_frame {
+        mistake_agent::kernel::rpc::RpcFrame::Response { result, .. } => {
+            result.expect("应有会话详情")
+        }
+        _ => panic!("read_session 应返回 response 帧"),
+    };
+    let msgs = detail["messages"].as_array().unwrap();
+    assert!(
+        msgs.iter()
+            .all(|m| m["kind"]["kind"] != "tool_call" || m["kind"]["entry"] != "session::switch"),
+        "新会话不应携带切换控制消息：{msgs:?}"
+    );
+    assert!(
+        msgs.iter().any(|m| m["kind"]["kind"] == "assistant"),
+        "切换后的回答应落在新会话"
+    );
+
+    // 回合 3：普通消息。修复前模型会在新上下文看到 session::switch 而反复切换；
+    // 修复后应继续当前会话。
+    kernel
+        .handle(send(34, "继续批改英语作业", None))
+        .await
+        .expect("回合 3 失败");
+    assert!(
+        wait_idle(&kernel, Duration::from_secs(120)).await,
+        "回合 3 120s 内未结束"
+    );
+    let count_after = session_count(&kernel).await;
+    assert_eq!(
+        count_after, count_before,
+        "后续回合不应再次切换会话：{count_before} → {count_after}"
+    );
+    eprintln!(
+        "session::switch 防污染真实链路通过：活动会话 {} 条消息，无切换控制消息，后续回合不再切换",
+        msgs.len()
     );
 }

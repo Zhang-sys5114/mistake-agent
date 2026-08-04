@@ -140,6 +140,43 @@ pub struct AttachmentInfo {
     pub name: String,
 }
 
+/// 落盘回合新增消息：过滤 `session::switch` 控制消息（ADR-0034，不落会话树），
+/// 并把其直接子消息的父链重接到切换前的最后一条消息；跳过压缩摘要
+/// （由 splice_compaction 单独接入）。返回最后落盘消息 id（None = 无可落盘消息）。
+async fn persist_turn_messages(
+    store: &Arc<dyn SessionStore>,
+    key: &SessionKey,
+    messages: &[Message],
+    skip_id: Option<MessageId>,
+) -> Result<Option<MessageId>, String> {
+    let mut last_kept: Option<MessageId> = None;
+    let mut skipped_switch: Option<MessageId> = None;
+    for msg in messages {
+        if Some(msg.id) == skip_id {
+            continue;
+        }
+        if msg.is_switch_tool_call() {
+            if last_kept.is_none() {
+                last_kept = msg.parent_id;
+            }
+            skipped_switch = Some(msg.id);
+            continue;
+        }
+        let mut m = msg.clone();
+        if skipped_switch.is_some_and(|sid| m.parent_id == Some(sid))
+            && let Some(anchor) = last_kept
+        {
+            m.parent_id = Some(anchor);
+        }
+        store
+            .append_message(key, &m)
+            .await
+            .map_err(|e| e.to_string())?;
+        last_kept = Some(m.id);
+    }
+    Ok(last_kept)
+}
+
 struct TurnHandle {
     key: SessionKey,
     signal: AbortSignal,
@@ -382,52 +419,65 @@ impl Kernel {
                     match outcome {
                         Ok(outcome) => {
                             let compaction = outcome.compaction.clone();
-                            for msg in &outcome.messages {
-                                // 压缩摘要由 splice_compaction 统一落盘，避免重复追加。
-                                if compaction.as_ref().is_some_and(|c| c.summary.id == msg.id) {
-                                    continue;
-                                }
-                                if let Err(e) = store.append_message(&key, msg).await {
+                            // 回合内经 session::switch 切换后，后半段消息归新会话。
+                            let persist_key = outcome.session_key.unwrap_or(key);
+                            let skip_summary = compaction.as_ref().map(|c| c.summary.id);
+                            let persisted_last = match persist_turn_messages(
+                                &store,
+                                &persist_key,
+                                &outcome.messages,
+                                skip_summary,
+                            )
+                            .await
+                            {
+                                Ok(last) => last,
+                                Err(e) => {
                                     events.emit(Event::Error {
                                         message: format!("消息落盘失败：{e}"),
                                     });
+                                    None
                                 }
-                            }
+                            };
                             if let Some(info) = &compaction {
                                 if let Err(e) = store
-                                    .splice_compaction(&key, &info.summary, info.tail_start)
+                                    .splice_compaction(&persist_key, &info.summary, info.tail_start)
                                     .await
                                 {
                                     events.emit(Event::Error {
                                         message: format!("压缩摘要接入失败：{e}"),
                                     });
                                 }
-                                events.emit(Event::Compaction { session: key });
+                                events.emit(Event::Compaction {
+                                    session: persist_key,
+                                });
                                 auditor.record(AuditRecord::Compaction {
-                                    session: key.to_string(),
+                                    session: persist_key.to_string(),
                                     summarized: info.summarized,
                                 });
-                                scheduler
-                                    .interrupt_bus()
-                                    .send(Interrupt::CompactionDone { session: key });
+                                scheduler.interrupt_bus().send(Interrupt::CompactionDone {
+                                    session: persist_key,
+                                });
                             }
                             // 活跃路径推进到回合末条（消息树分支语义）。
-                            let next_active = compaction
-                                .as_ref()
-                                .map(|c| c.tail_end)
-                                .or_else(|| outcome.messages.last().map(|m| m.id));
-                            if let Err(e) = store.set_active_path(&key, next_active).await {
+                            let next_active =
+                                compaction.as_ref().map(|c| c.tail_end).or(persisted_last);
+                            if let Some(next) = next_active
+                                && let Err(e) =
+                                    store.set_active_path(&persist_key, Some(next)).await
+                            {
                                 events.emit(Event::Error {
                                     message: format!("活跃路径推进失败：{e}"),
                                 });
                             }
-                            if let Err(e) = scheduler.on_turn_end(&key, &outcome.messages).await {
+                            if let Err(e) =
+                                scheduler.on_turn_end(&persist_key, &outcome.messages).await
+                            {
                                 events.emit(Event::Error {
                                     message: format!("回合收尾失败：{e}"),
                                 });
                             }
                             if let Some(usage) = &outcome.usage {
-                                cache.record_main(&key, usage);
+                                cache.record_main(&persist_key, usage);
                             }
                             auditor.record(AuditRecord::Lifecycle {
                                 phase: "turn_finished".into(),
@@ -736,5 +786,48 @@ impl Kernel {
                 }))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::session::SessionMeta;
+    use crate::kernel::storage::MemoryStorage;
+
+    #[tokio::test]
+    async fn switch_tool_call_not_persisted_and_children_reparented() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStorage::new());
+        let key = SessionKey::new();
+        store
+            .create_session(&key, &SessionMeta::new(key))
+            .await
+            .unwrap();
+        let user = Message::user("帮我批改数学作业");
+        store.append_message(&key, &user).await.unwrap();
+
+        let mut switch = Message::tool_call(
+            "session::switch",
+            json!({"goal": "批改英语作业"}),
+            Ok(json!({"switched": true})),
+        );
+        switch.parent_id = Some(user.id);
+        let mut answer = Message::assistant("好的，先切换到英语作业");
+        answer.parent_id = Some(switch.id);
+        let answer_id = answer.id;
+
+        let last = persist_turn_messages(&store, &key, &[switch, answer], None)
+            .await
+            .unwrap();
+        assert_eq!(last, Some(answer_id));
+
+        let path = store.read_path(&key).await.unwrap();
+        assert_eq!(path.len(), 2, "切换控制消息不应落盘");
+        assert!(!path[1].is_switch_tool_call());
+        assert_eq!(
+            path[1].parent_id,
+            Some(user.id),
+            "子消息父链应重接到切换前最后一条"
+        );
     }
 }

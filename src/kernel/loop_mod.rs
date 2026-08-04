@@ -18,7 +18,7 @@ use crate::kernel::services::{
     AbortSignal, ItemKind, ModelChunk, ModelKind, ModelRequest, ModelService, TokenUsage,
     ToolChoice, ToolSchema,
 };
-use crate::kernel::session::{InterruptBus, SessionSwitch, Summarizer};
+use crate::kernel::session::{InterruptBus, SessionKey, SessionSwitch, Summarizer};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -62,6 +62,8 @@ pub struct TurnOutcome {
     pub compaction: Option<CompactionInfo>,
     /// 本回合所有主模型流调用的累计 token 用量（缓存命中统计用）。
     pub usage: Option<TokenUsage>,
+    /// 回合内经 session::switch 切换后的新会话（None = 未切换，仍用原会话）。
+    pub session_key: Option<SessionKey>,
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +180,7 @@ impl AgentLoop {
         let mut conversation = input.messages;
         let turn_deadline = Instant::now() + input.turn_budget;
         let mut tool_calls = 0usize;
+        let mut current_session: Option<SessionKey> = None;
         let mut consecutive_failures = 0usize;
         let mut last_code: Option<ToolErrorCode> = None;
         let mut remaining_forced = input.forced_tool.clone();
@@ -389,6 +392,7 @@ impl AgentLoop {
                                 tool_calls,
                                 compaction: None,
                                 usage: usage_opt(&turn_usage),
+                                session_key: current_session,
                             });
                         }
                         return Err(LoopError::Model(e.to_string()));
@@ -441,10 +445,13 @@ impl AgentLoop {
                                 .unwrap_or("")
                                 .to_string();
                             match s.switch(&goal).await {
-                                Ok(key) => Ok(json!({
-                                    "switched": true,
-                                    "session_key": key.to_string(),
-                                })),
+                                Ok(key) => {
+                                    current_session = Some(key);
+                                    Ok(json!({
+                                        "switched": true,
+                                        "session_key": key.to_string(),
+                                    }))
+                                }
                                 Err(e) => Err(ToolError::handler(e)),
                             }
                         }
@@ -501,6 +508,7 @@ impl AgentLoop {
             tool_calls,
             compaction,
             usage: usage_opt(&turn_usage),
+            session_key: current_session,
         };
         self.events.emit(Event::TurnEnd {
             stop_reason: outcome.stop_reason.clone(),

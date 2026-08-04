@@ -900,6 +900,8 @@ fn carry_history(path: &[Message], keep: usize) -> Vec<Message> {
     let tail: Vec<Message> = path
         .iter()
         .rev()
+        // 会话切换控制消息不随历史携带（ADR-0034），避免模型在新上下文反复切换。
+        .filter(|m| !m.is_switch_tool_call())
         .take(keep)
         .cloned()
         .collect::<Vec<_>>()
@@ -1305,5 +1307,25 @@ mod tests {
             steps += 1;
         }
         assert!(steps >= 2, "parent 链应连续：{steps}");
+    }
+
+    #[test]
+    fn carry_history_filters_switch_calls_and_relinks_chain() {
+        let u1 = Message::user("u1");
+        let u2 = Message::user("u2");
+        let mut switch = Message::tool_call(
+            "session::switch",
+            json!({"goal": "英语"}),
+            Ok(json!({"switched": true})),
+        );
+        switch.parent_id = Some(u2.id);
+        let mut answer = Message::assistant("ok");
+        answer.parent_id = Some(switch.id);
+
+        let copied = carry_history(&[u1, u2, switch, answer], 10);
+        assert_eq!(copied.len(), 3, "切换控制消息不应随历史携带");
+        assert!(copied.iter().all(|m| !m.is_switch_tool_call()));
+        // answer 副本应直接挂到 u2 副本之后（链重新连接）。
+        assert_eq!(copied.last().unwrap().parent_id, Some(copied[1].id));
     }
 }
