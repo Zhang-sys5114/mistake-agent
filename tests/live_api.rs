@@ -404,10 +404,15 @@ async fn check_balance_real_api() {
         vision["data"]["balance"].as_str().is_some(),
         "SiliconFlow 应有可用余额：{vision}"
     );
+    assert!(
+        vision["data"]["charge_balance"].as_str().is_some(),
+        "SiliconFlow 应有充值余额（实际可用）：{vision}"
+    );
     eprintln!(
-        "余额真实链路通过：DeepSeek {} {}；SiliconFlow 可用 {} / 总 {}",
+        "余额真实链路通过：DeepSeek {} {}；SiliconFlow 充值（可用）{} / 赠送 {} / 总 {}",
         main["data"]["currency"].as_str().unwrap_or(""),
         main["data"]["total_balance"].as_str().unwrap_or(""),
+        vision["data"]["charge_balance"].as_str().unwrap_or(""),
         vision["data"]["balance"].as_str().unwrap_or(""),
         vision["data"]["total_balance"].as_str().unwrap_or(""),
     );

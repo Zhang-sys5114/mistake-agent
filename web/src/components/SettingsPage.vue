@@ -171,10 +171,11 @@ onMounted(() => {
           </template>
           <template v-else-if="balance.vision?.ok">
             <span class="balance-value">
-              {{ money(balance.vision.data.balance, "CNY") }}
+              {{ money(balance.vision.data.charge_balance, "CNY") }}
             </span>
             <span class="balance-note">
-              充值 {{ money(balance.vision.data.charge_balance, "CNY") }} · 总额
+              充值余额（实际可用） · 赠送
+              {{ money(balance.vision.data.balance, "CNY") }} · 总额
               {{ money(balance.vision.data.total_balance, "CNY") }}
             </span>
           </template>

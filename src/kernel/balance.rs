@@ -1,6 +1,7 @@
 //! 余额查询（账户外部 API 轻量封装，2026-08-04 双提供商实测通过）：
 //! - DeepSeek：`GET {base}/user/balance`，返回 `balance_infos`（可能多币种，取第一条）；
-//! - SiliconFlow：`GET {base}/user/info`，返回 `data.balance / charge_balance / total_balance`。
+//! - SiliconFlow：`GET {base}/user/info`，返回 `data.balance`（赠送余额）、
+//!   `chargeBalance`（充值余额，实际可用）、`totalBalance`（总额）。
 //!
 //! 只读账户信息，绝不把 api_key 放进返回值或审计；未配置时给出结构化占位。
 
