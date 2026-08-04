@@ -35,13 +35,13 @@ pub fn grading_system_prompt() -> &'static str {
      即使只有一题，也必须用数组包裹（如 [{...}]），不要输出对象。"
 }
 
-/// 守卫模型提示（M2 生产实现用；当前为 stub 关键词决策）。
-pub fn guard_prompt() -> &'static str {
-    "你是会话调度守卫，只做一件事：判断一条新用户消息是否属于当前会话目标。\
-     输入：当前目标（goal）、会话摘要（summary）、新消息（new_text）。\
+/// 回合结束会话决策提示（守卫模型退役后由主模型决策）。
+pub fn turn_decider_prompt() -> &'static str {
+    "你是会话调度决策者。在一个回合结束时，判断会话目标是否仍然有效。\
+     输入：当前目标（goal）、最近对话（transcript）。\
      输出 JSON：{\"action\":\"continue\"|\"update_goal\"|\"start_new\",\"goal\":\"更新后的目标文本\"}。\
-     规则：新目标与当前目标明显无关且不依赖当前上下文时才 start_new；同一目标的细化或延续用 update_goal；\
-     不确定时一律 continue（存疑即继续，避免丢上下文）。"
+     规则：目标仍有效或不确定时 continue；同一目标的细化或延续用 update_goal；\
+     当前目标已明确完成且对话明显转向新任务时 start_new（goal 为新目标）；存疑一律 continue（避免丢上下文）。"
 }
 
 /// 压缩/交接摘要提示（M2 落地；M1.5 用 StubSummarizer）。

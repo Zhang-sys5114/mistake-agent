@@ -7,11 +7,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::kernel::context::PluginContext;
-use crate::kernel::contract::{CallerPolicy, Info, PluginError, ToolDef, ToolError};
-use crate::kernel::dispatch::ToolCallContext;
-use crate::kernel::registry::{PluginDescriptor, UserPlugin};
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Difficulty {
@@ -45,60 +40,6 @@ pub struct PracticeItem {
 /// 支持的知识点清单（供未匹配时回告模型/用户）。
 pub const SUPPORTED_POINTS: &[&str] = &["三角形全等判定", "绝对值", "一般现在时三单"];
 
-pub struct PracticePlugin;
-
-impl UserPlugin for PracticePlugin {
-    fn info() -> Info {
-        Info {
-            namespace: "practice".into(),
-            requires: vec![],
-            tools: vec![ToolDef {
-                name: "generate".into(),
-                user_visible: true,
-                title: Some("生成变式练习".into()),
-                group: Some("学习".into()),
-                description:
-                    "按知识点生成分层变式练习（基础/同类变式/综合拔高），几何题附带图纸规格。用法：practice::generate <知识点> [难度]".into(),
-                params: schemars::schema_for!(GenerateParams),
-                policy: CallerPolicy::UserAndModel,
-                timeout: None,
-                icon: Some("mdi:creation".into()),
-            }],
-            ..Default::default()
-        }
-    }
-
-    fn register(ctx: PluginContext<'_>) -> Result<(), PluginError> {
-        ctx.registrar.tool(
-            "generate",
-            std::sync::Arc::new(|_call_ctx: &ToolCallContext, params: Value| {
-                Box::pin(async move { generate_handler(params).await })
-            }),
-        )
-    }
-}
-
-pub fn descriptor() -> PluginDescriptor {
-    PluginDescriptor::from_plugin::<PracticePlugin>()
-}
-
-async fn generate_handler(params: Value) -> Result<Value, ToolError> {
-    let p: GenerateParams =
-        serde_json::from_value(params).map_err(|e| ToolError::invalid_params(e.to_string()))?;
-    let knowledge_point = p.knowledge_point.trim();
-    if knowledge_point.is_empty() {
-        return Err(ToolError::invalid_params("knowledge_point 不能为空"));
-    }
-    match build_item(knowledge_point, p.difficulty.unwrap_or_default()) {
-        Some(item) => Ok(json!({ "matched": true, "item": item })),
-        None => Ok(json!({
-            "matched": false,
-            "supported": SUPPORTED_POINTS,
-            "message": "当前内置模板仅支持：三角形全等判定、绝对值、一般现在时三单。请用支持的知识点重试。",
-        })),
-    }
-}
-
 /// 按知识点 + 难度确定性生成练习条目（供 practice::generate 与 exam::compose 共用）。
 pub fn build_item(knowledge_point: &str, difficulty: Difficulty) -> Option<PracticeItem> {
     let kp = knowledge_point.trim();
@@ -113,13 +54,13 @@ pub fn build_item(knowledge_point: &str, difficulty: Difficulty) -> Option<Pract
     }
 }
 
-fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+pub(crate) fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|n| haystack.contains(n))
 }
 
 // ---------- 模板一：三角形全等判定（几何，含 diagram_spec） ----------
 
-fn triangle_congruence(difficulty: Difficulty) -> PracticeItem {
+pub(crate) fn triangle_congruence(difficulty: Difficulty) -> PracticeItem {
     let (template_id, question, answer, diagram) = match difficulty {
         Difficulty::Basic => (
             "triangle_sss",
@@ -150,7 +91,7 @@ fn triangle_congruence(difficulty: Difficulty) -> PracticeItem {
     }
 }
 
-fn sss_diagram() -> Value {
+pub(crate) fn sss_diagram() -> Value {
     json!({
         "points": {
             "A": [0, 0], "B": [3, 0], "C": [3, 4],
@@ -180,7 +121,7 @@ fn sss_diagram() -> Value {
     })
 }
 
-fn sas_diagram() -> Value {
+pub(crate) fn sas_diagram() -> Value {
     json!({
         "points": {
             "A": [0, 0], "B": [3, 0], "C": [0, 4],
@@ -210,7 +151,7 @@ fn sas_diagram() -> Value {
     })
 }
 
-fn isosceles_median_diagram() -> Value {
+pub(crate) fn isosceles_median_diagram() -> Value {
     json!({
         "points": {
             "A": [0, 0], "B": [6, 0], "C": [3, 4], "D": [3, 0],
@@ -236,7 +177,7 @@ fn isosceles_median_diagram() -> Value {
 
 // ---------- 模板二：绝对值 ----------
 
-fn absolute_value(difficulty: Difficulty) -> PracticeItem {
+pub(crate) fn absolute_value(difficulty: Difficulty) -> PracticeItem {
     let (template_id, question, answer) = match difficulty {
         Difficulty::Basic => (
             "abs_evaluate",
@@ -258,7 +199,7 @@ fn absolute_value(difficulty: Difficulty) -> PracticeItem {
 
 // ---------- 模板三：一般现在时三单 ----------
 
-fn present_simple(difficulty: Difficulty) -> PracticeItem {
+pub(crate) fn present_simple(difficulty: Difficulty) -> PracticeItem {
     let (template_id, question, answer) = match difficulty {
         Difficulty::Basic => (
             "present_simple_go",
@@ -283,75 +224,5 @@ fn present_simple(difficulty: Difficulty) -> PracticeItem {
         question_text: question.into(),
         answer_spec: answer.into(),
         diagram_spec: None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn schema_parses_all_difficulties() {
-        for d in ["basic", "variant", "advanced"] {
-            let p: GenerateParams = serde_json::from_value(json!({
-                "knowledge_point": "绝对值",
-                "difficulty": d,
-            }))
-            .unwrap();
-            assert_eq!(
-                serde_json::to_value(p.difficulty.unwrap()).unwrap(),
-                json!(d)
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn generate_returns_matched_item() {
-        let out = generate_handler(json!({
-            "knowledge_point": "三角形全等判定",
-            "difficulty": "basic",
-        }))
-        .await
-        .unwrap();
-        assert_eq!(out["matched"], true);
-        assert_eq!(out["item"]["template_id"], "triangle_sss");
-        let spec = out["item"]["diagram_spec"].clone();
-        assert!(spec["points"].is_object());
-        assert!(spec["objects"].as_array().unwrap().len() >= 6);
-    }
-
-    #[tokio::test]
-    async fn generate_returns_supported_list_on_miss() {
-        let out = generate_handler(json!({
-            "knowledge_point": "量子力学",
-            "difficulty": "variant",
-        }))
-        .await
-        .unwrap();
-        assert_eq!(out["matched"], false);
-        assert_eq!(out["supported"].as_array().unwrap().len(), 3);
-    }
-
-    #[test]
-    fn three_difficulties_differ_per_template() {
-        let qs: Vec<_> = [Difficulty::Basic, Difficulty::Variant, Difficulty::Advanced]
-            .iter()
-            .map(|d| absolute_value(*d).question_text)
-            .collect();
-        assert!(qs.windows(2).all(|w| w[0] != w[1]));
-
-        let geo: Vec<_> = [Difficulty::Basic, Difficulty::Variant, Difficulty::Advanced]
-            .iter()
-            .map(|d| triangle_congruence(*d).template_id.clone())
-            .collect();
-        assert_eq!(geo.len(), 3);
-        assert!(geo[0] != geo[1] && geo[1] != geo[2]);
-    }
-
-    #[test]
-    fn geometry_diagram_has_labels() {
-        let item = triangle_congruence(Difficulty::Advanced);
-        let spec = item.diagram_spec.unwrap();
-        assert_eq!(spec["labels"].as_array().unwrap().len(), 4);
     }
 }

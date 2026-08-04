@@ -1,4 +1,8 @@
-//! 内核模块入口（Rust 2018 布局，无 mod.rs）。
+//! 内核模块入口（Linux 内核组织风格：目录即内核插件）。
+//!
+//! 内核插件（信任边界内）：`storage/`（会话/错题/审计）、`memory/`（记忆）、
+//! `compute/`（验算桥接）、`model/`（双模型适配）；公共契约见 `services.rs`。
+//! 用户插件见 `crate::plugin/`（每个插件一个目录，入口 mod.rs 承载插件 info）。
 
 pub mod audit;
 pub mod compute;

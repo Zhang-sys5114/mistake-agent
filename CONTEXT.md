@@ -77,11 +77,11 @@ _Avoid_: 事件（Event 指面向 GUI 的播报）
 _Avoid_: 全名（指内部 namespace::tool）
 
 **Session scheduler（会话调度）**:
-独立的内核级模块（非服务插件），负责 SessionKey 派生、会话生命周期与任务层切换；任务层由独立守卫模型在回合结束与新消息到达时决策，以会话目标为依据；持久化委托 storage 服务。
+独立的内核级模块（非服务插件），负责 SessionKey 派生、会话生命周期与任务层切换；切换决策归主模型（回合结束 LlmTurnDecider + 回合内 session::switch 工具，ADR-0030）；持久化委托 storage 服务。
 _Avoid_: 会话管理（易与用户可见的管理界面混淆）
 
 **Guard model（守卫模型）**:
-独立于主模型的调度模型，仅由 Session scheduler 调用：回合结束时一次、用户发消息开启新回合时一次；输入含当前会话目标与紧凑摘要，输出 continue / update_goal / start_new 的结构化决定；无工具、不进主模型上下文、结果受审计；解析失败/模型错误一律 continue 保底。
+（已退役，ADR-0030）原设计由 Session scheduler 调用的独立调度模型；现切换决策全部归主模型：回合结束由 LlmTurnDecider 判断 continue / update_goal / start_new（失败降级 continue），回合内由主模型调用 session::switch 工具主动切换。
 _Avoid_: 调度模型（易与主模型混淆）
 
 **Goal（会话目标）**:

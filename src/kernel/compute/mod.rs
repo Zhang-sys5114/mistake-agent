@@ -1,4 +1,5 @@
 //! compute 服务：契约 + BridgeCompute（kernel → GUI WebView 内 Pyodide 的 RPC 桥接）。
+//! 内核插件信息：ServiceId::Compute；能力 = Python 验算（WASM 沙箱，超时/取消/审计在 kernel 侧）。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

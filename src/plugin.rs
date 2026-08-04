@@ -9,6 +9,7 @@ pub mod hello;
 pub mod memory;
 pub mod practice;
 pub mod report;
+pub mod session;
 pub mod tracking;
 
 /// 编译期内置插件清单（ADR-0002：不做动态加载）。
@@ -22,5 +23,6 @@ pub fn builtin_plugins() -> Vec<PluginDescriptor> {
         report::descriptor(),
         exam::descriptor(),
         tracking::descriptor(),
+        session::descriptor(),
     ]
 }

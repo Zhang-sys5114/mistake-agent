@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::kernel::message::{Message, MessageId};
-use crate::kernel::prompt::{guard_prompt, summarize_prompt};
+use crate::kernel::prompt::{summarize_prompt, turn_decider_prompt};
 use crate::kernel::services::{
     AbortSignal, ModelError, ModelKind, ModelRequest, ModelResponse, ModelService, ResponseFormat,
     SessionStore, StorageError,
@@ -148,22 +148,25 @@ impl GuardModel for StubGuard {
     }
 }
 
-/// 生产守卫：独立小模型调用（默认复用主模型）。
-/// 模型错误 / 输出无法解析 / 超时一律由调度层降级为 Continue（存疑即继续，Q17）。
-pub struct LlmGuard {
+/// 回合结束决策器：由主模型在回合结束时判断 continue / update_goal / start_new。
+/// 守卫模型退役（ADR-0030）：切换决策全部归主模型——回合内经 session::switch 工具主动发起，
+/// 回合结束经本决策器判断；模型错误 / 输出无法解析 / 超时一律降级 Continue（存疑即继续）。
+pub struct LlmTurnDecider {
     model: Arc<dyn ModelService>,
     timeout: Duration,
     retries: usize,
     retry_delay: Duration,
+    max_input_chars: usize,
 }
 
-impl LlmGuard {
+impl LlmTurnDecider {
     pub fn new(model: Arc<dyn ModelService>) -> Self {
         Self {
             model,
             timeout: Duration::from_secs(60),
             retries: 2,
             retry_delay: Duration::from_secs(2),
+            max_input_chars: 12000,
         }
     }
 
@@ -246,17 +249,20 @@ fn parse_guard_decision(text: &str) -> Option<GuardDecision> {
 }
 
 #[async_trait]
-impl GuardModel for LlmGuard {
+impl GuardModel for LlmTurnDecider {
     async fn decide(&self, input: &GuardInput) -> Result<GuardDecision, GuardError> {
+        let mut transcript = input.summary.clone();
+        if transcript.len() > self.max_input_chars {
+            transcript = transcript.chars().take(self.max_input_chars).collect();
+        }
         let payload = json!({
             "goal": input.goal.as_ref().map(|g| &g.text),
-            "summary": input.summary,
-            "new_text": input.new_text,
+            "transcript": transcript,
         });
         let request = ModelRequest {
             model: ModelKind::Main,
             messages: vec![
-                Message::system(guard_prompt()),
+                Message::system(turn_decider_prompt()),
                 Message::user(serde_json::to_string(&payload).unwrap_or_default()),
             ],
             tools: None,
@@ -541,7 +547,7 @@ pub struct TurnContext {
 
 pub struct SessionScheduler {
     store: Arc<dyn SessionStore>,
-    guard: Arc<dyn GuardModel>,
+    decider: Arc<dyn GuardModel>,
     clock: Arc<dyn Clock>,
     summarizer: Arc<dyn Summarizer>,
     bus: InterruptBus,
@@ -555,14 +561,14 @@ pub struct SessionScheduler {
 impl SessionScheduler {
     pub fn new(
         store: Arc<dyn SessionStore>,
-        guard: Arc<dyn GuardModel>,
+        decider: Arc<dyn GuardModel>,
         clock: Arc<dyn Clock>,
         summarizer: Arc<dyn Summarizer>,
         bus: InterruptBus,
     ) -> Self {
         Self {
             store,
-            guard,
+            decider,
             clock,
             summarizer,
             bus,
@@ -581,7 +587,9 @@ impl SessionScheduler {
         self.bus.clone()
     }
 
-    /// 新消息到达：空闲超时检查 → 守卫判断 → 返回回合上下文。
+    /// 新消息到达：空闲超时检查 → 返回回合上下文。
+    /// 切换决策不再在此发生（ADR-0030）：新消息默认继续当前会话；
+    /// 切换只由「回合结束决策器」或主模型调用的 session::switch 工具发起。
     pub async fn on_new_message(&self, text: &str) -> Result<TurnContext, SchedulerError> {
         let now = self.clock.now();
         let metas = self.store.list_sessions().await?;
@@ -589,87 +597,35 @@ impl SessionScheduler {
             .iter()
             .find(|m| m.status == SessionStatus::Active)
             .cloned();
-
-        let decision = match &active {
-            None => Some(GuardDecision::StartNew(Goal {
-                text: text.chars().take(40).collect(),
-            })),
-            Some(meta) => {
-                let idle = now - meta.last_activity_at
-                    > chrono::Duration::from_std(self.idle_timeout)
-                        .unwrap_or(chrono::Duration::hours(12));
-                if idle {
-                    Some(GuardDecision::StartNew(Goal {
+        let Some(meta) = active else {
+            // 首条消息：建新会话（不产生切换中断）。
+            let (_, to) = self
+                .switch_session(
+                    None,
+                    Goal {
                         text: text.chars().take(40).collect(),
-                    }))
-                } else {
-                    let summary = self
-                        .summarizer
-                        .summarize(&self.store.read_path(&meta.key).await?, meta.goal.as_ref())
-                        .await;
-                    let input = GuardInput {
-                        goal: meta.goal.clone(),
-                        summary,
-                        new_text: Some(text.to_string()),
-                    };
-                    match self.guard.decide(&input).await {
-                        Ok(d) => {
-                            log::info!("守卫决策（新消息）：{d:?}");
-                            Some(d)
-                        }
-                        Err(e) => {
-                            log::warn!("守卫模型失败，按 continue 处理：{e}");
-                            Some(GuardDecision::Continue)
-                        }
-                    }
-                }
-            }
+                    },
+                    now,
+                )
+                .await?;
+            return self.append_user(&to, text).await;
         };
 
-        match decision {
-            Some(GuardDecision::Continue) => {
-                self.continue_in(&active.expect("continue 需要活动会话"), text, now)
-                    .await
-            }
-            Some(GuardDecision::UpdateGoal(goal)) => {
-                let meta = active.expect("update_goal 需要活动会话");
-                self.store.set_goal(&meta.key, &goal).await?;
-                let ctx = self.continue_in(&meta, text, now).await?;
-                self.bus.send(Interrupt::GoalUpdated { goal });
-                Ok(ctx)
-            }
-            Some(GuardDecision::StartNew(goal)) => {
-                // 切换频率护栏前置：超限时降级为继续旧会话（存疑即继续），
-                // 绝不在归档后再报错（避免丢消息与状态不一致）。
-                let to = if let Some(meta) = active.as_ref() {
-                    if !self.switch_allowed(now) {
-                        log::warn!(
-                            "切换过于频繁（1 小时内 >{} 次），降级 continue",
-                            self.max_switches_per_hour
-                        );
-                        return self.continue_in(meta, text, now).await;
-                    }
-                    let (from, to) = self.switch_session(Some(meta), goal.clone(), now).await?;
-                    self.record_switch(now);
-                    self.bus.send(Interrupt::SessionSwitched { from, to, goal });
-                    to
-                } else {
-                    // 首条消息（无旧会话）：只建新会话，不产生切换中断。
-                    let (_, to) = self.switch_session(None, goal.clone(), now).await?;
-                    to
-                };
-                let mut user_msg = Message::user(text);
-                let path = self.store.read_path(&to).await?;
-                user_msg.parent_id = path.last().map(|m| m.id);
-                self.store.append_message(&to, &user_msg).await?;
-                self.store.set_active_path(&to, Some(user_msg.id)).await?;
-                Ok(TurnContext {
-                    session_key: to,
-                    messages: self.store.read_path(&to).await?,
-                })
-            }
-            None => Err(SchedulerError::Internal("守卫没有返回决定".into())),
+        let idle = now - meta.last_activity_at
+            > chrono::Duration::from_std(self.idle_timeout).unwrap_or(chrono::Duration::hours(12));
+        if idle {
+            // 系统级空闲超时：开新会话（不依赖模型决策）。
+            let goal = Goal {
+                text: text.chars().take(40).collect(),
+            };
+            let (from, to) = self.switch_session(Some(&meta), goal.clone(), now).await?;
+            self.record_switch(now);
+            self.bus.send(Interrupt::SessionSwitched { from, to, goal });
+            return self.append_user(&to, text).await;
         }
+
+        // 默认继续当前会话（切换决策归主模型）。
+        self.continue_in(&meta, text, now).await
     }
 
     /// 在活动会话中追加用户消息并推进 active_path。
@@ -693,7 +649,25 @@ impl SessionScheduler {
         })
     }
 
-    /// 回合结束：只允许 Continue / UpdateGoal（Q17：StartNew 不在回合结束触发）。
+    /// 在指定会话中追加用户消息并推进 active_path（新建/切换后使用）。
+    async fn append_user(
+        &self,
+        key: &SessionKey,
+        text: &str,
+    ) -> Result<TurnContext, SchedulerError> {
+        let mut user_msg = Message::user(text);
+        let path = self.store.read_path(key).await?;
+        user_msg.parent_id = path.last().map(|m| m.id);
+        self.store.append_message(key, &user_msg).await?;
+        self.store.set_active_path(key, Some(user_msg.id)).await?;
+        Ok(TurnContext {
+            session_key: *key,
+            messages: self.store.read_path(key).await?,
+        })
+    }
+
+    /// 回合结束：主模型决策 continue / update_goal / start_new（ADR-0030）。
+    /// start_new 时立即执行切换（归档 + 历史携带）；决策失败默认 continue。
     pub async fn on_turn_end(
         &self,
         key: &SessionKey,
@@ -705,19 +679,27 @@ impl SessionScheduler {
             .await?
             .ok_or_else(|| SchedulerError::Internal("会话不存在".into()))?;
         let path = self.store.read_path(key).await?;
-        let summary = self.summarizer.summarize(&path, meta.goal.as_ref()).await;
+        // 决策输入：最近对话文本（不额外生成摘要）。
+        let transcript = path
+            .iter()
+            .rev()
+            .take(30)
+            .rev()
+            .map(message_text)
+            .collect::<Vec<_>>()
+            .join("\n");
         let input = GuardInput {
             goal: meta.goal.clone(),
-            summary,
+            summary: transcript,
             new_text: None,
         };
-        let decision = match self.guard.decide(&input).await {
+        let decision = match self.decider.decide(&input).await {
             Ok(d) => {
-                log::info!("守卫决策（回合结束）：{d:?}");
+                log::info!("回合结束决策：{d:?}");
                 d
             }
             Err(e) => {
-                log::warn!("回合结束守卫模型失败，按 continue 处理：{e}");
+                log::warn!("回合结束决策失败，按 continue 处理：{e}");
                 GuardDecision::Continue
             }
         };
@@ -726,8 +708,19 @@ impl SessionScheduler {
                 self.store.set_goal(key, &goal).await?;
                 self.bus.send(Interrupt::GoalUpdated { goal });
             }
-            GuardDecision::StartNew(_) => {
-                log::warn!("守卫在回合结束返回 StartNew，按设计忽略（Q17）");
+            GuardDecision::StartNew(goal) => {
+                if goal.text.trim().is_empty() {
+                    log::warn!("回合结束决策返回空目标，忽略 start_new");
+                    return Ok(());
+                }
+                let now = self.clock.now();
+                if !self.switch_allowed(now) {
+                    log::warn!("切换过于频繁，回合结束 start_new 降级忽略");
+                    return Ok(());
+                }
+                let (from, to) = self.switch_session(Some(&meta), goal.clone(), now).await?;
+                self.record_switch(now);
+                self.bus.send(Interrupt::SessionSwitched { from, to, goal });
             }
             GuardDecision::Continue => {}
         }
@@ -807,6 +800,49 @@ impl SessionScheduler {
             .lock()
             .expect("switch lock poisoned")
             .push_back(now);
+    }
+}
+
+/// 回合内主动切换会话（主模型 session::switch 工具调用；ADR-0030）。
+#[async_trait]
+pub trait SessionSwitch: Send + Sync {
+    async fn switch(&self, goal: &str) -> Result<SessionKey, String>;
+}
+
+#[async_trait]
+impl SessionSwitch for SessionScheduler {
+    async fn switch(&self, goal: &str) -> Result<SessionKey, String> {
+        let goal = goal.trim();
+        if goal.is_empty() {
+            return Err("新会话目标不能为空".into());
+        }
+        let now = self.clock.now();
+        let metas = self
+            .store
+            .list_sessions()
+            .await
+            .map_err(|e| e.to_string())?;
+        let active = metas
+            .iter()
+            .find(|m| m.status == SessionStatus::Active)
+            .cloned()
+            .ok_or_else(|| "当前没有活动会话".to_string())?;
+        if !self.switch_allowed(now) {
+            return Err(format!(
+                "切换过于频繁（1 小时内 >{} 次）",
+                self.max_switches_per_hour
+            ));
+        }
+        let goal = Goal {
+            text: goal.to_string(),
+        };
+        let (from, to) = self
+            .switch_session(Some(&active), goal.clone(), now)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.record_switch(now);
+        self.bus.send(Interrupt::SessionSwitched { from, to, goal });
+        Ok(to)
     }
 }
 
@@ -941,21 +977,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn guard_keyword_starts_new_session() {
+    async fn new_message_continues_current_session() {
         let (scheduler, _, store, _) = setup();
         let first = scheduler.on_new_message("帮我看看这道题").await.unwrap();
         let second = scheduler.on_new_message("生成周复习报告").await.unwrap();
-        assert_ne!(first.session_key, second.session_key);
+        // ADR-0030：新消息默认继续当前会话；切换决策归主模型。
+        assert_eq!(first.session_key, second.session_key);
         let metas = store.list_sessions().await.unwrap();
-        let first_meta = metas.iter().find(|m| m.key == first.session_key).unwrap();
-        assert_eq!(first_meta.status, SessionStatus::Archived);
+        assert_eq!(metas.len(), 1, "不应自动切换新会话");
+        assert_eq!(metas[0].status, SessionStatus::Active, "唯一会话保持活动");
     }
 
     #[tokio::test]
     async fn interrupt_bus_receives_switch() {
         let (scheduler, _, _, bus) = setup();
         scheduler.on_new_message("帮我看看这道题").await.unwrap();
-        scheduler.on_new_message("生成周复习报告").await.unwrap();
+        scheduler.switch("批改英语作业").await.unwrap();
         let interrupts = bus.take_all();
         assert!(
             interrupts
@@ -978,18 +1015,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn llm_guard_returns_start_new() {
+    async fn llm_turn_decider_returns_start_new() {
         let model = Arc::new(ScriptedModel::new(vec![Ok(
             r#"{"action":"start_new","goal":"批改英语作业"}"#.into(),
         )]));
-        let guard = LlmGuard::new(model);
-        let decision = guard
+        let decider = LlmTurnDecider::new(model);
+        let decision = decider
             .decide(&GuardInput {
                 goal: Some(Goal {
                     text: "复习数学".into(),
                 }),
-                summary: "..".into(),
-                new_text: Some("帮我批改英语作业".into()),
+                summary: "最近对话：做完三道绝对值题".into(),
+                new_text: None,
             })
             .await
             .unwrap();
@@ -1000,26 +1037,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scheduler_falls_back_to_continue_on_guard_failure() {
+    async fn turn_end_decision_failure_falls_back_to_continue() {
         let store = MemoryStorage::new();
         let clock = FakeClock::new(Utc::now());
         let bus = InterruptBus::new();
-        let guard = Arc::new(LlmGuard::new(Arc::new(ScriptedModel::new(vec![
-            Ok(r#"{"action":"continue","goal":""}"#.into()),
+        let decider = Arc::new(LlmTurnDecider::new(Arc::new(ScriptedModel::new(vec![
             Err("模型 500".into()),
         ]))));
         let scheduler = SessionScheduler::new(
             Arc::new(store.clone()),
-            guard,
+            decider,
             Arc::new(clock.clone()),
             Arc::new(StubSummarizer),
             bus.clone(),
         );
         let first = scheduler.on_new_message("帮我看看这道题").await.unwrap();
-        let second = scheduler.on_new_message("换个目标继续").await.unwrap();
-        // 守卫失败 → 存疑即继续：不切会话、消息照常落盘。
-        assert_eq!(first.session_key, second.session_key);
-        assert_eq!(store.read_all(&first.session_key).await.unwrap().len(), 2);
+        // 回合结束决策失败 → 存疑即继续：不切会话。
+        scheduler
+            .on_turn_end(&first.session_key, &[])
+            .await
+            .unwrap();
+        let metas = store.list_sessions().await.unwrap();
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].status, SessionStatus::Active);
         let leftovers = bus.take_all();
         assert!(leftovers.is_empty(), "意外中断：{leftovers:?}");
     }
@@ -1039,20 +1079,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn llm_guard_retries_transient_errors() {
-        // 第一次 503 → 重试成功，守卫返回 start_new。
+    async fn llm_turn_decider_retries_transient_errors() {
+        // 第一次 503 → 重试成功，决策器返回 start_new。
         let model = Arc::new(ScriptedModel::new(vec![
             Err("HTTP 503 Service Unavailable".into()),
             Ok(r#"{"action":"start_new","goal":"批改英语作业"}"#.into()),
         ]));
-        let guard = LlmGuard::new(model).with_retry(2, Duration::ZERO);
-        let decision = guard
+        let decider = LlmTurnDecider::new(model).with_retry(2, Duration::ZERO);
+        let decision = decider
             .decide(&GuardInput {
                 goal: Some(Goal {
                     text: "复习数学".into(),
                 }),
-                summary: "..".into(),
-                new_text: Some("帮我批改英语作业".into()),
+                summary: "最近对话：作业批改完成".into(),
+                new_text: None,
             })
             .await
             .unwrap();
@@ -1083,7 +1123,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn frequency_limit_falls_back_to_continue() {
+    async fn frequency_limit_rejects_excess_switches() {
         let store = MemoryStorage::new();
         let clock = FakeClock::new(Utc::now());
         let bus = InterruptBus::new();
@@ -1094,31 +1134,20 @@ mod tests {
             Arc::new(StubSummarizer),
             bus.clone(),
         );
-        // 首条建会话；随后 5 条"新会话"触发 5 次切换（达到 1 小时上限）。
+        // 首条建会话；随后主模型主动切换 5 次（达到 1 小时上限）。
         let first = scheduler.on_new_message("帮我看看这道题").await.unwrap();
         let mut last_key = first.session_key;
         for _ in 0..5 {
-            let ctx = scheduler.on_new_message("新会话").await.unwrap();
-            last_key = ctx.session_key;
+            last_key = scheduler.switch("新目标").await.unwrap();
         }
-        // 第 7 条超限：降级 continue，不报错、消息不丢、仍落在最近活动会话。
-        let ctx = scheduler.on_new_message("新会话").await.unwrap();
-        assert_eq!(ctx.session_key, last_key);
+        // 第 6 次超限：拒绝并返回错误（调用方/模型可感知），不归档任何会话。
+        assert!(scheduler.switch("再切一次").await.is_err());
         let metas = store.list_sessions().await.unwrap();
         let active = metas
             .iter()
             .find(|m| m.status == SessionStatus::Active)
             .unwrap();
         assert_eq!(active.key, last_key);
-        let msgs = store.read_all(&last_key).await.unwrap();
-        assert!(
-            msgs.iter().any(|m| matches!(
-                &m.kind,
-                crate::kernel::message::MessageKind::User { text, .. } if text == "新会话"
-            )),
-            "降级 continue 时用户消息必须落盘"
-        );
-        let metas = store.list_sessions().await.unwrap();
         assert_eq!(metas.len(), 6, "1 个初始会话 + 5 次切换");
     }
 
@@ -1127,8 +1156,8 @@ mod tests {
         let (scheduler, _, store, _) = setup();
         scheduler.on_new_message("帮我看看这道题").await.unwrap();
         scheduler.on_new_message("继续讲第二题").await.unwrap();
-        let ctx = scheduler.on_new_message("生成周复习报告").await.unwrap();
-        let msgs = store.read_path(&ctx.session_key).await.unwrap();
+        let new_key = scheduler.switch("批改英语作业").await.unwrap();
+        let msgs = store.read_path(&new_key).await.unwrap();
         assert!(
             matches!(
                 msgs[0].kind,
@@ -1141,15 +1170,15 @@ mod tests {
                 msgs.last().unwrap().kind,
                 crate::kernel::message::MessageKind::User { .. }
             ),
-            "新会话以当前用户消息结尾"
+            "新会话以梗概开头"
         );
         let user_count = msgs
             .iter()
             .filter(|m| matches!(m.kind, crate::kernel::message::MessageKind::User { .. }))
             .count();
         assert!(
-            user_count >= 3,
-            "新会话应携带旧消息副本（2 条）+ 当前消息：实际 {user_count}"
+            user_count >= 2,
+            "新会话应携带旧消息副本（2 条）：实际 {user_count}"
         );
         // parent 链连续：从末尾回溯能一路走到根（副本首条 parent=None）。
         let by_id: std::collections::HashMap<_, _> = msgs.iter().map(|m| (m.id, m)).collect();

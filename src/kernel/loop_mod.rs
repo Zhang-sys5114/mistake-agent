@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::kernel::audit::{AuditRecord, Auditor};
 use crate::kernel::contract::{ToolError, ToolErrorCode};
@@ -18,7 +18,7 @@ use crate::kernel::services::{
     AbortSignal, ItemKind, ModelChunk, ModelKind, ModelRequest, ModelService, TokenUsage,
     ToolChoice, ToolSchema,
 };
-use crate::kernel::session::{InterruptBus, Summarizer};
+use crate::kernel::session::{InterruptBus, SessionSwitch, Summarizer};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -101,6 +101,8 @@ pub struct AgentLoop {
     context_limit_tokens: usize,
     /// 压缩时保留的最近消息条数。
     compaction_keep_last: usize,
+    /// 回合内主动切换会话（session::switch 工具）。
+    switcher: Option<Arc<dyn SessionSwitch>>,
 }
 
 impl AgentLoop {
@@ -111,6 +113,7 @@ impl AgentLoop {
         events: Arc<dyn EventSink>,
         summarizer: Arc<dyn Summarizer>,
         bus: InterruptBus,
+        switcher: Option<Arc<dyn SessionSwitch>>,
     ) -> Self {
         Self {
             model,
@@ -123,6 +126,7 @@ impl AgentLoop {
             bus,
             context_limit_tokens: 131_072,
             compaction_keep_last: 15,
+            switcher,
         }
     }
 
@@ -402,6 +406,25 @@ impl AgentLoop {
                 });
                 let result = if full_name.is_empty() {
                     Err(ToolError::unknown_tool(&wire_name))
+                } else if full_name == "session::switch" {
+                    // 回合内主动切换（ADR-0030）：执行会话切换并回填新会话键。
+                    match &self.switcher {
+                        Some(s) => {
+                            let goal = params
+                                .get("goal")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            match s.switch(&goal).await {
+                                Ok(key) => Ok(json!({
+                                    "switched": true,
+                                    "session_key": key.to_string(),
+                                })),
+                                Err(e) => Err(ToolError::handler(e)),
+                            }
+                        }
+                        None => Err(ToolError::handler("会话切换不可用")),
+                    }
                 } else {
                     self.dispatch
                         .call_tool(&full_name, params.clone(), Caller::Model)
@@ -604,6 +627,7 @@ mod tests {
                 events.clone(),
                 Arc::new(StubSummarizer),
                 bus,
+                None,
             )
             .with_compaction_limits(context_limit, 2),
         );

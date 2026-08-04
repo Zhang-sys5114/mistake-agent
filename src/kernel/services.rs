@@ -1,6 +1,8 @@
 //! 内核服务契约与受控句柄（ADR-0001/0014/0016；Q5/Q6/Q8/Q9/Q10 定稿）。
 //!
-//! - `ServiceHandles` 是类型化封闭容器，只装四个服务；
+//! 本文件是**内核插件公共契约聚合**（对应 Linux 内核的公共头/注册表入口）：
+//! - `ServiceId` 内核插件标识（Storage/Memory/Compute/Model）；
+//! - `ServiceHandles` 类型化封闭容器，只装四个服务；
 //! - 注入给插件的 `*Handle` 是受控视图（如 StorageHandle 只有错题本）。
 
 use std::collections::HashSet;

@@ -22,8 +22,8 @@ use crate::kernel::services::{
     ServiceHandles, SessionStore, StorageHandle,
 };
 use crate::kernel::session::{
-    Interrupt, InterruptBus, LlmGuard, LlmSummarizer, SessionKey, SessionScheduler, SessionStatus,
-    SystemClock,
+    Interrupt, InterruptBus, LlmSummarizer, LlmTurnDecider, SessionKey, SessionScheduler,
+    SessionStatus, SessionSwitch, SystemClock,
 };
 use crate::kernel::settings::Settings;
 use crate::kernel::storage::{AnyStorage, FileStorage};
@@ -222,6 +222,13 @@ impl Kernel {
         ));
         // 中断总线必须由 scheduler 与 loop 共享：scheduler 发环境变更，loop 回合边界消费。
         let interrupt_bus = InterruptBus::new();
+        let scheduler = Arc::new(SessionScheduler::new(
+            storage.clone(),
+            Arc::new(LlmTurnDecider::new(main_service.clone())),
+            Arc::new(SystemClock),
+            Arc::new(LlmSummarizer::new(main_service.clone())),
+            interrupt_bus.clone(),
+        ));
         let loop_engine = Arc::new(AgentLoop::new(
             main_service.clone(),
             dispatch.clone(),
@@ -229,14 +236,7 @@ impl Kernel {
             events.clone(),
             Arc::new(LlmSummarizer::new(main_service.clone())),
             interrupt_bus.clone(),
-        ));
-
-        let scheduler = Arc::new(SessionScheduler::new(
-            storage.clone(),
-            Arc::new(LlmGuard::new(main_service.clone())),
-            Arc::new(SystemClock),
-            Arc::new(LlmSummarizer::new(main_service.clone())),
-            interrupt_bus,
+            Some(scheduler.clone() as Arc<dyn SessionSwitch>),
         ));
 
         Ok(Arc::new(Self {

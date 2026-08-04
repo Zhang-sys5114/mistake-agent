@@ -1,4 +1,6 @@
 //! memory 服务（ADR-0008）：目录式记忆路由。
+//! 内核插件信息：ServiceId::Memory；能力 = save/show/remove（路径校验、子树删除）；
+//! 生产实现 = 文件持久化（数据根 memory/），InMemoryMemory 保留供测试。
 //! - `InMemoryMemory`：测试/内存回退实现；
 //! - `FileMemoryService`：数据根目录 memory/ 下的文件持久化（M2 生产实现）。
 
