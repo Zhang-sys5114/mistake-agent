@@ -8,6 +8,9 @@ const loading = ref(true);
 const saving = ref(false);
 const error = ref("");
 const saved = ref(false);
+const balance = ref(null);
+const balanceLoading = ref(false);
+const balanceError = ref("");
 
 const form = reactive({
   log_level: "info",
@@ -38,6 +41,18 @@ async function load() {
   }
 }
 
+async function loadBalance() {
+  balanceLoading.value = true;
+  balanceError.value = "";
+  try {
+    balance.value = await props.kernel.call("check_balance", {}, 20000);
+  } catch (e) {
+    balanceError.value = `余额查询失败：${e.message}`;
+  } finally {
+    balanceLoading.value = false;
+  }
+}
+
 async function save() {
   saving.value = true;
   error.value = "";
@@ -63,6 +78,7 @@ async function save() {
     form.main.api_key = "";
     form.vision.api_key = "";
     await load();
+    await loadBalance();
   } catch (e) {
     error.value = `保存失败：${e.message}`;
   } finally {
@@ -70,7 +86,14 @@ async function save() {
   }
 }
 
-onMounted(load);
+function money(symbol, currency) {
+  return currency === "CNY" ? `¥${symbol}` : `${symbol} ${currency || ""}`.trim();
+}
+
+onMounted(() => {
+  load();
+  loadBalance();
+});
 </script>
 
 <template>
@@ -88,6 +111,83 @@ onMounted(load);
     <p v-if="saved" class="alert success" role="status">
       <Icon icon="mdi:check-circle-outline" width="18" />已保存，模型配置即时生效。
     </p>
+
+    <section class="card balance-card">
+      <div class="balance-head">
+        <h3>
+          <span class="section-icon"><Icon icon="mdi:wallet-outline" width="18" /></span>账户余额
+        </h3>
+        <button
+          class="btn ghost"
+          :disabled="balanceLoading"
+          :title="'刷新余额'"
+          @click="loadBalance"
+        >
+          <Icon icon="mdi:refresh" width="18" :class="{ spin: balanceLoading }" />
+          {{ balanceLoading ? "查询中…" : "刷新" }}
+        </button>
+      </div>
+
+      <p v-if="balanceError" class="alert" role="alert">
+        <Icon icon="mdi:alert-circle-outline" width="18" />{{ balanceError }}
+      </p>
+      <div v-else-if="balance" class="balance-grid">
+        <div class="balance-item">
+          <span class="balance-label">
+            <Icon icon="mdi:robot-outline" width="16" />DeepSeek（主模型）
+          </span>
+          <template v-if="!balance.main?.configured">
+            <span class="balance-value muted">
+              <Icon icon="mdi:key-off-outline" width="16" />未配置密钥
+            </span>
+          </template>
+          <template v-else-if="balance.main?.ok">
+            <span class="balance-value">
+              {{ money(balance.main.data.total_balance, balance.main.data.currency) }}
+            </span>
+            <span class="balance-note">
+              可用：
+              <Icon
+                v-if="balance.main.data.is_available"
+                icon="mdi:check-circle-outline"
+                width="14"
+              />
+              <Icon v-else icon="mdi:alert-circle-outline" width="14" />
+              {{ balance.main.data.is_available ? "是" : "否" }}
+            </span>
+          </template>
+          <span v-else class="balance-value error-text">
+            <Icon icon="mdi:alert-circle-outline" width="16" />{{ balance.main.error }}
+          </span>
+        </div>
+        <div class="balance-item">
+          <span class="balance-label">
+            <Icon icon="mdi:image-search-outline" width="16" />SiliconFlow（视觉模型）
+          </span>
+          <template v-if="!balance.vision?.configured">
+            <span class="balance-value muted">
+              <Icon icon="mdi:key-off-outline" width="16" />未配置密钥
+            </span>
+          </template>
+          <template v-else-if="balance.vision?.ok">
+            <span class="balance-value">
+              {{ money(balance.vision.data.balance, "CNY") }}
+            </span>
+            <span class="balance-note">
+              充值 {{ money(balance.vision.data.charge_balance, "CNY") }} · 总额
+              {{ money(balance.vision.data.total_balance, "CNY") }}
+            </span>
+          </template>
+          <span v-else class="balance-value error-text">
+            <Icon icon="mdi:alert-circle-outline" width="16" />{{ balance.vision.error }}
+          </span>
+        </div>
+      </div>
+      <div v-else class="empty">
+        <Icon icon="mdi:loading" width="24" class="spin" />
+        <p>正在查询余额…</p>
+      </div>
+    </section>
 
     <div v-if="loading" class="empty">
       <Icon icon="mdi:loading" width="28" class="spin" />

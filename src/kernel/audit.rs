@@ -42,6 +42,10 @@ pub enum AuditRecord {
         path: String,
     },
     SettingsChanged,
+    BalanceChecked {
+        main_ok: bool,
+        vision_ok: bool,
+    },
     LlmCall {
         provider: String,
         model: String,

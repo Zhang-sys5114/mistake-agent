@@ -5,6 +5,7 @@
 //! 用户插件见 `crate::plugin/`（每个插件一个目录，入口 mod.rs 承载插件 info）。
 
 pub mod audit;
+pub mod balance;
 pub mod compute;
 pub mod context;
 pub mod contract;

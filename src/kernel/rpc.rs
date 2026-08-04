@@ -79,6 +79,8 @@ pub enum Method {
         #[serde(default)]
         model: Option<String>,
     },
+    /// 账户余额查询：DeepSeek /user/balance + SiliconFlow /user/info（只读，不落盘 key）。
+    CheckBalance,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -595,6 +597,21 @@ impl Kernel {
                         error: Some(RpcError::new("connection_failed", e.to_string())),
                     })),
                 }
+            }
+            Method::CheckBalance => {
+                let settings = self.settings.read().expect("settings poisoned").clone();
+                let report = crate::kernel::balance::check_balance(&settings).await;
+                self.auditor.record(AuditRecord::BalanceChecked {
+                    main_ok: report.main.ok,
+                    vision_ok: report.vision.ok,
+                });
+                Ok(Some(RpcFrame::Response {
+                    id: request.id,
+                    result: Some(
+                        serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({})),
+                    ),
+                    error: None,
+                }))
             }
             Method::EditMessage { message_id, text } => {
                 let key = self.active_session_key().await?;

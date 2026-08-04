@@ -363,3 +363,52 @@ async fn memory_tools_roundtrip() {
     );
     eprintln!("memory 工具真实链路通过");
 }
+
+/// 链路 5：余额查询真实 API —— DeepSeek /user/balance + SiliconFlow /user/info。
+#[tokio::test]
+#[ignore]
+async fn check_balance_real_api() {
+    if !real_api_ready() {
+        eprintln!("SKIP: 未配置真实 API key");
+        return;
+    }
+    let events = Arc::new(MemoryEventSink::default());
+    let kernel = Kernel::new(events.clone()).await.expect("kernel 启动失败");
+    let req = RpcRequest {
+        id: 10,
+        method: Method::CheckBalance,
+    };
+    let frame = kernel
+        .handle(req)
+        .await
+        .expect("check_balance 请求失败")
+        .expect("应有响应帧");
+    let value = match frame {
+        mistake_agent::kernel::rpc::RpcFrame::Response { result, error, .. } => {
+            assert!(error.is_none(), "余额查询不应报错：{error:?}");
+            result.expect("应有余额结果")
+        }
+        _ => panic!("余额查询应返回 response 帧"),
+    };
+    let main = &value["main"];
+    let vision = &value["vision"];
+    assert!(main["configured"] == true, "主模型应已配置 key");
+    assert!(main["ok"] == true, "DeepSeek 余额应查询成功：{main}");
+    assert!(
+        main["data"]["total_balance"].as_str().is_some(),
+        "DeepSeek 应有 total_balance：{main}"
+    );
+    assert!(vision["configured"] == true, "视觉模型应已配置 key");
+    assert!(vision["ok"] == true, "SiliconFlow 余额应查询成功：{vision}");
+    assert!(
+        vision["data"]["balance"].as_str().is_some(),
+        "SiliconFlow 应有可用余额：{vision}"
+    );
+    eprintln!(
+        "余额真实链路通过：DeepSeek {} {}；SiliconFlow 可用 {} / 总 {}",
+        main["data"]["currency"].as_str().unwrap_or(""),
+        main["data"]["total_balance"].as_str().unwrap_or(""),
+        vision["data"]["balance"].as_str().unwrap_or(""),
+        vision["data"]["total_balance"].as_str().unwrap_or(""),
+    );
+}
