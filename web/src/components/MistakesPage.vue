@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { Icon } from "@iconify/vue";
 import { renderMarkdown } from "../lib/markdown";
 
@@ -10,9 +10,31 @@ const error = ref("");
 const mistakes = ref([]);
 const subjects = ref([]);
 const subject = ref("");
+const search = ref("");
+const sortBy = ref("time_desc");
 
 const total = ref(0);
 const wrong = ref(0);
+
+/** 搜索：题目/知识点/错因/学生作答 文本模糊过滤。 */
+const filtered = computed(() => {
+  const q = search.value.trim().toLowerCase();
+  let list = mistakes.value;
+  if (q) {
+    list = list.filter((m) =>
+      [m.question, m.knowledge_point, m.analysis, m.student_answer, m.reference_answer]
+        .filter(Boolean)
+        .some((t) => String(t).toLowerCase().includes(q)),
+    );
+  }
+  const sorted = [...list].sort((a, b) => {
+    if (sortBy.value === "subject") {
+      return (a.subject || "").localeCompare(b.subject || "", "zh");
+    }
+    return new Date(b.created_at) - new Date(a.created_at);
+  });
+  return sorted;
+});
 
 async function load() {
   loading.value = true;
@@ -95,6 +117,20 @@ onMounted(load);
       </button>
     </div>
 
+    <div class="mistake-tools">
+      <input
+        v-model="search"
+        class="mistake-search"
+        type="search"
+        placeholder="搜索题目、知识点或错因…"
+        aria-label="搜索错题"
+      />
+      <select v-model="sortBy" class="mistake-sort" aria-label="排序方式">
+        <option value="time_desc">最新在前</option>
+        <option value="subject">按学科</option>
+      </select>
+    </div>
+
     <p v-if="error" class="alert" role="alert">
       <Icon icon="mdi:alert-circle-outline" width="18" />{{ error }}
     </p>
@@ -109,8 +145,13 @@ onMounted(load);
       <p>还没有错题。上传一份作业让 Agent 批改，错题会自动归档到这里。</p>
     </div>
 
+    <div v-else-if="!filtered.length" class="empty">
+      <Icon icon="mdi:file-search-outline" width="36" />
+      <p>没有匹配的错题，换个关键词试试。</p>
+    </div>
+
     <div v-else class="mistake-grid">
-      <article v-for="m in mistakes" :key="String(m.id)" class="card mistake-card">
+      <article v-for="m in filtered" :key="String(m.id)" class="card mistake-card">
         <div class="card-head">
           <span class="badge">{{ m.subject || "未分类" }}</span>
           <span class="badge weak">{{ m.knowledge_point || "未标注知识点" }}</span>

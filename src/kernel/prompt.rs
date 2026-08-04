@@ -32,6 +32,9 @@ pub fn grading_system_prompt() -> &'static str {
      每项字段：number（题号）、question（题目）、student_answer（学生作答）、subject（学科，数学/英语/物理/化学/生物/语文等，无法判断填\"未分类\"）、\
      reference_answer（该题参考答案，可为 null）、correct（是否答对）、score（得分）、total（满分）、\
      knowledge_point（知识点）、analysis（错因分析）。\
+     题目与作答中的公式一律用 LaTeX 标记保留：行内 $...$（如 $x^2$、$\\frac{1}{2}$），化学式用 $\\mathrm{H_2O}$；\
+     不要在 question/reference_answer/analysis 里用图片或 Unicode 伪符号代替公式。\
+     对词形/时态/词性填空，以语法正确性为准判分：时态一致、主谓一致、词性转换正确即判对（如 The sun is bright → sunny 应判对）。\
      即使只有一题，也必须用数组包裹（如 [{...}]），不要输出对象。"
 }
 
