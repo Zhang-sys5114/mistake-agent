@@ -145,10 +145,12 @@ impl Dispatch {
     }
 
     pub async fn call_command(&self, full_name: &str, params: Value) -> Result<Value, ToolError> {
-        let entry = self
-            .registry
-            .ensure_command(full_name)
-            .map_err(|e| ToolError::internal(e.to_string()))?;
+        let entry = match self.registry.ensure_command(full_name) {
+            Ok(e) => e,
+            // 命令通道回退：找不到 Command 时放行同名 Tool（UserAndModel/UserOnly 用户必可调），
+            // 让 GUI 能经 trigger_command 直查工具能力（如错题本 grading::list）。
+            Err(_) => return self.call_tool(full_name, params, Caller::User).await,
+        };
         self.validate(&entry, &params)?;
         let handler = match &entry.handler {
             Handler::Command(h) => h.clone(),

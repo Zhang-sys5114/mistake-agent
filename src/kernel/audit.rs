@@ -20,6 +20,13 @@ pub enum AuditRecord {
     MessageCompleted {
         message_id: MessageId,
     },
+    MessageEdited {
+        message_id: MessageId,
+        branch_id: MessageId,
+    },
+    BranchSwitched {
+        message_id: MessageId,
+    },
     SessionSwitched {
         from: SessionKey,
         to: SessionKey,
@@ -67,6 +74,10 @@ pub enum AuditRecord {
     Retry {
         entry: String,
         attempt: u32,
+    },
+    Compaction {
+        session: String,
+        summarized: usize,
     },
 }
 

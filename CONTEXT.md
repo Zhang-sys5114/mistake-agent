@@ -81,7 +81,7 @@ _Avoid_: 全名（指内部 namespace::tool）
 _Avoid_: 会话管理（易与用户可见的管理界面混淆）
 
 **Guard model（守卫模型）**:
-独立于主模型的调度模型，仅由 Session scheduler 调用：回合结束时一次、用户发消息开启新回合时一次；输入含当前会话目标与紧凑摘要，输出 continue / start_new 的结构化决定；无工具、不进主模型上下文、结果受审计。
+独立于主模型的调度模型，仅由 Session scheduler 调用：回合结束时一次、用户发消息开启新回合时一次；输入含当前会话目标与紧凑摘要，输出 continue / update_goal / start_new 的结构化决定；无工具、不进主模型上下文、结果受审计；解析失败/模型错误一律 continue 保底。
 _Avoid_: 调度模型（易与主模型混淆）
 
 **Goal（会话目标）**:
@@ -101,7 +101,7 @@ _Avoid_: 版本历史、对话树（口语）
 _Avoid_: 当前分支（口语）
 
 **Memory route（记忆路由）**:
-记忆按层级路径组织（学科/知识点/条目），模型通过 memory::save/show/remove 自行浏览与读写；上下文不注入记忆内容，只保留一行入口提示。
+记忆按层级路径组织（学科/知识点/条目），模型通过 memory::save/show/remove 自行浏览与读写；数据根目录 memory/ 文件持久化（重启不丢）；上下文不注入记忆内容，只保留一行入口提示。
 _Avoid_: 记忆检索（暗示向量/全文检索）、长期记忆（过于宽泛）
 
 **Memory entry（记忆条目）**:
@@ -121,7 +121,7 @@ _Avoid_: 模型客户端、直接调 provider
 _Avoid_: 配置文件（实现细节）、系统设置
 
 **Compute backend（验算执行端）**:
-compute 服务的实际执行位置（v2 为 GUI WebView 内的 Pyodide，经 RPC 桥接）；kernel 侧只保留契约、校验与审计。
+compute 服务的实际执行位置（v2 为 GUI WebView 内的 Pyodide，经 Event::ComputeRequest / Method::ComputeResult 桥接，kernel 侧 BridgeCompute 等待回执并做超时/取消/审计）；Pyodide 即 WASM 沙箱。
 _Avoid_: 沙箱（专指隔离形态）
 
 **Audit（审计）**:

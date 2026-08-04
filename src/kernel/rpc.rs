@@ -8,20 +8,22 @@ use tokio::sync::Mutex;
 
 use crate::kernel::audit::{AuditRecord, Auditor};
 use crate::kernel::compute::BridgeCompute;
+use crate::kernel::contract::{CallerPolicy, full_to_wire};
 use crate::kernel::dispatch::Dispatch;
 use crate::kernel::events::{Event, EventSink};
 use crate::kernel::logger::{Logger, LoggerHandle};
 use crate::kernel::loop_mod::{AgentLoop, TurnInput, TurnOutcome};
-use crate::kernel::memory::InMemoryMemory;
+use crate::kernel::memory::{FileMemoryService, InMemoryMemory};
 use crate::kernel::message::MessageId;
-use crate::kernel::model::{RoutingModelService, build_main_service, build_vision_service};
+use crate::kernel::model::{LiveSettingsModelService, RoutingModelService};
 use crate::kernel::registry::Registry;
 use crate::kernel::services::{
-    AbortSignal, ComputeHandle, MemoryHandle, ModelHandle, ServiceHandles, SessionStore,
-    StorageHandle,
+    AbortSignal, ComputeHandle, MemoryHandle, MemoryService, ModelHandle, ModelKind,
+    ServiceHandles, SessionStore, StorageHandle,
 };
 use crate::kernel::session::{
-    InterruptBus, SessionKey, SessionScheduler, StubGuard, StubSummarizer, SystemClock,
+    Interrupt, InterruptBus, LlmGuard, LlmSummarizer, SessionKey, SessionScheduler, SessionStatus,
+    SystemClock,
 };
 use crate::kernel::settings::Settings;
 use crate::kernel::storage::{AnyStorage, FileStorage};
@@ -31,6 +33,9 @@ use crate::kernel::storage::{AnyStorage, FileStorage};
 pub enum Method {
     SendUserMessage {
         text: String,
+        /// 显式工具调用：强制 LLM 首轮调用指定工具（不绕过 LLM）。
+        #[serde(default)]
+        force_tool: Option<ForcedToolRequest>,
     },
     TriggerCommand {
         entry: String,
@@ -51,11 +56,21 @@ pub enum Method {
     },
     /// GUI 验算执行端回执（compute 桥接）。
     ComputeResult {
+        /// 与 RPC 请求帧顶层 id 区分，前端按 compute_id 回执。
+        #[serde(rename = "compute_id")]
         id: u64,
         stdout: String,
         stderr: String,
         duration_ms: u64,
     },
+    /// 会话列表（GUI 会话历史页）。
+    ListSessions,
+    /// 读取指定会话完整消息树（GUI 历史浏览/分支回放）。
+    ReadSession {
+        key: SessionKey,
+    },
+    /// 用户可调工具/命令清单（GUI 工具面板）。
+    ListTools,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +110,23 @@ pub enum RpcFrame {
     },
 }
 
+/// 显式工具调用请求：entry 为内部全名（namespace::tool），hint 为用户输入的可选参数文本。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForcedToolRequest {
+    pub entry: String,
+    #[serde(default)]
+    pub hint: Option<String>,
+    /// 持久化附件（数据根目录 uploads/ 副本，仅供前端展示；模型参数仍用 hint 的暂存路径）。
+    #[serde(default)]
+    pub asset: Option<AttachmentInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachmentInfo {
+    pub path: String,
+    pub name: String,
+}
+
 struct TurnHandle {
     key: SessionKey,
     signal: AbortSignal,
@@ -113,15 +145,21 @@ pub struct Kernel {
     auditor: Auditor,
     events: Arc<dyn EventSink>,
     compute: Arc<BridgeCompute>,
+    settings: Arc<std::sync::RwLock<Settings>>,
+    main_service: Arc<LiveSettingsModelService>,
+    vision_service: Arc<LiveSettingsModelService>,
     state: Arc<Mutex<KernelState>>,
 }
 
 impl Kernel {
     /// 组装内核（M1 全内存 + 真模型适配器）。
     pub async fn new(events: Arc<dyn EventSink>) -> Result<Arc<Self>, String> {
-        let settings = Settings::load()?;
+        let settings = Arc::new(std::sync::RwLock::new(Settings::load()?));
         let data_root = Settings::data_root();
-        Logger::init(settings.log_level, &data_root.join("logs"))?;
+        Logger::init(
+            settings.read().expect("settings poisoned").log_level,
+            &data_root.join("logs"),
+        )?;
         let logger: LoggerHandle = Arc::new(Logger);
 
         let storage = Arc::new(match FileStorage::open(&data_root) {
@@ -131,19 +169,35 @@ impl Kernel {
                 AnyStorage::Mem(crate::kernel::storage::MemoryStorage::new())
             }
         });
-        let memory = Arc::new(InMemoryMemory::new());
+        let memory: Arc<dyn MemoryService> = match FileMemoryService::open_default() {
+            Ok(file_memory) => Arc::new(file_memory),
+            Err(e) => {
+                eprintln!("[kernel] 记忆目录打开失败，回退内存记忆：{e}");
+                Arc::new(InMemoryMemory::new())
+            }
+        };
         let compute = Arc::new(BridgeCompute::new(events.clone()));
-        let main_service = build_main_service(&settings);
-        let vision_service = build_vision_service(&settings);
+        let main_service = Arc::new(LiveSettingsModelService::new(
+            settings.clone(),
+            ModelKind::Main,
+        ));
+        let vision_service = Arc::new(LiveSettingsModelService::new(
+            settings.clone(),
+            ModelKind::Vision,
+        ));
 
         let auditor = Auditor::new(storage.clone());
         let router = Arc::new(RoutingModelService::new(
-            main_service.clone(),
-            vision_service.clone(),
+            main_service.clone() as Arc<dyn crate::kernel::services::ModelService>,
+            vision_service.clone() as Arc<dyn crate::kernel::services::ModelService>,
         ));
         let handles = ServiceHandles::default()
             .with_storage(StorageHandle::new(storage.clone()))
-            .with_memory(MemoryHandle::new(memory.clone()))
+            .with_memory(MemoryHandle::with_observability(
+                memory.clone(),
+                events.clone(),
+                auditor.clone(),
+            ))
             .with_compute(ComputeHandle::new(compute.clone()))
             .with_model(ModelHandle::new(
                 router,
@@ -166,19 +220,23 @@ impl Kernel {
             std::time::Duration::from_secs(10 * 60),
             events.clone(),
         ));
+        // 中断总线必须由 scheduler 与 loop 共享：scheduler 发环境变更，loop 回合边界消费。
+        let interrupt_bus = InterruptBus::new();
         let loop_engine = Arc::new(AgentLoop::new(
-            main_service,
+            main_service.clone(),
             dispatch.clone(),
             auditor.clone(),
             events.clone(),
+            Arc::new(LlmSummarizer::new(main_service.clone())),
+            interrupt_bus.clone(),
         ));
 
         let scheduler = Arc::new(SessionScheduler::new(
             storage.clone(),
-            Arc::new(StubGuard::new()),
+            Arc::new(LlmGuard::new(main_service.clone())),
             Arc::new(SystemClock),
-            Arc::new(StubSummarizer),
-            InterruptBus::new(),
+            Arc::new(LlmSummarizer::new(main_service.clone())),
+            interrupt_bus,
         ));
 
         Ok(Arc::new(Self {
@@ -190,6 +248,9 @@ impl Kernel {
             auditor,
             events,
             compute,
+            settings,
+            main_service,
+            vision_service,
             state: Arc::new(Mutex::new(KernelState { turn: None })),
         }))
     }
@@ -202,6 +263,19 @@ impl Kernel {
         self.dispatch.clone()
     }
 
+    async fn active_session_key(&self) -> Result<SessionKey, RpcError> {
+        let metas = self
+            .store
+            .list_sessions()
+            .await
+            .map_err(|e| RpcError::new("storage_error", e.to_string()))?;
+        metas
+            .iter()
+            .find(|m| m.status == SessionStatus::Active)
+            .map(|m| m.key)
+            .ok_or_else(|| RpcError::new("no_active_session", "没有活动会话"))
+    }
+
     /// 当前是否有回合在跑（sidecar 收尾时轮询用）。
     pub async fn is_idle(&self) -> bool {
         self.state.lock().await.turn.is_none()
@@ -210,17 +284,49 @@ impl Kernel {
     /// 处理一个请求；返回需要写回 GUI 的响应帧（事件经 EventSink 另发）。
     pub async fn handle(&self, request: RpcRequest) -> Result<Option<RpcFrame>, RpcError> {
         match request.method {
-            Method::SendUserMessage { text } => {
-                let mut state = self.state.lock().await;
-                if state.turn.is_some() {
-                    return Err(RpcError::new(
-                        "turn_in_progress",
-                        "当前有回合在跑，请先停止再发送新消息",
-                    ));
+            Method::SendUserMessage { text, force_tool } => {
+                {
+                    let state = self.state.lock().await;
+                    if state.turn.is_some() {
+                        return Err(RpcError::new(
+                            "turn_in_progress",
+                            "当前有回合在跑，请先停止再发送新消息",
+                        ));
+                    }
                 }
+                // 显式工具调用：构造"强制调用"用户消息并让 loop 首轮带 tool_choice。
+                let mut user_text = text;
+                let mut forced_wire: Option<String> = None;
+                if let Some(ft) = force_tool {
+                    let entry = self
+                        .registry
+                        .ensure_tool(&ft.entry)
+                        .map_err(|e| RpcError::new("unknown_tool", e.to_string()))?;
+                    if entry.policy == CallerPolicy::UserOnly {
+                        return Err(RpcError::new(
+                            "forbidden_tool",
+                            "该工具仅用户可调，不能被模型强制调用",
+                        ));
+                    }
+                    let hint = ft.hint.as_deref().unwrap_or("").trim();
+                    user_text = if hint.is_empty() {
+                        format!("请调用工具 {} 处理当前请求。", ft.entry)
+                    } else {
+                        format!("请调用工具 {} 处理：{}", ft.entry, hint)
+                    };
+                    if let Some(asset) = &ft.asset {
+                        user_text.push_str(&format!(
+                            "\n附件：{}|{}（该路径仅用于界面展示，file 参数必须使用前面的暂存路径）",
+                            asset.path, asset.name
+                        ));
+                    }
+                    forced_wire = Some(full_to_wire(&ft.entry));
+                }
+                // 会话调度（守卫/摘要可能调用 LLM 数十秒）在锁外执行，
+                // 避免阻塞 abort/get_state 等请求。
                 let ctx = self
                     .scheduler
-                    .on_new_message(&text)
+                    .on_new_message(&user_text)
                     .await
                     .map_err(|e| RpcError::new("scheduler_error", e.to_string()))?;
                 let signal = AbortSignal::new();
@@ -233,6 +339,14 @@ impl Kernel {
                 let events = self.events.clone();
                 let auditor = self.auditor.clone();
                 let state_for_task = self.state.clone();
+                let mut state = self.state.lock().await;
+                if state.turn.is_some() {
+                    // 并发竞态兜底：另一请求已登记回合。
+                    return Err(RpcError::new(
+                        "turn_in_progress",
+                        "当前有回合在跑，请先停止再发送新消息",
+                    ));
+                }
                 state.turn = Some(TurnHandle {
                     key,
                     signal: signal.clone(),
@@ -245,16 +359,50 @@ impl Kernel {
                         tools,
                         signal,
                         turn_budget: std::time::Duration::from_secs(10 * 60),
+                        forced_tool: forced_wire,
                     };
                     let outcome: Result<TurnOutcome, _> = loop_engine.run_turn(input).await;
                     match outcome {
                         Ok(outcome) => {
+                            let compaction = outcome.compaction.clone();
                             for msg in &outcome.messages {
+                                // 压缩摘要由 splice_compaction 统一落盘，避免重复追加。
+                                if compaction.as_ref().is_some_and(|c| c.summary.id == msg.id) {
+                                    continue;
+                                }
                                 if let Err(e) = store.append_message(&key, msg).await {
                                     events.emit(Event::Error {
                                         message: format!("消息落盘失败：{e}"),
                                     });
                                 }
+                            }
+                            if let Some(info) = &compaction {
+                                if let Err(e) = store
+                                    .splice_compaction(&key, &info.summary, info.tail_start)
+                                    .await
+                                {
+                                    events.emit(Event::Error {
+                                        message: format!("压缩摘要接入失败：{e}"),
+                                    });
+                                }
+                                events.emit(Event::Compaction { session: key });
+                                auditor.record(AuditRecord::Compaction {
+                                    session: key.to_string(),
+                                    summarized: info.summarized,
+                                });
+                                scheduler
+                                    .interrupt_bus()
+                                    .send(Interrupt::CompactionDone { session: key });
+                            }
+                            // 活跃路径推进到回合末条（消息树分支语义）。
+                            let next_active = compaction
+                                .as_ref()
+                                .map(|c| c.tail_end)
+                                .or_else(|| outcome.messages.last().map(|m| m.id));
+                            if let Err(e) = store.set_active_path(&key, next_active).await {
+                                events.emit(Event::Error {
+                                    message: format!("活跃路径推进失败：{e}"),
+                                });
                             }
                             if let Err(e) = scheduler.on_turn_end(&key, &outcome.messages).await {
                                 events.emit(Event::Error {
@@ -266,6 +414,9 @@ impl Kernel {
                             });
                         }
                         Err(e) => {
+                            events.emit(Event::TurnEnd {
+                                stop_reason: crate::kernel::loop_mod::StopReason::Failed,
+                            });
                             events.emit(Event::Error {
                                 message: format!("回合失败：{e}"),
                             });
@@ -326,18 +477,126 @@ impl Kernel {
                     error: None,
                 }))
             }
-            Method::EditMessage { .. } | Method::SwitchBranch { .. } => Err(RpcError::new(
-                "not_implemented",
-                "消息树编辑/切分支为 M5 能力",
-            )),
-            Method::GetSettings => Err(RpcError::new(
-                "not_implemented",
-                "settings 读取为 M2/M5 能力",
-            )),
-            Method::SetSettings { .. } => Err(RpcError::new(
-                "not_implemented",
-                "settings 写入为 M2/M5 能力",
-            )),
+            Method::ListSessions => {
+                let metas = self
+                    .store
+                    .list_sessions()
+                    .await
+                    .map_err(|e| RpcError::new("storage_error", e.to_string()))?;
+                Ok(Some(RpcFrame::Response {
+                    id: request.id,
+                    result: Some(json!({
+                        "sessions": serde_json::to_value(&metas).unwrap_or_default(),
+                    })),
+                    error: None,
+                }))
+            }
+            Method::ReadSession { key } => {
+                let meta = self
+                    .store
+                    .get_session(&key)
+                    .await
+                    .map_err(|e| RpcError::new("storage_error", e.to_string()))?;
+                let messages = self
+                    .store
+                    .read_all(&key)
+                    .await
+                    .map_err(|e| RpcError::new("storage_error", e.to_string()))?;
+                Ok(Some(RpcFrame::Response {
+                    id: request.id,
+                    result: Some(json!({
+                        "meta": serde_json::to_value(&meta).unwrap_or_default(),
+                        "messages": serde_json::to_value(&messages).unwrap_or_default(),
+                    })),
+                    error: None,
+                }))
+            }
+            Method::ListTools => {
+                let tools = self.registry.user_entries();
+                Ok(Some(RpcFrame::Response {
+                    id: request.id,
+                    result: Some(json!({ "tools": tools })),
+                    error: None,
+                }))
+            }
+            Method::EditMessage { message_id, text } => {
+                let key = self.active_session_key().await?;
+                let path = self
+                    .store
+                    .derive_branch(&key, message_id, &text)
+                    .await
+                    .map_err(|e| RpcError::new("branch_error", e.to_string()))?;
+                let branch_id = path.last().map(|m| m.id).unwrap_or(message_id);
+                self.auditor.record(AuditRecord::MessageEdited {
+                    message_id,
+                    branch_id,
+                });
+                Ok(Some(RpcFrame::Response {
+                    id: request.id,
+                    result: Some(json!({
+                        "session_key": key,
+                        "messages": serde_json::to_value(&path).unwrap_or_default(),
+                    })),
+                    error: None,
+                }))
+            }
+            Method::SwitchBranch { message_id } => {
+                let key = self.active_session_key().await?;
+                let path = self
+                    .store
+                    .switch_branch(&key, message_id)
+                    .await
+                    .map_err(|e| RpcError::new("branch_error", e.to_string()))?;
+                self.auditor
+                    .record(AuditRecord::BranchSwitched { message_id });
+                Ok(Some(RpcFrame::Response {
+                    id: request.id,
+                    result: Some(json!({
+                        "session_key": key,
+                        "messages": serde_json::to_value(&path).unwrap_or_default(),
+                    })),
+                    error: None,
+                }))
+            }
+            Method::GetSettings => {
+                let view = self
+                    .settings
+                    .read()
+                    .expect("settings poisoned")
+                    .public_view();
+                Ok(Some(RpcFrame::Response {
+                    id: request.id,
+                    result: Some(view),
+                    error: None,
+                }))
+            }
+            Method::SetSettings { patch } => {
+                let view = {
+                    let mut settings = self.settings.write().expect("settings poisoned");
+                    settings
+                        .apply_patch(&patch)
+                        .map_err(|e| RpcError::new("invalid_settings", e))?;
+                    settings
+                        .save()
+                        .map_err(|e| RpcError::new("save_failed", e))?;
+                    if let Some(level) = patch.log_level {
+                        Logger::set_level(level);
+                    }
+                    settings.public_view()
+                };
+                // 模型配置热更新：下一次模型调用即用新端点/模型/key。
+                self.main_service.refresh();
+                self.vision_service.refresh();
+                self.scheduler
+                    .interrupt_bus()
+                    .send(Interrupt::SettingsChanged);
+                self.auditor.record(AuditRecord::SettingsChanged);
+                Ok(Some(RpcFrame::Response {
+                    id: request.id,
+                    result: Some(view),
+                    error: None,
+                }))
+            }
             Method::ComputeResult {
                 id,
                 stdout,

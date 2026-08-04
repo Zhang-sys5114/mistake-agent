@@ -39,6 +39,16 @@ impl Logger {
         INITIALIZED.get_or_init(|| init_once(level, dir)).clone()
     }
 
+    /// 运行时切换日志级别（set_settings 保存 log_level 后调用；失败静默，下次启动仍生效）。
+    pub fn set_level(level: Level) {
+        static HANDLE: OnceLock<Option<flexi_logger::LoggerHandle>> = OnceLock::new();
+        if let Some(handle) = HANDLE.get().and_then(|h| h.as_ref())
+            && let Ok(spec) = flexi_logger::LogSpecification::parse(level.spec())
+        {
+            handle.set_new_spec(spec);
+        }
+    }
+
     pub fn log(&self, level: Level, message: &str) {
         match level {
             Level::Debug => log::debug!("{}", message),
@@ -77,7 +87,7 @@ fn init_once(level: Level, dir: &Path) -> Result<(), String> {
     };
 
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    FlLogger::try_with_str(level.spec())
+    let handle = FlLogger::try_with_str(level.spec())
         .map_err(|e| e.to_string())?
         .log_to_file(FileSpec::default().directory(dir))
         .rotate(
@@ -91,6 +101,9 @@ fn init_once(level: Level, dir: &Path) -> Result<(), String> {
         .write_mode(WriteMode::BufferAndFlush)
         .start()
         .map_err(|e| e.to_string())?;
+    // 保存句柄供运行时 set_level 使用（重复 init 只执行一次）。
+    static HANDLE: OnceLock<Option<flexi_logger::LoggerHandle>> = OnceLock::new();
+    let _ = HANDLE.set(Some(handle));
     Ok(())
 }
 

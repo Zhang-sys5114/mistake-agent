@@ -18,11 +18,15 @@
 | F6 | 错题自动归档 | 错题写入错题本（本地 JSON 持久化），可查询 | ✅ |
 | F7 | 错题本查询 | grading::list（可按学科/知识点过滤） | ✅ |
 | F8 | 流式对话体验 | 打字机增量、思考过程折叠展示、工具进度、停止按钮 | ✅ |
+| F9 | 设置向导 | 双模型地址/Key/模型/接入方式、日志级别，热更新生效 | ✅ |
+| F10 | 消息树 | 编辑/重新生成产生分支，< > 切换，历史不丢 | ✅ |
+| F11 | Python 验算 | compute::verify 经 Pyodide（WASM 沙箱）执行 | ✅ |
+| F12 | 五场景入口 | practice/report/exam/tracking 工具可调用（场景一为完整闭环） | ✅ |
 
 ## 3. 核心流程
 
 ```
-用户（GUI）→ 发消息/选文件 → sidecar（stdio JSONL）→ SessionScheduler
+用户（GUI）→ 发消息/选文件 → 进程内 Kernel（RPC 桥接）→ SessionScheduler
   → AgentLoop（注入系统提示 + 工具列表）→ 主模型流式
   → 模型调用 grading::upload → 视觉模型 OCR → 主模型判分（json_schema）
   → 错题归档（storage 文件持久化）→ 事件流回 GUI（气泡/进度/思维链）
@@ -41,5 +45,5 @@
 
 - 扫描版 PDF 渲染 OCR（需 poppler/mupdf，后续可选）。
 - 手写公式/图形的鲁棒识别优化（模型能力随选型提升）。
-- 场景二~五、compute::verify、消息树编辑/切分支、设置向导。
+- 场景二~五为**工具级实现**（模板变式/聚合报告/组卷/掌握度），核心业务深度（自适应难度、知识图谱、报告可视化）不在本期交付内。
 - Windows 安装包（当前非 Windows 环境，配置与步骤已在文档标注）。

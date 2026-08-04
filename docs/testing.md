@@ -2,29 +2,35 @@
 
 ## 1. 测试策略
 
-- **单元测试**：`cargo test`，覆盖注册表校验、dispatch、session 调度、storage、memory、model 解析（不依赖网络）。
+- **单元测试**：`cargo test`（54 项），覆盖注册表校验、dispatch、session 调度（守卫/摘要/分支/压缩/中断）、storage（文件/内存）、memory（文件 CRUD/路径越界）、model（SSE/usage 解析）、settings（patch/public_view）、compute 桥接、8 个插件工具（schema/模板/聚合）。
 - **真实 API 集成测试**：`cargo test --test live_api -- --ignored --nocapture`，直接接 DeepSeek/SiliconFlow（无 key 自动跳过）。
 - **样例端到端**：`samples/` 三套作业图片逐一走 上传→OCR→判分→归档 全链路。
+- **前端渲染自检**：`cd web && node scripts/katex-check.mjs`（KaTeX 行内/块级/化学式/矩阵/非法公式容错）。
 
 ## 2. 用例与结果（2026-08-04 实测）
 
-### 单元测试：14 项全过
+### 单元测试：54 项全过
 
 | 模块 | 覆盖点 |
 |---|---|
 | registry | namespace 撞名、wire 撞名、requires 不可满足、懒注册 |
-| dispatch | （同 registry 测试中覆盖注册链路） |
-| session | 首消息建会话、空闲超时开新会话、守卫关键词切换、InterruptBus |
-| storage | 错题 CRUD、会话追加/归档 |
-| memory | 目录浏览、子树删除、路径校验（绝对/../空段） |
-| model | SSE 解析、ToolCall 展开为 function_call + output |
+| dispatch | 注册链路、命令回退同名工具 |
+| session | 首消息建会话、空闲超时开新会话、守卫决策（stub+LLM 解析失败保底）、分支派生/切分支、压缩摘要、InterruptBus |
+| storage | 错题 CRUD、会话追加/归档、active_path/derive_branch/splice_compaction |
+| memory | 文件 CRUD、目录浏览、子树删除、路径校验（绝对/../空段） |
+| model | SSE 解析、usage 解析（response.usage 顶层）、ToolCall 展开 |
+| settings | patch 校验、public_view 不含 key |
+| compute | BridgeCompute 回执/取消 |
+| 插件 | 8 插件参数 schema、practice 模板生成、report/exam/tracking 聚合断言 |
 
 ### 真实 API 链路
 
 | 用例 | 结果 |
 |---|---|
-| hello 回合（send_user_message → Responses API 流式） | ✅ 通过（多次实测，事件数 26~120） |
-| 三套样例批改（grading::upload） | ✅ 通过 |
+| hello 回合（send_user_message → Responses API 流式） | ✅ 通过；**断言 assistant 消息已落盘、审计 llm_call 的 tokens 非空** |
+| 三套样例批改（grading::upload） | ✅ 通过（subject/reference_answer 已入库） |
+| memory 工具往返（save/show/remove + 文件落盘） | ✅ 通过 |
+| LaTeX 输出（模型按 prompt 输出 $...$ 公式） | ✅ 通过（勾股定理，$a$/$b$/$c$） |
 
 | 样例 | 类型 | 题数 | 对 | 错 | 归档 | 备注 |
 |---|---|---|---|---|---|---|
@@ -47,6 +53,14 @@
 | 5 | flexi_logger 重复初始化报错 | 全局 logger 只能 init 一次 | 已修：OnceLock 幂等 |
 | 6 | DeepSeek json_schema 返回 schema 原文 | schema 含 $defs/$ref 不被解析 | 已修：内联扁平数组 schema |
 | 7 | tokio stdout 写管道丢失 | 环境差异 | 已修：帧写入改同步 stdout（协议通道，绝不含日志） |
+| 8 | 会话 JSONL 只有 user 消息、审计 tokens 全 None | SSE 事件映射未命中 usage（usage 在 `response.usage` 顶层） | 已修：completed/incomplete 事件解析 response.usage；live_api 加落盘+usage 断言 |
+| 9 | Method::ComputeResult 的 id 与 RPC 顶层 id 撞名 | serde flatten 字段冲突 | 已修：rename `compute_id`，前端按 compute_id 回执 |
+| 10 | 工具调用回合报"reasoning_text must be passed back" | thinking 模式第二轮未回传推理 item | 已修：loop 保存推理消息（含 id），`messages_to_responses_input` 按 `{"type":"reasoning","id"}` 回传；真实 API 复验通过 |
+| 11 | 会话切换频率超限时丢消息/归档错乱 | 归档后才检查切换频率 | 已修：频率检查前置，超限降级 continue（消息不丢） |
+| 12 | 回合失败后界面/状态未恢复 | 失败时未发 turn_end | 已修：失败发 `turn_end(failed)` + error，前端恢复可聊天 |
+| 13 | DeepSeek 503 导致守卫/摘要/回合失败 | 无重试 | 已修：守卫/摘要对瞬时错误重试 2 次（线性退避），主回合流重试 1 次；系统性错误（无余额/模型下架）不重试直接降级；单测模拟 503→成功通过 |
+| 14 | 工具调用回合报"reasoning_text must be passed back"（批改失败） | **真实根因是 call_id 不匹配**：loop 丢弃首轮 function_call 的真实 call_id，第二轮回填用随机 uuid；DeepSeek 对错误 call_id 的报错信息误导为 reasoning | 已修：ToolCall 消息保存真实 call_id（tool_call_with_id），回传时优先使用；保留 reasoning 回传（无害）；真实批改多轮验证通过 |
+| 15 | 会话切换后上下文/历史断裂 | 切换只注入摘要，模型记不住之前对话 | 已修：无感知切换——新会话注入梗概 + 旧会话最近 20 条消息副本（parent 链连续），会话历史页可见连续记录 |
 
 ## 4. 成本观察（真实调用）
 

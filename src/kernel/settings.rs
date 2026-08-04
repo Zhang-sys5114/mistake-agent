@@ -181,3 +181,83 @@ impl Settings {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> Settings {
+        Settings {
+            log_level: Level::Info,
+            main_model: ModelConfig {
+                api_url: "https://api.deepseek.com".into(),
+                api_key: "sk-secret-key".into(),
+                model: Some("deepseek-v4-flash".into()),
+                transport: Some(Transport::Responses),
+            },
+            vision_model: ModelConfig {
+                api_url: "https://api.siliconflow.cn/v1".into(),
+                api_key: "sk-vision-key".into(),
+                model: Some("Qwen/Qwen3-VL-32B-Instruct".into()),
+                transport: None,
+            },
+        }
+    }
+
+    #[test]
+    fn public_view_never_leaks_api_key() {
+        let view = sample().public_view();
+        assert!(view.get("api_key").is_none());
+        assert!(view["main_model"].get("api_key").is_none());
+        assert!(view["vision_model"].get("api_key").is_none());
+        assert_eq!(view["main_model"]["key_set"], true);
+        assert_eq!(view["vision_model"]["key_set"], true);
+    }
+
+    #[test]
+    fn patch_rejects_invalid_url_and_empty_model() {
+        let mut settings = sample();
+        let bad_url = SettingsPatch {
+            main_model: Some(ModelConfigPatch {
+                api_url: Some("ftp://bad".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(settings.apply_patch(&bad_url).is_err());
+
+        let bad_model = SettingsPatch {
+            vision_model: Some(ModelConfigPatch {
+                model: Some("  ".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(settings.apply_patch(&bad_model).is_err());
+    }
+
+    #[test]
+    fn patch_applies_url_model_and_key_keep_empty() {
+        let mut settings = sample();
+        let patch = SettingsPatch {
+            main_model: Some(ModelConfigPatch {
+                api_url: Some("https://api.example.com".into()),
+                model: Some("deepseek-v4-pro".into()),
+                api_key: Some("".into()), // 空串 = 保留原 key
+                transport: Some(Transport::ChatCompletions),
+            }),
+            ..Default::default()
+        };
+        settings.apply_patch(&patch).unwrap();
+        assert_eq!(settings.main_model.api_url, "https://api.example.com");
+        assert_eq!(
+            settings.main_model.model.as_deref(),
+            Some("deepseek-v4-pro")
+        );
+        assert_eq!(settings.main_model.api_key, "sk-secret-key");
+        assert_eq!(
+            settings.main_model.transport,
+            Some(Transport::ChatCompletions)
+        );
+    }
+}

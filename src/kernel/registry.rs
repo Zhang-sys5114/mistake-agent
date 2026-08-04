@@ -267,11 +267,55 @@ impl Registry {
             .cloned()
             .collect()
     }
+
+    /// 用户可调入口点清单（Tool/Command，含懒加载插件的声明），GUI 工具面板用。
+    /// 只暴露公开元数据：全名、类型、策略、描述、Iconify 图标、参数 schema。
+    pub fn user_entries(&self) -> Vec<serde_json::Value> {
+        let entries = self.entries.read().expect("registry poisoned");
+        let mut out = Vec::new();
+        for entry in entries.values() {
+            let ns = &entry.info.namespace;
+            for t in &entry.info.tools {
+                if !t.user_visible {
+                    continue;
+                }
+                out.push(serde_json::json!({
+                    "entry": full_name(ns, &t.name),
+                    "kind": "tool",
+                    "title": t.title,
+                    "group": t.group,
+                    "policy": t.policy,
+                    "description": t.description,
+                    "icon": t.icon,
+                    "params": t.params,
+                }));
+            }
+            for c in &entry.info.commands {
+                if !c.user_visible {
+                    continue;
+                }
+                out.push(serde_json::json!({
+                    "entry": full_name(ns, &c.name),
+                    "kind": "command",
+                    "title": c.title,
+                    "group": c.group,
+                    "policy": CallerPolicy::UserOnly,
+                    "description": c.description,
+                    "icon": c.icon,
+                    "params": c.params,
+                }));
+            }
+        }
+        out
+    }
 }
 
 pub fn tool_def(name: &str, description: &str, policy: CallerPolicy) -> ToolDef {
     ToolDef {
         name: name.into(),
+        user_visible: true,
+        title: None,
+        group: None,
         description: description.into(),
         params: crate::kernel::contract::empty_params(),
         policy,
@@ -400,5 +444,47 @@ mod tests {
             registry.register_plugin(desc2),
             Err(PluginError::NamespaceTaken(_))
         ));
+    }
+
+    #[test]
+    fn user_entries_filter_invisible() {
+        let registry = Registry::new(ServiceHandles::default(), logger());
+        let desc = PluginDescriptor {
+            info: Info {
+                namespace: "demo".into(),
+                tools: vec![
+                    ToolDef {
+                        name: "hidden".into(),
+                        user_visible: false,
+                        title: None,
+                        group: None,
+                        description: "模型专用".into(),
+                        params: crate::kernel::contract::empty_params(),
+                        policy: CallerPolicy::UserAndModel,
+                        timeout: None,
+                        icon: None,
+                    },
+                    ToolDef {
+                        name: "shown".into(),
+                        user_visible: true,
+                        title: Some("可见工具".into()),
+                        group: Some("测试".into()),
+                        description: "用户可用".into(),
+                        params: crate::kernel::contract::empty_params(),
+                        policy: CallerPolicy::UserAndModel,
+                        timeout: None,
+                        icon: None,
+                    },
+                ],
+                ..Default::default()
+            },
+            register: |_| Ok(()),
+        };
+        registry.register_plugin(desc).unwrap();
+        let entries = registry.user_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["entry"], "demo::shown");
+        assert_eq!(entries[0]["title"], "可见工具");
+        assert_eq!(entries[0]["group"], "测试");
     }
 }

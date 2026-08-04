@@ -1,271 +1,115 @@
 <script setup>
-import { computed, onMounted, ref } from "vue";
-import { marked } from "marked";
-import DOMPurify from "dompurify";
-import katex from "katex";
-import "katex/dist/katex.min.css";
-import markedKatex from "marked-katex-extension";
+import { onMounted, provide, ref } from "vue";
+import { Icon } from "@iconify/vue";
 import { useKernel } from "./composables/useKernel";
-import GeometryFigure from "./components/GeometryFigure.vue";
-import { SAMPLE_TRIANGLE } from "./lib/geometry.js";
-
-marked.use(
-  markedKatex({
-    throwOnError: false,
-    output: "htmlAndMathml",
-  }),
-);
-
-// XSS 防线：Markdown + KaTeX 渲染后的 HTML 一律经 DOMPurify 净化；
-// 禁掉脚本/事件/危险标签，默认策略同时拦截 javascript: 等危险 URL。
-function renderMarkdown(text) {
-  const html = marked.parse(text, { async: false });
-  return DOMPurify.sanitize(html, {
-    FORBID_TAGS: [
-      "script",
-      "style",
-      "iframe",
-      "object",
-      "embed",
-      "form",
-      "input",
-      "textarea",
-      "button",
-      "svg",
-      "math",
-    ],
-    FORBID_ATTR: ["onerror", "onload", "onclick", "onmouseover", "onfocus"],
-  });
-}
+import ChatPage from "./components/ChatPage.vue";
+import MistakesPage from "./components/MistakesPage.vue";
+import SessionsPage from "./components/SessionsPage.vue";
+import SettingsPage from "./components/SettingsPage.vue";
 
 const kernel = useKernel();
+provide("kernel", kernel);
 
-const status = ref("准备中");
 const ready = ref(false);
 const busy = ref(false);
-const inputText = ref("");
-const toolStatus = ref(null); // { entry, message, icon }
-const showGeometryDemo = ref(false);
+const status = ref("准备中");
+const view = ref("chat");
 
-const bubbles = ref([]); // { type: user|assistant|error|reasoning, text, messageId }
-let assistantIndex = -1;
-let reasoningText = "";
-let reasoningIndex = -1;
-const currentStreamId = ref(null);
+const navItems = [
+  { id: "chat", label: "聊天", icon: "mdi:chat-processing-outline" },
+  { id: "mistakes", label: "错题本", icon: "mdi:format-list-bulleted" },
+  { id: "sessions", label: "会话", icon: "mdi:history" },
+  { id: "settings", label: "设置", icon: "mdi:cog-outline" },
+];
 
-const canSend = computed(() => ready.value && !busy.value && inputText.value.trim());
+const viewMeta = {
+  chat: { sub: "和 Agent 对话，上传作业自动批改" },
+  mistakes: { sub: "错题自动归档，随时回顾错因" },
+  sessions: { sub: "历史会话与消息树分支回放" },
+  settings: { sub: "模型接入与本地数据配置" },
+};
 
-function scrollBottom() {
-  requestAnimationFrame(() => {
-    const el = document.getElementById("messages");
-    if (el) el.scrollTop = el.scrollHeight;
-  });
+function onStatus(s) {
+  busy.value = s.busy;
+  status.value = s.text;
 }
 
-function addBubble(type, text, messageId = null) {
-  bubbles.value.push({ type, text, messageId });
-  scrollBottom();
+function navigate(viewId) {
+  view.value = viewId;
 }
 
-function ensureAssistant(messageId) {
-  if (assistantIndex >= 0 && bubbles.value[assistantIndex]?.messageId === messageId) {
-    return bubbles.value[assistantIndex];
-  }
-  assistantIndex = bubbles.value.length;
-  addBubble("assistant", "", messageId);
-  currentStreamId.value = messageId;
-  return bubbles.value[assistantIndex];
-}
-
-function ensureReasoning(delta) {
-  reasoningText += delta;
-  if (reasoningIndex < 0) {
-    reasoningIndex = bubbles.value.length;
-    addBubble("reasoning", reasoningText);
-  } else {
-    bubbles.value[reasoningIndex].text = reasoningText;
-  }
-}
-
-function finalize() {
-  if (assistantIndex >= 0 && !bubbles.value[assistantIndex]?.text) {
-    bubbles.value.splice(assistantIndex, 1);
-  }
-  assistantIndex = -1;
-  reasoningIndex = -1;
-  reasoningText = "";
-  currentStreamId.value = null;
-}
-
-function handleFrame(frame) {
-  if (frame.type === "response") {
-    if (frame.error) {
-      addBubble("error", `请求失败：${frame.error.message}`);
-      busy.value = false;
-      finalize();
-    } else {
-      // get_state 等回执到达 → 链路就绪。
-      ready.value = true;
-      status.value = "就绪";
-    }
-    return;
-  }
-  if (frame.type !== "event") return;
-  const e = frame.event;
-  switch (e.event) {
-    case "message_delta":
-      ensureAssistant(e.message_id).text += e.delta;
-      scrollBottom();
-      break;
-    case "reasoning_delta":
-      ensureReasoning(e.delta);
-      break;
-    case "tool_start":
-      toolStatus.value = { entry: e.entry, message: "执行中", icon: e.icon };
-      break;
-    case "tool_progress":
-      toolStatus.value = { entry: e.entry, message: e.message, icon: e.icon };
-      break;
-    case "tool_end":
-      toolStatus.value = { entry: e.entry, message: e.ok ? "完成" : "失败", icon: e.icon };
-      break;
-    case "turn_end":
-      finalize();
-      toolStatus.value = null;
-      busy.value = false;
-      status.value = "就绪";
-      break;
-    case "error":
-      finalize();
-      addBubble("error", e.message);
-      busy.value = false;
-      break;
-  }
-}
-
-async function sendMessage() {
-  const text = inputText.value.trim();
-  if (!text || busy.value) return;
-  inputText.value = "";
-  addBubble("user", text);
-  busy.value = true;
-  status.value = "正在回答";
+onMounted(async () => {
   try {
-    await kernel.sendLine("send_user_message", { text });
-  } catch (err) {
-    addBubble("error", `发送失败：${err}`);
-    busy.value = false;
+    await kernel.start();
+    ready.value = true;
+    status.value = "就绪";
+  } catch (e) {
+    status.value = "内核异常";
+    console.error("内核启动失败：", e);
   }
-}
-
-async function abortTurn() {
-  await kernel.sendLine("abort");
-}
-
-async function pickHomework() {
-  const path = await kernel.pickHomeworkFile();
-  if (!path) return;
-  inputText.value = `请批改这份作业：${path}`;
-  await sendMessage();
-}
-
-onMounted(() => {
-  kernel.onFrame(handleFrame);
-  kernel
-    .start()
-    .then(() => {
-      status.value = "自检中…";
-    })
-    .catch((err) => {
-      addBubble("error", `内核启动失败：${err}`);
-      status.value = "异常";
-    });
 });
 </script>
 
 <template>
-  <header>
-    <div class="brand">
-      <img class="icon" src="/icons/book-open-variant.svg" alt="" />
-      错题 Agent
-    </div>
-    <div class="status" :class="{ busy }">
-      <span class="dot"></span>{{ status }}
-    </div>
-  </header>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">
+          <Icon icon="mdi:book-education-outline" width="24" />
+        </span>
+        <span>
+          <span class="brand-name">错题 Agent</span>
+          <span class="brand-sub">本地智能错题助手</span>
+        </span>
+      </div>
+      <nav class="nav" aria-label="主导航">
+        <span class="nav-label">工作台</span>
+        <button
+          v-for="item in navItems"
+          :key="item.id"
+          class="nav-item"
+          :class="{ active: view === item.id }"
+          :aria-current="view === item.id ? 'page' : undefined"
+          @click="view = item.id"
+        >
+          <Icon :icon="item.icon" width="20" />
+          <span>{{ item.label }}</span>
+        </button>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="status-pill" :class="{ busy, ready: ready && !busy }">
+          <span class="dot"></span>{{ status }}
+        </div>
+        <p class="privacy-note">数据与密钥只保存在本机</p>
+      </div>
+    </aside>
 
-  <main id="messages">
-    <TransitionGroup name="msg" tag="div" class="bubbles">
-      <div
-        v-for="(b, i) in bubbles"
-        :key="i"
-        :class="[
-          'bubble',
-          b.type,
-          {
-            streaming:
-              b.type === 'assistant' &&
-              currentStreamId &&
-              b.messageId === currentStreamId,
-          },
-        ]"
-      >
-        <details v-if="b.type === 'reasoning'" class="reasoning" open>
-          <summary>
-            <img class="icon" src="/icons/brain.svg" alt="" />
-            思考过程（点击折叠）
-          </summary>
-          <div class="reasoning-body">{{ b.text }}</div>
-        </details>
-        <div
-          v-else-if="b.type === 'assistant'"
-          class="md-body"
-          v-html="renderMarkdown(b.text)"
-        ></div>
-        <template v-else>{{ b.text }}</template>
-      </div>
-    </TransitionGroup>
-  </main>
+    <section class="main">
+      <header class="topbar">
+        <div class="topbar-title">
+          <h1>{{ navItems.find((n) => n.id === view)?.label }}</h1>
+          <span class="topbar-sub">{{ viewMeta[view]?.sub }}</span>
+        </div>
+        <span class="topbar-tag">
+          <Icon icon="mdi:shield-lock-outline" width="14" />本地优先
+        </span>
+      </header>
 
-  <footer>
-    <Transition name="fade">
-      <div v-if="toolStatus" class="tool-status">
-        <img
-          v-if="toolStatus.icon"
-          class="icon"
-          :src="`/icons/${toolStatus.icon.replace(':', '-')}.svg`"
-          alt=""
-        />
-        {{ toolStatus.entry }}：{{ toolStatus.message }}
+      <div class="view-host">
+        <Transition name="view" mode="out-in">
+          <ChatPage
+            v-if="view === 'chat'"
+            :key="'chat'"
+            :kernel="kernel"
+            :ready="ready"
+            @status="onStatus"
+            @navigate="navigate"
+          />
+          <MistakesPage v-else-if="view === 'mistakes'" :key="'mistakes'" :kernel="kernel" />
+          <SessionsPage v-else-if="view === 'sessions'" :key="'sessions'" :kernel="kernel" />
+          <SettingsPage v-else :key="'settings'" :kernel="kernel" />
+        </Transition>
       </div>
-    </Transition>
-    <div v-if="showGeometryDemo" class="geometry-demo">
-      <div class="geometry-demo-head">
-        <span>几何渲染器示例（diagram_spec → SVG，场景二预研）</span>
-        <button class="ghost" @click="showGeometryDemo = false">收起</button>
-      </div>
-      <GeometryFigure :spec="SAMPLE_TRIANGLE" />
-    </div>
-    <div class="input-row">
-      <input
-        v-model="inputText"
-        type="text"
-        placeholder="发消息，或点「作业」选择文件让 Agent 批改"
-        autocomplete="off"
-        @keydown.enter="sendMessage"
-      />
-      <button id="pickBtn" @click="pickHomework">
-        <img class="icon" src="/icons/upload.svg" alt="" />作业
-      </button>
-      <button class="ghost" @click="showGeometryDemo = !showGeometryDemo">
-        图形
-      </button>
-      <button id="sendBtn" :disabled="!canSend" @click="sendMessage">
-        <img class="icon" src="/icons/send.svg" alt="" />发送
-      </button>
-      <button v-if="busy" id="stopBtn" class="danger" @click="abortTurn">
-        <img class="icon" src="/icons/stop-circle.svg" alt="" />停止
-      </button>
-    </div>
-  </footer>
+    </section>
+  </div>
 </template>

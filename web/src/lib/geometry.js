@@ -7,6 +7,22 @@ function num(v) {
   return n;
 }
 
+// 颜色白名单：只允许十六进制、常见命名色与 rgb/hsl 函数式写法，
+// 杜绝把模型 spec 里的任意字符串拼进 SVG 属性（防注入）。
+const HEX_COLOR = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+const FUNC_COLOR = /^(?:rgb|rgba|hsl|hsla)\(\s*[\d.]+%?\s*(?:,\s*[\d.]+%?\s*){2,3}\)$/i;
+const NAMED_COLORS = new Set([
+  "black", "white", "red", "green", "blue", "orange", "purple", "gray", "grey",
+  "pink", "brown", "yellow", "cyan", "magenta", "lime", "navy", "teal", "silver",
+]);
+
+function sanitizeColor(v) {
+  if (typeof v !== "string") return "";
+  const s = v.trim();
+  if (HEX_COLOR.test(s) || FUNC_COLOR.test(s) || NAMED_COLORS.has(s.toLowerCase())) return s;
+  return "";
+}
+
 export function renderGeometry(spec) {
   const points = {};
   for (const [name, xy] of Object.entries(spec.points || {})) {
@@ -39,15 +55,17 @@ export function renderGeometry(spec) {
         const [ax, ay] = P(obj.ends[0]);
         const [bx, by] = P(obj.ends[1]);
         const dash = obj.dashed ? ' stroke-dasharray="0.35 0.25"' : "";
-        const color = obj.color ? ` stroke="${obj.color}"` : "";
-        push(`<line x1="${ax}" y1="${ay}" x2="${bx}" y2="${by}" ${common}${dash}${color}/>`);
+        const color = sanitizeColor(obj.color);
+        const colorAttr = color ? ` stroke="${color}"` : "";
+        push(`<line x1="${ax}" y1="${ay}" x2="${bx}" y2="${by}" ${common}${dash}${colorAttr}/>`);
         break;
       }
       case "polygon": {
         const pts = obj.vertices.map(P).map(([x, y]) => `${x},${y}`).join(" ");
-        const fill = obj.fill ? ` fill="${obj.fill}" fill-opacity="0.15"` : "";
+        const fill = sanitizeColor(obj.fill);
+        const fillAttr = fill ? ` fill="${fill}" fill-opacity="0.15"` : "";
         const dash = obj.dashed ? ' stroke-dasharray="0.35 0.25"' : "";
-        push(`<polygon points="${pts}" ${common}${fill}${dash}/>`);
+        push(`<polygon points="${pts}" ${common}${fillAttr}${dash}/>`);
         break;
       }
       case "circle": {
@@ -139,26 +157,6 @@ function escapeXml(s) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
 }
-
-export const SAMPLE_TRIANGLE = {
-  points: {
-    A: [0, 0],
-    B: [6, 0],
-    C: [6, 4],
-    O: [3, 2],
-  },
-  objects: [
-    { type: "segment", ends: ["A", "B"] },
-    { type: "segment", ends: ["B", "C"] },
-    { type: "segment", ends: ["C", "A"] },
-    { type: "right_mark", vertex: "C", arm1: "B", arm2: "A" },
-    { type: "equal_ticks", ends: ["A", "B"] },
-    { type: "circle", center: "O", radius: 1.8, dashed: true },
-    { type: "label", point: "A", text: "A", dx: -0.35, dy: 0.45 },
-    { type: "label", point: "B", text: "B", dx: 0.15, dy: 0.45 },
-    { type: "label", point: "C", text: "C", dx: 0.25, dy: -0.4 },
-    { type: "label", point: "O", text: "O", dx: -0.35, dy: 0.45 },
-  ],
-};

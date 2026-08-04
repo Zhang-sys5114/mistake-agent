@@ -11,7 +11,7 @@
 - v1 是课程项目（网站服务 + Docker Compose + LangChain），体验差、部署门槛高；答辩已完成，v2 推倒重来。
 - 目标用户是中学生：不会用 CLI，所以要 GUI；家长在意隐私，所以本地优先；未来要加功能，所以 kernel-plugin 可扩展。
 - 设计蓝本：借鉴 Codex / Pi 的 Agent 架构（agent loop、工具调用、指令文件、事件流、RPC、消息树），但**内核用 Rust 自研**，不依赖任何第三方 Agent 框架。
-- **开源借鉴策略：允许直接抄工程机制**。stdio RPC 协议、JSONL 会话格式、工具调用流式解析、Tauri sidecar 打包、Pyodide 集成等机制类源码，可直接参考或复制自开源项目（如 openai/codex，Apache-2.0；earendil-works/pi，MIT；其余项目按其 LICENSE 为准），前提是保留原许可证/版权声明并在文档注明来源。业务逻辑（教学流程、错题模型、记忆路由策略）仍由本项目自己写。
+- **开源借鉴策略：允许直接抄工程机制**。stdio RPC 协议、JSONL 会话格式、工具调用流式解析、Tauri 进程/通道桥接、Pyodide 集成等机制类源码，可直接参考或复制自开源项目（如 openai/codex，Apache-2.0；earendil-works/pi，MIT；其余项目按其 LICENSE 为准），前提是保留原许可证/版权声明并在文档注明来源。业务逻辑（教学流程、错题模型、记忆路由策略）仍由本项目自己写。
 
 ## 3. 产品能力（五个场景）
 
@@ -30,9 +30,9 @@
 ```
 ┌─ GUI 壳（Tauri + WebView）───────────────────────────┐
 │  聊天 / 消息树 / 上传 / 报告 / 设置向导                │
-│  （唯一入口：stdio JSONL 结构化 RPC）                 │
+│  （唯一入口：结构化 RPC，进程内桥接）                  │
 └──────────────────────┬──────────────────────────────┘
-                       │ RPC
+                       │ RPC（Tauri Channel/命令，同进程）
 ┌──────────────────────▼──────────────────────────────┐
 │ Kernel（内核）— 核心调度                              │
 │  agent loop · 工具注册与调度 · 会话/消息树            │
@@ -71,6 +71,8 @@ CallerPolicy 过滤工具 schema → 流式解析（容灾）→ 调度守卫 + 
 ```
 v2 同一轮多个工具调用**串行执行**；并行列入后续（按依赖拓扑排序）。
 
+**显式 tool-calling（用户发起，不绕过 LLM）**：用户在输入框输入 `namespace::tool`（如 `practice::generate`），前端弹候选框、按 Tab 确认后进入待调用状态（工具徽章 + `<可选参数>` 占位）；发送时 RPC 携带 `force_tool {entry, hint}`，kernel 开回合并让模型**首轮强制调用该工具**（Responses API `tool_choice`，整回合 `thinking=none`），工具结果回填后由模型继续生成回复——所有内容输出都走聊天框 LLM 侧。工具清单/标题/分组/图标/参数说明/用法示例全部来自 `list_tools`（后端唯一事实源），前端不写死。
+
 ### 会话与消息树
 - 会话调度由独立内核级模块（Session scheduler）承担：平台层按来源派生 SessionKey（v2 独立 App 即单键）；任务层由**守卫模型（Guard model）**决策——触发时机为每回合结束一次、用户发消息开启新回合时一次；判断依据是**会话目标（Goal）**（start_new 时守卫模型生成并写入会话元数据）。守卫模型返回三动作之一：`continue`（目标不变）、`update_goal`（同会话内改写/细化 Goal，如"录入错题"→"讲解已录入的错题"）、`start_new`（仅当新目标明显无关且不依赖当前会话上下文）；偏向规则为**存疑即继续**，避免切换丢失上下文。**不进入主模型上下文**，主模型不持有 session 工具。切换时旧会话归档，新会话注入旧会话**梗概**，并暴露历史路由（session::history / session::read）供模型按需翻阅完整旧记录；带频率护栏，守卫失败默认 continue。
 - 消息树：每条消息有 id/parentId，JSONL 追加式、永不截断；**编辑消息或"重新生成"会从该点派生新分支**，用户可用 GUI 的 `<` / `>` 翻看旧分支。LLM 上下文只包含活跃路径。
@@ -78,6 +80,8 @@ v2 同一轮多个工具调用**串行执行**；并行列入后续（按依赖�
 
 ### 压缩（compaction）
 上下文用量达模型窗口 75% 时，在回合边界自动压缩活跃路径：最近 15 条不压，其余旧消息由 LLM 生成任务摘要（保留错题 id、知识点、未完成事项），摘要作为特殊条目写入 JSONL，**原始消息全量保留**。失败重试一次，再失败下回合再试。
+
+**无感知切换（豆包式）**：会话切换时，新会话除梗概外还注入旧会话**最近 20 条消息副本**（重建 parent 链挂在梗概后），模型上下文与消息树连续保留近期历史；再次切换时链式携带，保证"上上个会话"的内容也可用；更早内容由梗概/压缩摘要覆盖。
 
 ### 记忆路由（memory）
 记忆是第三个内核插件，按层级路径组织（`学科/知识点/条目`）。工具：`memory::save(path, content)`（模型自动保存，用户也可调）、`memory::show(path?)`（无参数列出全部条目名，带参数看详情）、`memory::remove(path)`（强制参数，**仅用户可调**）。上下文只注入一行入口提示，模型自行浏览（show 无参数 = 列目录）；路径由 memory 插件校验（拒绝越界）。
@@ -89,7 +93,9 @@ v2 同一轮多个工具调用**串行执行**；并行列入后续（按依赖�
 `compute::verify` 让模型跑 Python 验算（解方程、数值验证、单位换算）。执行端为 GUI WebView 内的 **Pyodide**（Python + SymPy/NumPy 的 WASM 构建），WASM 即沙箱（默认无文件、无网络），经 RPC 桥接；超时、审计由 kernel 侧 compute 插件负责。GUI 离线时验算不可用（可接受）。
 
 ### GUI 通信协议
-stdio 上的 newline-delimited JSON。GUI → kernel：`send_user_message`、`trigger_command(entry, params)`、`edit_message`、`switch_branch`、`abort`、`get_state`、`get_settings/set_settings`。kernel → GUI：事件流（message_delta、tool_start/end、turn_end、session_switched、memory_changed、compaction、error）。**命令唯一通道是 trigger_command**：GUI 不传可任意执行的文本命令，前端门禁由此结构性成立。
+GUI → kernel：`send_user_message`、`trigger_command(entry, params)`、`edit_message`、`switch_branch`、`abort`、`get_state`、`get_settings/set_settings`、`list_sessions`、`read_session`、`compute_result`（Pyodide 验算回执）。kernel → GUI：事件流（message_delta、reasoning_delta、tool_start/end、tool_progress、turn_end、session_switched、memory_changed、compaction、compute_request、error）。**命令唯一通道是 trigger_command**：GUI 不传可任意执行的文本命令，前端门禁由此结构性成立；找不到同名 Command 时回退放行同名 Tool（用户对 UserAndModel/UserOnly 工具均可调）。
+
+**Standalone（ADR-0029）**：kernel 直接运行在 Tauri GUI 进程内（mpsc + Channel 桥接），mistake-agent 不依赖任何外部进程/二进制；`src/bin/sidecar.rs` 保留为独立 CLI 调试入口，仅用于脚本与管道测试。
 
 ### 审计与日志
 - **审计（Audit）**：默认全覆盖——任何操作都记录（工具调用、消息完成、编辑、会话切换、记忆变更、配置变更、LLM 调用、compute 执行、越权拒绝、生命周期）。写 `audit/` JSONL，记元数据与引用（大内容不复制）；compute 的代码与结果全量记录。10MB 归档轮转。
@@ -137,9 +143,10 @@ stdio 上的 newline-delimited JSON。GUI → kernel：`send_user_message`、`tr
 | 图片输入 | 不支持（占位替换）→ 视觉模型走 Chat Completions |
 | 来源 | [官方指南（英）](https://api-docs.deepseek.com/guides/responses_api/) / [（中）](https://api-docs.deepseek.com/zh-cn/guides/responses_api/)，2026-08-04 核对 |
 
-- 守卫模型：可选 `guard_model` 配置项，默认复用主模型；prompt 独立、无工具列表，只做会话调度判断，想更省可单独配更小模型。
+- 守卫模型：**已真接入**（LlmGuard 默认复用主模型，prompt 独立、无工具列表，输出 continue/update_goal/start_new，解析失败/模型错误一律 continue 保底；可选 `guard_model` 配置项）。会话交接摘要与上下文压缩摘要由 LlmSummarizer 生成（≤300 字，保留错题 id/知识点/未完成事项，模型错误降级为计数摘要）。
 - 可选 Ollama 本地模型（离线场景，不填 key）。
 - 首次运行由设置向导引导填写。
+- 设置热更新：`set_settings` 落盘后双模型服务热替换（LiveSettingsModelService），下一轮模型调用即用新端点/模型/key；settings.json 仍为唯一持久事实。
 
 ## 7. 技术栈
 
@@ -147,7 +154,7 @@ stdio 上的 newline-delimited JSON。GUI → kernel：`send_user_message`、`tr
 |---|---|
 | 内核 | Rust 2024 edition（单 crate，纯自研） |
 | GUI | Tauri（Rust 壳 + WebView2） |
-| 通信 | stdio JSONL RPC（sidecar 进程） |
+| 通信 | 进程内 RPC（Tauri Channel/命令桥接）；sidecar CLI 仅调试用 |
 | 存储 | 本地文件：JSONL（会话/审计/记忆）+ 错题本 JSON |
 | 验算 | Pyodide（WASM Python + SymPy/NumPy，跑在 WebView） |
 | LLM | 主模型走 DeepSeek Responses API；视觉模型走 OpenAI 兼容 Chat Completions（SiliconFlow / Ollama） |
@@ -162,8 +169,8 @@ mistake-agent/
 ├── Cargo.toml                    ← 单 crate（edition = "2024"，Tauri GUI + kernel sidecar 两个 bin）
 ├── src/
 │   ├── lib.rs                    ← 库出口（kernel 公开面 + plugin 注册聚合）
-│   ├── main.rs                   ← Tauri GUI 入口
-│   ├── bin/sidecar.rs            ← kernel 进程入口（stdio RPC）
+│   ├── main.rs                   ← Tauri GUI 入口（进程内 kernel，standalone）
+│   ├── bin/sidecar.rs            ← kernel CLI 调试入口（stdio RPC，GUI 不依赖）
 │   ├── kernel.rs                 ← kernel 模块入口（mod kernel;）
 │   ├── kernel/                   ← 内核子模块（Rust 2018 布局，无 mod.rs）
 │   │   ├── loop.rs               ← agent loop（复杂了再加 loop/ 子目录）
@@ -182,24 +189,26 @@ mistake-agent/
 
 ## 9. 当前状态
 
-- 设计已定稿：23 条 ADR + 术语表（CONTEXT.md），本总览为唯一入门文档。
-- 代码已开始（2026-08）：单 crate 骨架 + kernel（契约/事件/日志/审计/注册表/dispatch/loop/RPC/session 调度）+ 四服务契约（storage/memory/compute/model，storage 已文件持久化）+ 用户插件 hello/grading。
-- 已打通任务三·场景一真实链路：图片/文本 PDF 上传 → SiliconFlow Qwen3-VL-32B-Instruct OCR 提取 → DeepSeek deepseek-v4-flash（Responses API，json_schema 严格输出）逐题判分 → 错题归档。
-- Tauri GUI 可用（Vue 3 + Vite，聊天 UI、文件选择器、流式打字机、思维链折叠、工具进度、停止按钮，Iconify 图标），stdio JSONL sidecar 桥接。
-- 三套作业样例端到端跑通（samples/：1 真实照片 + 2 合成卷）。
-- 验收命令：`cd web && npm install && npm run build`；`cargo test`（单元）；`cargo test --test live_api -- --ignored`（真实 API）；`cargo run --bin sidecar`（kernel CLI）；`cargo run --bin mistake-agent`（GUI）。
+- **M1–M6 主体已完成（除 Windows 打包）**，设计文档 29 条 ADR + 术语表（CONTEXT.md）。
+- kernel：注册表/两段式契约/dispatch/loop/RPC/session 调度全链路；四服务全部生产实现——storage（文件持久化：会话 JSONL/错题 JSON/审计 JSONL 轮转）、memory（文件持久化 + MemoryHandle 事件/审计）、model（Responses API + Chat Completions，LiveSettingsModelService 热更新）、compute（BridgeCompute → GUI Pyodide）。
+- 守卫模型与摘要器真接入（LlmGuard/LlmSummarizer）；消息树编辑/切分支（derive_branch/switch_branch）、上下文压缩（75% 阈值、最近 15 条保留）、InterruptBus 回合边界消费全部落地；审计记录点补齐（含 SessionSwitched/Memory*/SettingsChanged/Interrupt/MessageEdited/BranchSwitched）。
+- 用户插件 8 个：demo/hello、grading（场景一：上传→OCR→判分→错题归档，输出 subject/reference_answer）、memory、compute、practice、report、exam、tracking——五个场景工具均可从会话内触达。
+- 场景一真实链路复验通过（2026-08-04）：图片/文本 PDF → Qwen3-VL OCR → deepseek-v4-flash（Responses API json_schema）判分 → 错题归档；assistant 消息落盘与 usage 解析已修复并有 live_api 断言。
+- Tauri GUI 正式化（Vue 3 + Vite，按 ui-ux-pro-max 设计系统）：聊天/错题本/会话历史/设置四页，思维链默认折叠、流式打字机、工具进度、停止、消息树编辑与分支切换、Pyodide 验算执行端（本地 WASM）、Iconify 图标、Markdown+KaTeX+DOMPurify 防 XSS、几何图渲染。
+- **Standalone**：kernel 内嵌 GUI 进程，mistake-agent 单二进制即可运行（不再需要 sidecar 同目录）。
+- 验收命令：`cd web && npm install && npm run build`；`cargo test`（54 项单元）；`cargo test --test live_api -- --ignored`（真实 API：hello 落盘+usage、三套样例、memory 往返）；`cargo run --bin sidecar`（kernel CLI）；`cargo run --bin mistake-agent`（GUI）。
 
 ## 10. 里程碑
 
 | 里程碑 | 内容 | 验收标准 |
 |---|---|---|
-| M1 | 单 crate 骨架 + kernel 模块 | trait、注册表、dispatch、loop 空转可编译，hello 回合跑通 |
-| M1.5 | kernel 的 session 模块 | SessionKey 派生、生命周期、交接摘要可单测 |
-| M2 | services：storage / model / memory | 会话与审计可持久化；双模型可调用；记忆目录可读写 |
-| M3 | RPC + Tauri 壳 | GUI 发消息 → kernel 调主模型 → 回复显示，闭环 |
-| M4 | 五个插件 + compute::verify | 上传图片 → OCR → 批改 → 归档全链路；验算可用 |
-| M5 | 消息树 / 记忆路由 / 设置向导 / 审计日志 | 编辑产生分支、< > 切换；设置页可配双模型 |
-| M6 | Windows 打包 + 测试 + 文档 | setup.exe 可装、五场景端到端样例通过 |
+| M1 | 单 crate 骨架 + kernel 模块 | ✅ 完成：trait、注册表、dispatch、loop，hello 回合真实跑通 |
+| M1.5 | kernel 的 session 模块 | ✅ 完成：SessionKey、生命周期、交接摘要（LlmSummarizer） |
+| M2 | services：storage / model / memory | ✅ 完成：会话/审计文件持久化、双模型可调用（热更新）、记忆目录可读写 |
+| M3 | RPC + Tauri 壳 | ✅ 完成：GUI ↔ sidecar stdio JSONL 闭环 |
+| M4 | 五个插件 + compute::verify | ✅ 完成：8 插件注册；场景一全链路 + Pyodide 验算桥接 |
+| M5 | 消息树 / 记忆路由 / 设置向导 / 审计日志 | ✅ 完成：编辑/切分支、memory 工具、设置页、审计补全 |
+| M6 | Windows 打包 + 测试 + 文档 | 🟡 除 Windows 打包外完成：54 单测 + 3 真实 API 链路 + 文档同步；setup.exe 待 Windows 环境 |
 
 ## 11. 分工建议（3-5 人）
 
@@ -219,7 +228,7 @@ mistake-agent/
 - 三类入口点：**Tool**（LLM 调度）、**Command**（GUI/用户调度）、**Event**（kernel 生命周期调度）。
 - 内核服务：`ServiceId::{Storage, Memory, Compute, Model}`。
 - 会话调度是独立内核级模块（kernel-session），**不占 ServiceId**；守卫模型由该模块直接调用。
-- 工具列表示例：`grading::upload / grading::list / practice::generate / report::weekly / exam::compose / tracking::checkin / compute::verify / memory::save / memory::show / memory::remove / session::history / session::read`。
+- 工具列表示例：`grading::upload / grading::list / practice::generate / report::weekly / exam::compose / tracking::checkin / compute::verify / memory::save / memory::show / memory::remove`；会话历史经 RPC `list_sessions / read_session` 提供（不注册为模型工具）。
 
 ## 13. 术语表（浓缩）
 

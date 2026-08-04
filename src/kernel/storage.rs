@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use crate::kernel::audit::{AuditRecord, AuditSink};
-use crate::kernel::message::{Message, MessageId};
+use crate::kernel::message::{Message, MessageId, MessageKind};
 use crate::kernel::services::{
     Mistake, MistakeFilter, MistakeId, MistakePatch, MistakeStore, SessionStore, StorageError,
     StorageService,
@@ -78,7 +78,17 @@ impl SessionStore for MemoryStorage {
     }
 
     async fn read_path(&self, key: &SessionKey) -> Result<Vec<Message>, StorageError> {
-        self.read_all(key).await
+        let (messages, active_path) = {
+            let inner = self.inner.lock().expect("storage poisoned");
+            let messages = inner
+                .messages
+                .get(key)
+                .cloned()
+                .ok_or(StorageError::SessionNotFound(*key))?;
+            let active_path = inner.sessions.get(key).and_then(|m| m.active_path);
+            (messages, active_path)
+        };
+        Ok(active_chain(&messages, active_path))
     }
 
     async fn read_all(&self, key: &SessionKey) -> Result<Vec<Message>, StorageError> {
@@ -90,6 +100,103 @@ impl SessionStore for MemoryStorage {
             .get(key)
             .cloned()
             .unwrap_or_default())
+    }
+
+    async fn set_active_path(
+        &self,
+        key: &SessionKey,
+        message_id: Option<MessageId>,
+    ) -> Result<(), StorageError> {
+        let mut inner = self.inner.lock().expect("storage poisoned");
+        let meta = inner
+            .sessions
+            .get_mut(key)
+            .ok_or(StorageError::SessionNotFound(*key))?;
+        meta.active_path = message_id;
+        Ok(())
+    }
+
+    async fn derive_branch(
+        &self,
+        key: &SessionKey,
+        message_id: MessageId,
+        text: &str,
+    ) -> Result<Vec<Message>, StorageError> {
+        let (messages, active_path) = {
+            let inner = self.inner.lock().expect("storage poisoned");
+            let messages = inner
+                .messages
+                .get(key)
+                .cloned()
+                .ok_or(StorageError::SessionNotFound(*key))?;
+            let active_path = inner.sessions.get(key).and_then(|m| m.active_path);
+            (messages, active_path)
+        };
+        let chain = active_chain(&messages, active_path);
+        let idx = chain
+            .iter()
+            .position(|m| m.id == message_id)
+            .ok_or(StorageError::Internal("消息不在活跃路径".into()))?;
+        let original = &chain[idx];
+        if !matches!(original.kind, MessageKind::Assistant { .. }) {
+            return Err(StorageError::Internal("只能编辑 assistant 消息".into()));
+        }
+        let mut new_msg = original.clone();
+        new_msg.id = MessageId::new();
+        new_msg.parent_id = original.parent_id;
+        new_msg.kind = MessageKind::Assistant {
+            text: text.to_string(),
+        };
+        new_msg.created_at = chrono::Utc::now();
+
+        let mut new_path = chain[..idx].to_vec();
+        new_path.push(new_msg.clone());
+        let mut inner = self.inner.lock().expect("storage poisoned");
+        let path = inner
+            .messages
+            .get_mut(key)
+            .ok_or(StorageError::SessionNotFound(*key))?;
+        path.push(new_msg);
+        let meta = inner
+            .sessions
+            .get_mut(key)
+            .ok_or(StorageError::SessionNotFound(*key))?;
+        meta.active_path = new_path.last().map(|m| m.id);
+        Ok(new_path)
+    }
+
+    async fn switch_branch(
+        &self,
+        key: &SessionKey,
+        message_id: MessageId,
+    ) -> Result<Vec<Message>, StorageError> {
+        let messages = self.read_all(key).await?;
+        if !messages.iter().any(|m| m.id == message_id) {
+            return Err(StorageError::Internal("消息不存在".into()));
+        }
+        let chain = active_chain(&messages, Some(message_id));
+        self.set_active_path(key, Some(message_id)).await?;
+        Ok(chain)
+    }
+
+    async fn splice_compaction(
+        &self,
+        key: &SessionKey,
+        summary: &Message,
+        tail_start: MessageId,
+    ) -> Result<(), StorageError> {
+        let mut inner = self.inner.lock().expect("storage poisoned");
+        let path = inner
+            .messages
+            .get_mut(key)
+            .ok_or(StorageError::SessionNotFound(*key))?;
+        let tail = path
+            .iter_mut()
+            .find(|m| m.id == tail_start)
+            .ok_or(StorageError::Internal("保留段首条不存在".into()))?;
+        tail.parent_id = Some(summary.id);
+        path.push(summary.clone());
+        Ok(())
     }
 
     async fn set_goal(&self, key: &SessionKey, goal: &Goal) -> Result<(), StorageError> {
@@ -402,7 +509,17 @@ impl SessionStore for FileStorage {
     }
 
     async fn read_path(&self, key: &SessionKey) -> Result<Vec<Message>, StorageError> {
-        self.read_all(key).await
+        let (messages, active_path) = {
+            let inner = self.inner.lock().expect("storage poisoned");
+            let messages = inner
+                .messages
+                .get(key)
+                .cloned()
+                .ok_or(StorageError::SessionNotFound(*key))?;
+            let active_path = inner.sessions.get(key).and_then(|m| m.active_path);
+            (messages, active_path)
+        };
+        Ok(active_chain(&messages, active_path))
     }
 
     async fn read_all(&self, key: &SessionKey) -> Result<Vec<Message>, StorageError> {
@@ -414,6 +531,109 @@ impl SessionStore for FileStorage {
             .get(key)
             .cloned()
             .unwrap_or_default())
+    }
+
+    async fn set_active_path(
+        &self,
+        key: &SessionKey,
+        message_id: Option<MessageId>,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .lock()
+            .expect("storage poisoned")
+            .sessions
+            .get_mut(key)
+            .ok_or(StorageError::SessionNotFound(*key))?
+            .active_path = message_id;
+        self.persist_session_meta(key)
+    }
+
+    async fn derive_branch(
+        &self,
+        key: &SessionKey,
+        message_id: MessageId,
+        text: &str,
+    ) -> Result<Vec<Message>, StorageError> {
+        let (messages, active_path) = {
+            let inner = self.inner.lock().expect("storage poisoned");
+            let messages = inner
+                .messages
+                .get(key)
+                .cloned()
+                .ok_or(StorageError::SessionNotFound(*key))?;
+            let active_path = inner.sessions.get(key).and_then(|m| m.active_path);
+            (messages, active_path)
+        };
+        let chain = active_chain(&messages, active_path);
+        let idx = chain
+            .iter()
+            .position(|m| m.id == message_id)
+            .ok_or(StorageError::Internal("消息不在活跃路径".into()))?;
+        let original = &chain[idx];
+        if !matches!(original.kind, MessageKind::Assistant { .. }) {
+            return Err(StorageError::Internal("只能编辑 assistant 消息".into()));
+        }
+        let mut new_msg = original.clone();
+        new_msg.id = MessageId::new();
+        new_msg.parent_id = original.parent_id;
+        new_msg.kind = MessageKind::Assistant {
+            text: text.to_string(),
+        };
+        new_msg.created_at = chrono::Utc::now();
+
+        let mut new_path = chain[..idx].to_vec();
+        new_path.push(new_msg.clone());
+        {
+            let mut inner = self.inner.lock().expect("storage poisoned");
+            let path = inner
+                .messages
+                .get_mut(key)
+                .ok_or(StorageError::SessionNotFound(*key))?;
+            path.push(new_msg);
+            let meta = inner
+                .sessions
+                .get_mut(key)
+                .ok_or(StorageError::SessionNotFound(*key))?;
+            meta.active_path = new_path.last().map(|m| m.id);
+        }
+        self.persist_session_meta(key)?;
+        Ok(new_path)
+    }
+
+    async fn switch_branch(
+        &self,
+        key: &SessionKey,
+        message_id: MessageId,
+    ) -> Result<Vec<Message>, StorageError> {
+        let messages = self.read_all(key).await?;
+        if !messages.iter().any(|m| m.id == message_id) {
+            return Err(StorageError::Internal("消息不存在".into()));
+        }
+        let chain = active_chain(&messages, Some(message_id));
+        self.set_active_path(key, Some(message_id)).await?;
+        Ok(chain)
+    }
+
+    async fn splice_compaction(
+        &self,
+        key: &SessionKey,
+        summary: &Message,
+        tail_start: MessageId,
+    ) -> Result<(), StorageError> {
+        {
+            let mut inner = self.inner.lock().expect("storage poisoned");
+            let path = inner
+                .messages
+                .get_mut(key)
+                .ok_or(StorageError::SessionNotFound(*key))?;
+            let tail = path
+                .iter_mut()
+                .find(|m| m.id == tail_start)
+                .ok_or(StorageError::Internal("保留段首条不存在".into()))?;
+            tail.parent_id = Some(summary.id);
+            path.push(summary.clone());
+        }
+        self.persist_session_meta(key)
     }
 
     async fn set_goal(&self, key: &SessionKey, goal: &Goal) -> Result<(), StorageError> {
@@ -619,6 +839,48 @@ impl SessionStore for AnyStorage {
             AnyStorage::Mem(s) => s.read_all(key).await,
         }
     }
+    async fn set_active_path(
+        &self,
+        key: &SessionKey,
+        message_id: Option<MessageId>,
+    ) -> Result<(), StorageError> {
+        match self {
+            AnyStorage::File(s) => s.set_active_path(key, message_id).await,
+            AnyStorage::Mem(s) => s.set_active_path(key, message_id).await,
+        }
+    }
+    async fn derive_branch(
+        &self,
+        key: &SessionKey,
+        message_id: MessageId,
+        text: &str,
+    ) -> Result<Vec<Message>, StorageError> {
+        match self {
+            AnyStorage::File(s) => s.derive_branch(key, message_id, text).await,
+            AnyStorage::Mem(s) => s.derive_branch(key, message_id, text).await,
+        }
+    }
+    async fn switch_branch(
+        &self,
+        key: &SessionKey,
+        message_id: MessageId,
+    ) -> Result<Vec<Message>, StorageError> {
+        match self {
+            AnyStorage::File(s) => s.switch_branch(key, message_id).await,
+            AnyStorage::Mem(s) => s.switch_branch(key, message_id).await,
+        }
+    }
+    async fn splice_compaction(
+        &self,
+        key: &SessionKey,
+        summary: &Message,
+        tail_start: MessageId,
+    ) -> Result<(), StorageError> {
+        match self {
+            AnyStorage::File(s) => s.splice_compaction(key, summary, tail_start).await,
+            AnyStorage::Mem(s) => s.splice_compaction(key, summary, tail_start).await,
+        }
+    }
     async fn set_goal(&self, key: &SessionKey, goal: &Goal) -> Result<(), StorageError> {
         match self {
             AnyStorage::File(s) => s.set_goal(key, goal).await,
@@ -723,6 +985,31 @@ pub fn last_message_id(messages: &[Message]) -> Option<MessageId> {
     messages.last().map(|m| m.id)
 }
 
+/// 沿 parent 链回溯构造活跃路径（根 → 末端）。
+/// `active_path` 为 None（旧数据/线性会话）时退化为完整消息列表。
+pub(crate) fn active_chain(messages: &[Message], active_path: Option<MessageId>) -> Vec<Message> {
+    let Some(end) = active_path else {
+        return messages.to_vec();
+    };
+    let by_id: HashMap<MessageId, Message> = messages.iter().map(|m| (m.id, m.clone())).collect();
+    if !by_id.contains_key(&end) {
+        return messages.to_vec();
+    }
+    let mut chain = Vec::new();
+    let mut cur = Some(end);
+    while let Some(id) = cur {
+        match by_id.get(&id) {
+            Some(m) => {
+                cur = m.parent_id;
+                chain.push(m.clone());
+            }
+            None => break,
+        }
+    }
+    chain.reverse();
+    chain
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -779,5 +1066,87 @@ mod tests {
             store.get_session(&key).await.unwrap().unwrap().status,
             SessionStatus::Archived
         );
+    }
+
+    #[tokio::test]
+    async fn message_tree_branch_derive_and_switch() {
+        let store = MemoryStorage::new();
+        let key = SessionKey::new();
+        store
+            .create_session(&key, &SessionMeta::new(key))
+            .await
+            .unwrap();
+
+        let u1 = Message::user("第一问");
+        let a1 = Message::assistant("回答一");
+        let u2 = Message::user("追问");
+        let a2 = Message::assistant("回答二");
+        let mut prev = None;
+        for m in [&u1, &a1, &u2, &a2] {
+            let mut m = m.clone();
+            m.parent_id = prev;
+            prev = Some(m.id);
+            store.append_message(&key, &m).await.unwrap();
+        }
+        assert_eq!(store.read_path(&key).await.unwrap().len(), 4);
+
+        // 编辑 a1 → 派生新分支 [u1, a1']
+        let path = store
+            .derive_branch(&key, a1.id, "回答一（修订）")
+            .await
+            .unwrap();
+        assert_eq!(path.len(), 2);
+        assert!(
+            matches!(&path[1].kind, MessageKind::Assistant { text } if text == "回答一（修订）")
+        );
+        // 历史保留：JSONL 共 5 条，活跃路径只剩 2 条。
+        assert_eq!(store.read_all(&key).await.unwrap().len(), 5);
+        assert_eq!(store.read_path(&key).await.unwrap().len(), 2);
+
+        // 不能编辑 user 消息。
+        assert!(store.derive_branch(&key, u1.id, "改了").await.is_err());
+
+        // 切回 a2 分支（4 条原始路径）。
+        let path2 = store.switch_branch(&key, a2.id).await.unwrap();
+        assert_eq!(path2.len(), 4);
+        assert_eq!(path2[3].id, a2.id);
+        assert_eq!(store.read_path(&key).await.unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn compaction_splice_relinks_tail_and_appends_summary() {
+        let store = MemoryStorage::new();
+        let key = SessionKey::new();
+        store
+            .create_session(&key, &SessionMeta::new(key))
+            .await
+            .unwrap();
+        let m1 = Message::user("旧 1");
+        let m2 = Message::user("旧 2");
+        let m3 = Message::user("保留 3");
+        let mut prev = None;
+        for m in [&m1, &m2, &m3] {
+            let mut m = m.clone();
+            m.parent_id = prev;
+            prev = Some(m.id);
+            store.append_message(&key, &m).await.unwrap();
+        }
+
+        let summary = Message::system("上下文压缩摘要：…");
+        store
+            .splice_compaction(&key, &summary, m3.id)
+            .await
+            .unwrap();
+        let all = store.read_all(&key).await.unwrap();
+        assert_eq!(all.len(), 4, "摘要追加，旧消息全量保留");
+        assert_eq!(summary.parent_id, None, "摘要是新活跃路径根");
+        let tail = all.iter().find(|m| m.id == m3.id).unwrap();
+        assert_eq!(tail.parent_id, Some(summary.id), "保留段首条改挂摘要");
+
+        store.set_active_path(&key, Some(m3.id)).await.unwrap();
+        let path = store.read_path(&key).await.unwrap();
+        assert_eq!(path.len(), 2, "活跃路径 = 摘要 + 保留段");
+        assert_eq!(path[0].id, summary.id);
+        assert_eq!(path[1].id, m3.id);
     }
 }

@@ -1,84 +1,180 @@
-//! Tauri GUI 入口：拉起 sidecar kernel，经 stdio JSONL 通信（Channel 桥接）。
+//! Tauri GUI 入口：kernel 直接运行在本进程内（standalone，无 sidecar 依赖）。
+//! GUI ↔ kernel 经内存通道桥接：前端请求 → Kernel::handle → 响应/事件帧 → Channel 回推。
+//! src/bin/sidecar.rs 保留为独立 CLI 调试入口，不再被 GUI 依赖。
 
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::Mutex;
+use std::path::Path;
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::Arc;
 
+use serde::Serialize;
 use tauri::{Manager, State, ipc::Channel};
+use tokio::sync::mpsc;
 
-struct KernelProcess {
+use mistake_agent::kernel::events::{Event, EventSink};
+use mistake_agent::kernel::rpc::{Kernel, RpcFrame, RpcRequest};
+
+/// 进程内桥接：前端 → kernel 的请求通道 + kernel 句柄。
+struct KernelBridge {
+    req_tx: mpsc::UnboundedSender<String>,
     #[allow(dead_code)]
-    child: Mutex<Child>,
-    stdin: Mutex<ChildStdin>,
+    kernel: Arc<Kernel>,
 }
 
-/// 启动 sidecar：stdout 逐行经 Channel 推给前端，前端经 kernel_send 回写 stdin。
-#[tauri::command]
-fn start_kernel(app: tauri::AppHandle, on_frame: Channel<String>) -> Result<(), String> {
-    let sidecar = sidecar_path();
-    let mut child = Command::new(sidecar)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("拉起 sidecar 失败：{e}"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "sidecar 无 stdout".to_string())?;
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "sidecar 无 stdin".to_string())?;
+/// kernel 事件 → 前端 Channel（事件帧 JSONL，与 RPC 响应共用通道）。
+struct ChannelEventSink {
+    on_frame: Channel<String>,
+}
 
-    if let Some(stderr) = child.stderr.take() {
-        std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                eprintln!("[sidecar] {line}");
-            }
-        });
+impl EventSink for ChannelEventSink {
+    fn emit(&self, event: Event) {
+        let frame = RpcFrame::Event { event };
+        if let Ok(line) = serde_json::to_string(&frame) {
+            let _ = self.on_frame.send(line);
+        }
     }
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            let Ok(line) = line else { break };
-            let _ = on_frame.send(line);
+}
+
+/// 启动进程内 kernel：Kernel::new 完成后，请求循环在 Tauri async runtime 上运行。
+#[tauri::command]
+async fn start_kernel(app: tauri::AppHandle, on_frame: Channel<String>) -> Result<(), String> {
+    let events: Arc<dyn EventSink> = Arc::new(ChannelEventSink {
+        on_frame: on_frame.clone(),
+    });
+    let kernel = Kernel::new(events).await?;
+
+    let (req_tx, mut req_rx) = mpsc::unbounded_channel::<String>();
+    let kernel_for_loop = kernel.clone();
+    let on_frame_for_loop = on_frame.clone();
+    tauri::async_runtime::spawn(async move {
+        while let Some(line) = req_rx.recv().await {
+            let Ok(request) = serde_json::from_str::<RpcRequest>(&line) else {
+                continue;
+            };
+            let id = request.id;
+            let frame = match kernel_for_loop.handle(request).await {
+                Ok(Some(frame)) => frame,
+                Ok(None) => continue,
+                Err(e) => RpcFrame::Response {
+                    id,
+                    result: None,
+                    error: Some(e),
+                },
+            };
+            if let Ok(line) = serde_json::to_string(&frame) {
+                let _ = on_frame_for_loop.send(line);
+            }
         }
     });
 
-    app.manage(KernelProcess {
-        child: Mutex::new(child),
-        stdin: Mutex::new(stdin),
-    });
+    app.manage(KernelBridge { req_tx, kernel });
     Ok(())
 }
 
-/// 定位 sidecar 二进制：开发期与主程序同目录（target/debug/），打包期随 bundle 放置。
-fn sidecar_path() -> std::path::PathBuf {
-    let exe = std::env::current_exe().expect("无法定位当前可执行文件");
-    let dir = exe.parent().expect("无法定位可执行文件目录");
-    let name = if cfg!(windows) {
-        "sidecar.exe"
-    } else {
-        "sidecar"
-    };
-    dir.join(name)
+/// 前端请求 → kernel（一行 JSONL，语义与 sidecar 协议一致）。
+#[tauri::command]
+fn kernel_send(state: State<'_, KernelBridge>, line: String) -> Result<(), String> {
+    state.req_tx.send(line).map_err(|e| e.to_string())
 }
 
-/// 向前端转发：写一行 JSONL 请求给 sidecar。
-#[tauri::command]
-fn kernel_send(state: State<'_, KernelProcess>, line: String) -> Result<(), String> {
-    let mut stdin = state.stdin.lock().map_err(|e| e.to_string())?;
-    writeln!(stdin, "{line}").map_err(|e| e.to_string())?;
-    stdin.flush().map_err(|e| e.to_string())
+/// 上传结果：temp_path 给 kernel（安全暂存，处理后删除）；
+/// asset_path 是数据根目录 uploads/ 的持久副本，供前端展示（不随 temp 删除）。
+#[derive(Serialize)]
+struct PickResult {
+    temp_path: String,
+    asset_path: String,
+    name: String,
 }
 
-/// 作业文件选择器：返回本地路径，前端拼成消息让模型调 grading::upload。
+/// 作业文件选择器：所选文件同时生成两份副本——
+/// 1) 系统临时目录（mistake-agent- 前缀，kernel 白名单，处理后即删）；
+/// 2) 数据根目录 uploads/（持久化，前端图片/PDF 展示用）。
 #[tauri::command]
-fn pick_homework_file() -> Result<Option<String>, String> {
+fn pick_homework_file() -> Result<Option<PickResult>, String> {
     let picked = rfd::FileDialog::new()
         .add_filter("作业文件", &["png", "jpg", "jpeg", "webp", "bmp", "pdf"])
         .pick_file();
-    Ok(picked.map(|p| p.to_string_lossy().into_owned()))
+    picked.map(|p| stage_files(&p)).transpose()
+}
+
+/// 复制到系统临时目录，文件名带 mistake-agent- 前缀（kernel 白名单依据）。
+fn stage_files(source: &Path) -> Result<PickResult, String> {
+    let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("dat");
+    let uuid = uuid::Uuid::new_v4();
+    let temp_name = format!("mistake-agent-{uuid}.{ext}");
+    let temp_dest = std::env::temp_dir().join(&temp_name);
+    std::fs::copy(source, &temp_dest).map_err(|e| format!("暂存文件失败：{e}"))?;
+
+    let root = mistake_agent::kernel::settings::Settings::data_root();
+    let uploads = root.join("uploads");
+    std::fs::create_dir_all(&uploads).map_err(|e| format!("创建附件目录失败：{e}"))?;
+    let asset_name = format!("{uuid}.{ext}");
+    let asset_dest = uploads.join(&asset_name);
+    std::fs::copy(source, &asset_dest).map_err(|e| format!("附件持久化失败：{e}"))?;
+
+    let name = source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&asset_name)
+        .to_string();
+    Ok(PickResult {
+        temp_path: temp_dest.to_string_lossy().into_owned(),
+        asset_path: asset_dest.to_string_lossy().into_owned(),
+        name,
+    })
+}
+
+/// 读取 uploads/ 持久附件（base64），前端渲染图片/PDF 用。
+/// 安全白名单：只允许数据根目录 uploads/ 下的文件（canonicalize 防符号链接逃逸）。
+#[tauri::command]
+fn read_upload(path: String) -> Result<String, String> {
+    let uploads = mistake_agent::kernel::settings::Settings::data_root().join("uploads");
+    let canonical = verify_in_uploads(&path, &uploads)?;
+    use base64::Engine;
+    let bytes = std::fs::read(&canonical).map_err(|e| format!("读取附件失败：{e}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// 用系统默认程序打开附件（PDF 预览兜底：WebView 打不开时学生也能看）。
+#[tauri::command]
+fn open_attachment(path: String) -> Result<(), String> {
+    let uploads = mistake_agent::kernel::settings::Settings::data_root().join("uploads");
+    let canonical = verify_in_uploads(&path, &uploads)?;
+    let target = canonical.to_string_lossy().into_owned();
+    #[cfg(target_os = "windows")]
+    let status = Command::new("cmd")
+        .args(["/C", "start", "", &target])
+        .spawn()
+        .map_err(|e| format!("打开附件失败：{e}"))?
+        .wait();
+    #[cfg(target_os = "macos")]
+    let status = Command::new("open")
+        .arg(&target)
+        .spawn()
+        .map_err(|e| format!("打开附件失败：{e}"))?
+        .wait();
+    #[cfg(target_os = "linux")]
+    let status = Command::new("xdg-open")
+        .arg(&target)
+        .spawn()
+        .map_err(|e| format!("打开附件失败：{e}"))?
+        .wait();
+    status.map_err(|e| format!("打开附件失败：{e}"))?;
+    Ok(())
+}
+
+/// 附件白名单校验：路径必须位于 uploads/ 目录内（canonicalize 防符号链接逃逸）。
+fn verify_in_uploads(path: &str, uploads: &Path) -> Result<PathBuf, String> {
+    let canonical = Path::new(path)
+        .canonicalize()
+        .map_err(|e| format!("无法读取附件：{e}"))?;
+    let uploads_canon = uploads
+        .canonicalize()
+        .map_err(|_| "附件目录不可用".to_string())?;
+    if !canonical.starts_with(&uploads_canon) {
+        return Err("附件路径不在允许目录内".into());
+    }
+    Ok(canonical)
 }
 
 fn main() {
@@ -86,8 +182,29 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             start_kernel,
             kernel_send,
-            pick_homework_file
+            pick_homework_file,
+            read_upload,
+            open_attachment
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用运行失败");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upload_whitelist_accepts_only_uploads_dir() {
+        let tmp = std::env::temp_dir().join(format!("ma-upload-test-{}", uuid::Uuid::new_v4()));
+        let uploads = tmp.join("uploads");
+        std::fs::create_dir_all(&uploads).unwrap();
+        let inside = uploads.join("a.png");
+        std::fs::write(&inside, b"x").unwrap();
+        let outside = tmp.join("secret.txt");
+        std::fs::write(&outside, b"x").unwrap();
+        assert!(verify_in_uploads(&inside.to_string_lossy(), &uploads).is_ok());
+        assert!(verify_in_uploads(&outside.to_string_lossy(), &uploads).is_err());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

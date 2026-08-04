@@ -22,6 +22,7 @@
 - 路径以用户为准，不猜测。
 - 失败处理分级（可重试一次 / 系统性错误直接告知）。
 - 表达规范（数学记号、不展示 reasoning、敏感话题引导求助）。
+- **LaTeX 增强渲染**：数学/物理/化学等富文本一律用 `$...$` / `$$...$$` 标记（`\frac`、`\sqrt`、`\mathrm`、`\vec`、`pmatrix`），前端 KaTeX 渲染。
 - 本地运行环境说明。
 
 ### 2. OCR 提示（ocr_prompt）
@@ -31,15 +32,19 @@
 ### 3. 判分系统提示（grading_system_prompt）
 
 主模型使用，配合 `text.format = json_schema`（内联扁平数组 schema，src/plugin/grading.rs）：
-逐题输出 number/question/student_answer/correct/score/total/knowledge_point/analysis；强制数组包裹。
+逐题输出 number/question/student_answer/correct/score/total/knowledge_point/analysis/subject/reference_answer；
+`subject` 为学科（数学/英语/物理/化学/生物/语文等，无法判断填"未分类"），`reference_answer` 为该题参考答案（可 null）；
+强制数组包裹。
 
 ### 4. 守卫模型提示（guard_prompt）— M2 落地
 
-会话调度守卫（当前为 stub 关键词决策）：continue / update_goal / start_new 三动作，存疑即 continue，start_new 仅当目标明显无关。
+会话调度守卫（生产实现 = 主模型 + guard_prompt 独立调用，输出严格 JSON）：continue / update_goal / start_new 三动作，
+存疑即 continue，start_new 仅当目标明显无关；守卫解析失败/调用失败时按 continue 兜底（存疑即继续）。
 
 ### 5. 压缩/交接摘要提示（summarize_prompt）— M2 落地
 
-保留错题 id、知识点、未完成事项、结论；≤300 字；用于会话交接与上下文压缩。
+生产实现 = 主模型 + summarize_prompt 生成：保留错题 id、知识点、未完成事项、结论；≤300 字；
+用于会话交接摘要（旧会话归档）与上下文压缩。
 
 ## 迭代记录
 
@@ -48,6 +53,9 @@
 | 2026-08-04 | OCR 提示从"识别+解题"改为"只提取" | 用户明确：视觉模型不回答问题，只提取内容（实测已通） |
 | 2026-08-04 | 判分从 json_object 改为 json_schema 内联数组 | json_object 曾返回单对象；DeepSeek 端不解析 $defs/$ref，内联扁平 schema 后服务端强制数组（实测已通） |
 | 2026-08-04 | 系统提示注入 loop（每请求注入，不落盘） | 无状态 Responses API 需要每次带全量上下文；消息树保持"用户可见对话"纯净 |
+| 2026-08-04 | 判分新增 subject / reference_answer 字段 | 归档错题绑定真实学科、保留参考答案，支撑后续按学科过滤与变式出题（技术债清偿） |
+| 2026-08-04 | 守卫/摘要从 stub 升级为模型生产实现 | 会话切换决策与交接摘要改由主模型生成，stub 关键词版退役（保留接口兼容） |
+| 2026-08-04 | 系统提示要求富文本输出 LaTeX 标记 | 数学/物理/化学公式经前端 KaTeX 增强渲染，避免 Unicode 伪符号 |
 
 ## 评估记录（真实 API）
 

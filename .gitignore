@@ -4,6 +4,8 @@
 node_modules/
 .scratch/
 *.log
+*.tmp
+.env
 .DS_Store
 Thumbs.db
 .idea/

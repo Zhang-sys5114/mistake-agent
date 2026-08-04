@@ -17,6 +17,9 @@ impl UserPlugin for HelloPlugin {
             namespace: "demo".into(),
             tools: vec![ToolDef {
                 name: "hello".into(),
+                user_visible: false,
+                title: Some("打个招呼".into()),
+                group: Some("调试".into()),
                 description: "打个招呼，测试 agent 链路是否通畅".into(),
                 params: empty_params(),
                 policy: CallerPolicy::UserAndModel,

@@ -48,6 +48,15 @@ pub struct Info {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDef {
     pub name: String,
+    /// 是否对用户可见（功能中心展示）；false = 仅模型可调，不出现在用户面板。
+    #[serde(default = "default_true")]
+    pub user_visible: bool,
+    /// 用户友好显示名（功能中心展示；缺省回退 name）。
+    #[serde(default)]
+    pub title: Option<String>,
+    /// 用户功能分组（如"批改/学习/记忆"；缺省归"其它"）。
+    #[serde(default)]
+    pub group: Option<String>,
     pub description: String,
     pub params: Schema,
     pub policy: CallerPolicy,
@@ -63,6 +72,12 @@ pub struct ToolDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandDef {
     pub name: String,
+    #[serde(default = "default_true")]
+    pub user_visible: bool,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub group: Option<String>,
     pub description: String,
     pub params: Schema,
     /// Iconify 图标名（如 "mdi:file-upload"），供 GUI 命令面板展示。
@@ -74,6 +89,10 @@ pub struct CommandDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventDef {
     pub name: String,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// 工具错误码：驱动 loop 护栏（同码连续失败计数等）。

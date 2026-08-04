@@ -37,19 +37,27 @@ cargo run --bin sidecar
 ## 3. 界面操作
 
 - **聊天**：底部输入框发消息，Enter 或「发送」。
+- **显式调用工具**：在输入框输入工具名（如 `practice::generate`），前端弹出工具候选框，**按 Tab 确认**后输入框显示工具徽章与淡色 `<可选参数>` 占位；输入参数（可省略）后 Enter 发送，Agent 会**强制调用该工具**并基于结果在聊天中讲解（不绕过 LLM）。工具清单、名称、图标、用法示例全部来自后端。
 - **批改作业**：点「作业」选择图片/PDF → 自动生成"请批改这份作业：<路径>"并发送 → Agent 调 `grading::upload`。
+- **附件展示**：上传的图片会直接渲染在聊天气泡里，PDF 显示图标与文件名；点击可查看大图或完整 PDF。附件持久保存在数据根目录 `uploads/`，不随系统临时文件清理而丢失。
+- **连续历史**：聊天记录是一条从第一次使用到现在的连续消息树（切换会话不会清空），会话历史页同样展示全部记录。
+- **错题本**：左侧导航「错题本」直接查看错题列表（学科/知识点过滤、题目/作答/参考答案/错因）；也可在聊天里问"错题本里有什么"。
+- **会话历史**：左侧导航「会话历史」查看/回放历史会话；聊天中可对 assistant 消息编辑/重新生成，用 < > 切换消息树分支。
+- **设置**：左侧导航「设置」配置主模型/视觉模型的 URL、Key、模型 ID、接入方式与日志级别；Key 只显示"已设置"状态，留空表示保留原 Key。
 - **停止**：回答/批改过程中点「停止」立即中止（回合中发送按钮禁用，先停止再发新消息）。
 - **思考过程**：模型推理增量默认折叠在"思考过程"卡片里，点击展开/折叠；不展示给学生也随时可查。
 - **工具进度**：批改中底部显示"grading::upload：正在识别…"等进度。
-- **错题本**：在聊天里问"错题本里有什么"，Agent 会调 `grading::list` 展示。
+- **验算**：让 Agent 验算数学题（如"用 Python 验证 3x+5=11 的解"），Agent 调 `compute::verify`，代码在应用内 Pyodide（WASM 沙箱）执行。
+- **练习/复盘/组卷/追踪**：聊天里说"生成一道全等三角形变式题 / 给我周复盘 / 出 5 道薄弱点试卷 / 检查我的掌握度"，Agent 分别调 `practice::generate`、`report::weekly`、`exam::compose`、`tracking::checkin`。
 
-## 4. sidecar CLI 用法
+## 4. sidecar CLI 用法（独立调试入口）
 
 ```bash
 printf '%s\n' '{"id":1,"method":"send_user_message","text":"你好"}' | cargo run --bin sidecar
 ```
 
 stdout 输出 JSONL 帧（response + event），stderr 输出日志（WARN 及以上）。
+GUI 已改为进程内 kernel（standalone），不再需要 sidecar 与主程序同目录；该 CLI 仅用于脚本调试与管道测试。
 
 ## 5. 数据与产物
 
@@ -58,11 +66,12 @@ stdout 输出 JSONL 帧（response + event），stderr 输出日志（WARN 及�
 | settings.json | 模型配置与 key（用户独占写） |
 | sessions/<key>.jsonl | 会话消息树（首行元数据） |
 | mistakes/mistakes.json | 错题本 |
+| memory/ | 记忆条目（文件持久化，路径即层级） |
 | audit/audit.jsonl | 审计（10MB 轮转） |
 | logs/ | 分级诊断日志（10MB 轮转） |
 
 ## 6. 常见问题
 
-- 发送后没反应：确认右上角状态为"就绪"（内核自检通过）；查看终端 stderr 是否有 sidecar 报错。
+- 发送后没反应：确认右上角状态为"就绪"（内核自检通过）；查看 `~/Documents/.mistake-agent/logs/` 诊断日志。
 - 扫描版 PDF：提示不支持，请拍照成图片再上传。
 - 模型报"余额不足/模型不可用"：检查对应 key 与官方模型状态。

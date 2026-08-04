@@ -1,0 +1,96 @@
+# 错题 Agent（Mistake Agent v2）
+
+面向中学生的**本地智能错题管理 + 辅助学习 Agent**：上传作业照片/PDF，自动 OCR、逐题判分、把错题归档进错题本，还能生成变式练习、周复盘报告、组卷与掌握度追踪。桌面应用（Tauri + Vue），数据与模型密钥全部保存在本机。
+
+## 功能
+
+- **上传作业自动批改**：图片直接渲染、PDF 点开即用（附件持久保存在 `uploads/`）；Qwen3-VL OCR 提取 → DeepSeek 逐题判分（LaTeX 公式增强渲染）→ 错题自动归档。
+- **五个学习场景**：批改、变式练习（`practice::generate`，几何题带图形规格）、周复盘（`report::weekly`）、组卷（`exam::compose`）、掌握度追踪（`tracking::checkin`，7/14/30 天重测计划）。
+- **显式工具调用**：输入功能名（如"生成练习题"）按 Tab 确认，或点输入框上方的工具按钮；模型被强制调用该工具并基于结果在聊天中讲解——不绕过 LLM。
+- **连续对话历史**：聊天记录是从第一次使用到现在的完整消息树（会话切换无感知、旧消息自动携带），支持编辑/重新生成与分支切换。
+- **跨会话记忆**：`memory::save/show/remove` 文件持久化，重启不丢。
+- **Python 验算**：`compute::verify` 在应用内 Pyodide（WASM 沙箱）执行。
+- **安全与鲁棒**：文件只经系统临时目录暂存、kernel 不读任意本地路径；守卫/摘要/回合对瞬时错误自动重试；审计默认全覆盖、日志脱敏。
+
+## 架构
+
+```
+Tauri GUI（Vue 3，进程内 Kernel，standalone 单二进制）
+        │  RPC（Tauri Channel/命令桥接，JSON Lines 协议）
+        ▼
+Kernel（agent loop · 工具注册与调度 · 会话调度 · 守卫模型 · 审计）
+        ├─ 内核插件：storage（会话/错题/审计）· memory · model（双模型）· compute（Pyodide 桥接）
+        └─ 用户插件：grading · practice · report · exam · tracking · memory 工具
+```
+
+- 主模型：DeepSeek `deepseek-v4-flash`（Responses API，thinking + 工具调用）
+- 视觉模型：SiliconFlow `Qwen/Qwen3-VL-32B-Instruct`（OCR，只提取不判分）
+- 会话调度：守卫模型在回合边界做 continue / update_goal / start_new 决策，失败一律"存疑即继续"
+
+## 快速开始
+
+### 前置配置
+
+首次运行前在数据根目录 `~/Documents/.mistake-agent/settings.json` 配置模型密钥：
+
+```json
+{
+  "log_level": "info",
+  "main_model": {
+    "api_url": "https://api.deepseek.com",
+    "api_key": "你的 DeepSeek key",
+    "model": "deepseek-v4-flash",
+    "transport": "responses"
+  },
+  "vision_model": {
+    "api_url": "https://api.siliconflow.cn/v1",
+    "api_key": "你的 SiliconFlow key",
+    "model": "Qwen/Qwen3-VL-32B-Instruct"
+  }
+}
+```
+
+也可以在应用「设置」页里填写（Key 只显示"已配置"状态，不回显）。
+
+### 构建与运行
+
+```bash
+cd web && npm install && npm run build && cd ..
+cargo build --bins
+./target/debug/mistake-agent
+```
+
+### 开发命令
+
+```bash
+cargo test                                  # 单元测试
+cargo test --test live_api -- --ignored     # 真实 API 集成测试（需已配置 key）
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+cd web && npm run build                     # 前端构建
+cd web && node scripts/katex-check.mjs      # LaTeX 渲染链路自检
+```
+
+## 数据目录（`~/Documents/.mistake-agent/`）
+
+| 路径 | 内容 |
+|---|---|
+| `settings.json` | 模型配置与密钥（用户独占写） |
+| `sessions/` | 会话消息树（JSONL，含思维链与工具调用记录） |
+| `mistakes/` | 错题本 |
+| `memory/` | 跨会话记忆 |
+| `uploads/` | 作业附件持久副本（图片/PDF 展示用） |
+| `audit/` | 审计（10MB 轮转） |
+| `logs/` | 分级诊断日志 |
+
+## 文档
+
+- [PROJECT.md](PROJECT.md) — 项目总览（唯一入门文档）
+- [CONTEXT.md](CONTEXT.md) — 术语表
+- [docs/api.md](docs/api.md) — GUI ↔ kernel RPC 协议与真实模型对接
+- [docs/adr/](docs/adr/) — 架构决策记录（29 条）
+- [docs/prompts.md](docs/prompts.md) / [docs/testing.md](docs/testing.md) — Prompt 与测试记录
+
+## 许可证
+
+[AGPL-3.0](LICENSE)。本项目允许参考开源工程机制（协议见 PROJECT.md §2 开源策略），业务逻辑自研。

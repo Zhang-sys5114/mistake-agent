@@ -7,10 +7,15 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::kernel::message::{Message, MessageId};
-use crate::kernel::services::{SessionStore, StorageError};
+use crate::kernel::prompt::{guard_prompt, summarize_prompt};
+use crate::kernel::services::{
+    AbortSignal, ModelError, ModelKind, ModelRequest, ModelResponse, ModelService, ResponseFormat,
+    SessionStore, StorageError,
+};
 
 // ---------- SessionKey ----------
 
@@ -140,6 +145,257 @@ impl GuardModel for StubGuard {
             }));
         }
         Ok(GuardDecision::Continue)
+    }
+}
+
+/// 生产守卫：独立小模型调用（默认复用主模型）。
+/// 模型错误 / 输出无法解析 / 超时一律由调度层降级为 Continue（存疑即继续，Q17）。
+pub struct LlmGuard {
+    model: Arc<dyn ModelService>,
+    timeout: Duration,
+    retries: usize,
+    retry_delay: Duration,
+}
+
+impl LlmGuard {
+    pub fn new(model: Arc<dyn ModelService>) -> Self {
+        Self {
+            model,
+            timeout: Duration::from_secs(60),
+            retries: 2,
+            retry_delay: Duration::from_secs(2),
+        }
+    }
+
+    /// 自定义重试参数（测试/调优用）。
+    pub fn with_retry(mut self, retries: usize, delay: Duration) -> Self {
+        self.retries = retries;
+        self.retry_delay = delay;
+        self
+    }
+}
+
+/// 带重试的模型 complete：对瞬时错误（503/限流/超时）退避重试；
+/// 系统性错误（鉴权/余额/模型下架）与取消不重试。
+async fn complete_with_retry(
+    model: &Arc<dyn ModelService>,
+    request: &ModelRequest,
+    timeout: Duration,
+    retries: usize,
+    delay: Duration,
+) -> Result<ModelResponse, ModelError> {
+    let mut attempt = 0usize;
+    loop {
+        match tokio::time::timeout(timeout, model.complete(request, &AbortSignal::new())).await {
+            Ok(Ok(resp)) => return Ok(resp),
+            Ok(Err(e)) => {
+                if e.is_systemic() || matches!(e, ModelError::Cancelled) {
+                    return Err(e);
+                }
+                if attempt >= retries {
+                    return Err(e);
+                }
+                attempt += 1;
+                log::warn!("模型调用失败（{attempt}/{retries} 重试）：{e}");
+                tokio::time::sleep(delay * attempt as u32).await;
+            }
+            Err(_) => {
+                if attempt >= retries {
+                    return Err(ModelError::Timeout);
+                }
+                attempt += 1;
+                log::warn!("模型调用超时（{attempt}/{retries} 重试）");
+                tokio::time::sleep(delay * attempt as u32).await;
+            }
+        }
+    }
+}
+
+fn guard_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["continue", "update_goal", "start_new"]},
+            "goal": {"type": "string"}
+        },
+        "required": ["action", "goal"],
+        "additionalProperties": false
+    })
+}
+
+/// 解析守卫输出：容忍 ```json 围栏与首尾空白；解析失败返回 None（上层降级 Continue）。
+fn parse_guard_decision(text: &str) -> Option<GuardDecision> {
+    let text = text.trim();
+    let stripped = text
+        .strip_prefix("```json")
+        .or_else(|| text.strip_prefix("```"))
+        .and_then(|s| s.strip_suffix("```"))
+        .map(str::trim)
+        .unwrap_or(text);
+    let v: Value = serde_json::from_str(stripped).ok()?;
+    let action = v["action"].as_str()?;
+    let goal = || Goal {
+        text: v["goal"].as_str().unwrap_or_default().trim().to_string(),
+    };
+    match action {
+        "continue" => Some(GuardDecision::Continue),
+        "update_goal" => Some(GuardDecision::UpdateGoal(goal())),
+        "start_new" => Some(GuardDecision::StartNew(goal())),
+        _ => None,
+    }
+}
+
+#[async_trait]
+impl GuardModel for LlmGuard {
+    async fn decide(&self, input: &GuardInput) -> Result<GuardDecision, GuardError> {
+        let payload = json!({
+            "goal": input.goal.as_ref().map(|g| &g.text),
+            "summary": input.summary,
+            "new_text": input.new_text,
+        });
+        let request = ModelRequest {
+            model: ModelKind::Main,
+            messages: vec![
+                Message::system(guard_prompt()),
+                Message::user(serde_json::to_string(&payload).unwrap_or_default()),
+            ],
+            tools: None,
+            reasoning_effort: Some("none".into()),
+            tool_choice: None,
+            response_format: Some(ResponseFormat::JsonSchema {
+                name: "guard_decision".to_string(),
+                schema: guard_schema(),
+            }),
+        };
+        let text = match complete_with_retry(
+            &self.model,
+            &request,
+            self.timeout,
+            self.retries,
+            self.retry_delay,
+        )
+        .await
+        {
+            Ok(resp) => resp.text,
+            Err(e) => return Err(GuardError::Model(e.to_string())),
+        };
+        parse_guard_decision(&text)
+            .ok_or_else(|| GuardError::Parse(text.chars().take(200).collect()))
+    }
+}
+
+fn message_text(msg: &Message) -> String {
+    use crate::kernel::message::MessageKind;
+    match &msg.kind {
+        MessageKind::User { text, .. } => format!("用户：{text}"),
+        MessageKind::Assistant { text } => format!("助手：{text}"),
+        MessageKind::System { text } => format!("系统：{text}"),
+        MessageKind::Reasoning { text, .. } => format!("推理：{text}"),
+        MessageKind::ToolCall {
+            entry,
+            params,
+            result,
+            ..
+        } => format!(
+            "工具：{entry} 参数 {params} 结果 {:?}",
+            result.as_ref().map(|v| v.to_string())
+        ),
+    }
+}
+
+/// 生产摘要器：LLM 生成 ≤300 字任务摘要；模型失败降级为 stub 式摘要。
+pub struct LlmSummarizer {
+    model: Arc<dyn ModelService>,
+    timeout: Duration,
+    max_input_chars: usize,
+    /// 消息数少于该值时直接走 stub 摘要，不调 LLM（短会话无需生成式摘要）。
+    min_messages_for_llm: usize,
+    retries: usize,
+    retry_delay: Duration,
+}
+
+impl LlmSummarizer {
+    pub fn new(model: Arc<dyn ModelService>) -> Self {
+        Self {
+            model,
+            timeout: Duration::from_secs(60),
+            max_input_chars: 12000,
+            min_messages_for_llm: 8,
+            retries: 2,
+            retry_delay: Duration::from_secs(2),
+        }
+    }
+
+    pub fn with_retry(mut self, retries: usize, delay: Duration) -> Self {
+        self.retries = retries;
+        self.retry_delay = delay;
+        self
+    }
+
+    fn fallback(messages: &[Message], goal: Option<&Goal>) -> String {
+        let goal_text = goal
+            .map(|g| g.text.clone())
+            .unwrap_or_else(|| "（未记录目标）".into());
+        format!(
+            "上一个会话共 {} 条消息，会话目标：{}。",
+            messages.len(),
+            goal_text
+        )
+    }
+}
+
+#[async_trait]
+impl Summarizer for LlmSummarizer {
+    async fn summarize(&self, messages: &[Message], goal: Option<&Goal>) -> String {
+        if messages.len() < self.min_messages_for_llm {
+            return Self::fallback(messages, goal);
+        }
+        let goal_text = goal
+            .map(|g| g.text.clone())
+            .unwrap_or_else(|| "（未记录目标）".into());
+        let mut transcript = String::new();
+        for msg in messages {
+            let line = message_text(msg);
+            if transcript.len() + line.len() > self.max_input_chars {
+                transcript.push_str("…（已截断）");
+                break;
+            }
+            transcript.push_str(&line);
+            transcript.push('\n');
+        }
+        let request = ModelRequest {
+            model: ModelKind::Main,
+            messages: vec![
+                Message::system(summarize_prompt()),
+                Message::user(format!("目标：{goal_text}\n\n对话：\n{transcript}")),
+            ],
+            tools: None,
+            reasoning_effort: Some("none".into()),
+            tool_choice: None,
+            response_format: None,
+        };
+        match complete_with_retry(
+            &self.model,
+            &request,
+            self.timeout,
+            self.retries,
+            self.retry_delay,
+        )
+        .await
+        {
+            Ok(resp) => {
+                let summary = resp.text.trim();
+                if summary.is_empty() {
+                    Self::fallback(messages, goal)
+                } else {
+                    summary.chars().take(300).collect()
+                }
+            }
+            Err(e) => {
+                log::warn!("摘要模型重试后仍失败，降级 stub 摘要：{e}");
+                Self::fallback(messages, goal)
+            }
+        }
     }
 }
 
@@ -292,6 +548,8 @@ pub struct SessionScheduler {
     idle_timeout: Duration,
     max_switches_per_hour: usize,
     switch_times: Mutex<VecDeque<DateTime<Utc>>>,
+    /// 切换时复制到新会话的旧会话最近消息数（无感知切换：历史上下文连续）。
+    history_carryover: usize,
 }
 
 impl SessionScheduler {
@@ -311,6 +569,7 @@ impl SessionScheduler {
             idle_timeout: Duration::from_secs(12 * 60 * 60),
             max_switches_per_hour: 5,
             switch_times: Mutex::new(VecDeque::new()),
+            history_carryover: 20,
         }
     }
 
@@ -353,41 +612,57 @@ impl SessionScheduler {
                         summary,
                         new_text: Some(text.to_string()),
                     };
-                    Some(self.guard.decide(&input).await?)
+                    match self.guard.decide(&input).await {
+                        Ok(d) => {
+                            log::info!("守卫决策（新消息）：{d:?}");
+                            Some(d)
+                        }
+                        Err(e) => {
+                            log::warn!("守卫模型失败，按 continue 处理：{e}");
+                            Some(GuardDecision::Continue)
+                        }
+                    }
                 }
             }
         };
 
         match decision {
             Some(GuardDecision::Continue) => {
-                let meta = active.expect("continue 需要活动会话");
-                self.store.set_last_activity(&meta.key, now).await?;
-                let user_msg = Message::user(text);
-                self.store.append_message(&meta.key, &user_msg).await?;
-                Ok(TurnContext {
-                    session_key: meta.key,
-                    messages: self.store.read_path(&meta.key).await?,
-                })
+                self.continue_in(&active.expect("continue 需要活动会话"), text, now)
+                    .await
             }
             Some(GuardDecision::UpdateGoal(goal)) => {
                 let meta = active.expect("update_goal 需要活动会话");
                 self.store.set_goal(&meta.key, &goal).await?;
-                self.store.set_last_activity(&meta.key, now).await?;
-                let user_msg = Message::user(text);
-                self.store.append_message(&meta.key, &user_msg).await?;
+                let ctx = self.continue_in(&meta, text, now).await?;
                 self.bus.send(Interrupt::GoalUpdated { goal });
-                Ok(TurnContext {
-                    session_key: meta.key,
-                    messages: self.store.read_path(&meta.key).await?,
-                })
+                Ok(ctx)
             }
             Some(GuardDecision::StartNew(goal)) => {
-                let (from, to) = self
-                    .switch_session(active.as_ref(), goal.clone(), now)
-                    .await?;
-                self.bus.send(Interrupt::SessionSwitched { from, to, goal });
-                let user_msg = Message::user(text);
+                // 切换频率护栏前置：超限时降级为继续旧会话（存疑即继续），
+                // 绝不在归档后再报错（避免丢消息与状态不一致）。
+                let to = if let Some(meta) = active.as_ref() {
+                    if !self.switch_allowed(now) {
+                        log::warn!(
+                            "切换过于频繁（1 小时内 >{} 次），降级 continue",
+                            self.max_switches_per_hour
+                        );
+                        return self.continue_in(meta, text, now).await;
+                    }
+                    let (from, to) = self.switch_session(Some(meta), goal.clone(), now).await?;
+                    self.record_switch(now);
+                    self.bus.send(Interrupt::SessionSwitched { from, to, goal });
+                    to
+                } else {
+                    // 首条消息（无旧会话）：只建新会话，不产生切换中断。
+                    let (_, to) = self.switch_session(None, goal.clone(), now).await?;
+                    to
+                };
+                let mut user_msg = Message::user(text);
+                let path = self.store.read_path(&to).await?;
+                user_msg.parent_id = path.last().map(|m| m.id);
                 self.store.append_message(&to, &user_msg).await?;
+                self.store.set_active_path(&to, Some(user_msg.id)).await?;
                 Ok(TurnContext {
                     session_key: to,
                     messages: self.store.read_path(&to).await?,
@@ -395,6 +670,27 @@ impl SessionScheduler {
             }
             None => Err(SchedulerError::Internal("守卫没有返回决定".into())),
         }
+    }
+
+    /// 在活动会话中追加用户消息并推进 active_path。
+    async fn continue_in(
+        &self,
+        meta: &SessionMeta,
+        text: &str,
+        now: DateTime<Utc>,
+    ) -> Result<TurnContext, SchedulerError> {
+        self.store.set_last_activity(&meta.key, now).await?;
+        let mut user_msg = Message::user(text);
+        let path = self.store.read_path(&meta.key).await?;
+        user_msg.parent_id = path.last().map(|m| m.id);
+        self.store.append_message(&meta.key, &user_msg).await?;
+        self.store
+            .set_active_path(&meta.key, Some(user_msg.id))
+            .await?;
+        Ok(TurnContext {
+            session_key: meta.key,
+            messages: self.store.read_path(&meta.key).await?,
+        })
     }
 
     /// 回合结束：只允许 Continue / UpdateGoal（Q17：StartNew 不在回合结束触发）。
@@ -415,7 +711,17 @@ impl SessionScheduler {
             summary,
             new_text: None,
         };
-        match self.guard.decide(&input).await? {
+        let decision = match self.guard.decide(&input).await {
+            Ok(d) => {
+                log::info!("守卫决策（回合结束）：{d:?}");
+                d
+            }
+            Err(e) => {
+                log::warn!("回合结束守卫模型失败，按 continue 处理：{e}");
+                GuardDecision::Continue
+            }
+        };
+        match decision {
             GuardDecision::UpdateGoal(goal) => {
                 self.store.set_goal(key, &goal).await?;
                 self.bus.send(Interrupt::GoalUpdated { goal });
@@ -434,35 +740,39 @@ impl SessionScheduler {
         goal: Goal,
         now: DateTime<Utc>,
     ) -> Result<(SessionKey, SessionKey), SchedulerError> {
-        let from = match old {
+        match old {
             Some(meta) => {
-                // 交接摘要写入旧会话，并注入新会话（历史路由保留完整记录）。
-                let path = self.store.read_path(&meta.key).await?;
-                let summary = self.summarizer.summarize(&path, meta.goal.as_ref()).await;
+                // 摘要只生成一次：同时写入旧会话交接摘要与新会话梗概（历史路由保留完整记录）。
+                let all = self.store.read_all(&meta.key).await?;
+                let active = self.store.read_path(&meta.key).await?;
+                let summary = self.summarizer.summarize(&all, meta.goal.as_ref()).await;
                 let mut handoff = Message::system(format!("交接摘要：{summary}"));
-                handoff.parent_id = path.last().map(|m| m.id);
+                handoff.parent_id = all.last().map(|m| m.id);
                 self.store.append_message(&meta.key, &handoff).await?;
                 self.store.archive(&meta.key).await?;
-                meta.key
+                let to = SessionKey::new();
+                self.create_session(to, goal.clone(), now).await?;
+                // 无感知切换：新会话注入「梗概 + 旧会话最近消息副本」，
+                // 模型上下文与消息树都保留连续历史（跨上上个会话由链式复制累积）。
+                let handoff = Message::system(format!("上一会话梗概：{summary}"));
+                self.store.append_message(&to, &handoff).await?;
+                let copied = carry_history(&active, self.history_carryover);
+                for (i, mut m) in copied.into_iter().enumerate() {
+                    // 副本链挂在梗概之后，保证活跃路径（梗概 → 副本 → 新消息）完整。
+                    if i == 0 {
+                        m.parent_id = Some(handoff.id);
+                    }
+                    self.store.append_message(&to, &m).await?;
+                }
+                Ok((meta.key, to))
             }
             None => {
                 let dummy = SessionKey::new();
-                // 无旧会话：不产生切换中断事件，直接建新会话。
                 let new_key = SessionKey::new();
                 self.create_session(new_key, goal.clone(), now).await?;
-                return Ok((dummy, new_key));
+                Ok((dummy, new_key))
             }
-        };
-
-        self.limit_switch_frequency(now)?;
-        let to = SessionKey::new();
-        self.create_session(to, goal.clone(), now).await?;
-        // 新会话注入旧会话梗概。
-        let path = self.store.read_all(&from).await?;
-        let summary = self.summarizer.summarize(&path, None).await;
-        let handoff = Message::system(format!("上一会话梗概：{summary}"));
-        self.store.append_message(&to, &handoff).await?;
-        Ok((from, to))
+        }
     }
 
     async fn create_session(
@@ -479,7 +789,8 @@ impl SessionScheduler {
         Ok(())
     }
 
-    fn limit_switch_frequency(&self, now: DateTime<Utc>) -> Result<(), SchedulerError> {
+    /// 1 小时内是否还有切换额度（只检查，不记录）。
+    fn switch_allowed(&self, now: DateTime<Utc>) -> bool {
         let mut times = self.switch_times.lock().expect("switch lock poisoned");
         while times
             .front()
@@ -487,20 +798,101 @@ impl SessionScheduler {
         {
             times.pop_front();
         }
-        if times.len() >= self.max_switches_per_hour {
-            return Err(SchedulerError::Internal(
-                "切换过于频繁，安全策略拒绝（存疑即继续）".into(),
-            ));
-        }
-        times.push_back(now);
-        Ok(())
+        times.len() < self.max_switches_per_hour
     }
+
+    /// 记录一次成功切换。
+    fn record_switch(&self, now: DateTime<Utc>) {
+        self.switch_times
+            .lock()
+            .expect("switch lock poisoned")
+            .push_back(now);
+    }
+}
+
+/// 取活跃路径最近 N 条并重建副本 parent 链（副本自成一条链，挂到新会话树）。
+fn carry_history(path: &[Message], keep: usize) -> Vec<Message> {
+    let tail: Vec<Message> = path
+        .iter()
+        .rev()
+        .take(keep)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let mut copied: Vec<Message> = Vec::with_capacity(tail.len());
+    for mut m in tail {
+        m.parent_id = copied.last().map(|c| c.id);
+        copied.push(m);
+    }
+    copied
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::services::{ModelChunk, ModelError, ModelResponse, ModelStream, TokenUsage};
     use crate::kernel::storage::MemoryStorage;
+    use std::collections::VecDeque;
+
+    /// 脚本模型：按队列顺序返回文本或错误（测试守卫/摘要器用）。
+    struct ScriptedModel {
+        queue: std::sync::Mutex<VecDeque<Result<String, String>>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ScriptedModel {
+        fn new(responses: Vec<Result<String, String>>) -> Self {
+            Self {
+                queue: std::sync::Mutex::new(responses.into()),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ModelService for ScriptedModel {
+        async fn stream(
+            &self,
+            _request: &ModelRequest,
+            _signal: &AbortSignal,
+        ) -> Result<ModelStream, ModelError> {
+            Ok(Box::new(futures_util::stream::empty::<
+                Result<ModelChunk, ModelError>,
+            >()))
+        }
+
+        async fn complete(
+            &self,
+            _request: &ModelRequest,
+            _signal: &AbortSignal,
+        ) -> Result<ModelResponse, ModelError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let next = self
+                .queue
+                .lock()
+                .expect("scripted model poisoned")
+                .pop_front()
+                .unwrap_or_else(|| Ok(String::new()));
+            match next {
+                Ok(text) => Ok(ModelResponse {
+                    text,
+                    tool_calls: Vec::new(),
+                    usage: Some(TokenUsage {
+                        input_tokens: Some(1),
+                        output_tokens: Some(1),
+                        ..Default::default()
+                    }),
+                }),
+                Err(e) => Err(ModelError::Transport(e)),
+            }
+        }
+    }
 
     fn setup() -> (SessionScheduler, FakeClock, MemoryStorage, InterruptBus) {
         let store = MemoryStorage::new();
@@ -570,5 +962,204 @@ mod tests {
                 .iter()
                 .any(|i| matches!(i, Interrupt::SessionSwitched { .. }))
         );
+    }
+
+    #[test]
+    fn parse_guard_decision_accepts_json_and_fences() {
+        assert!(matches!(
+            parse_guard_decision(r#"{"action":"continue","goal":""}"#),
+            Some(GuardDecision::Continue)
+        ));
+        let d = parse_guard_decision(
+            "```json\n{\"action\":\"start_new\",\"goal\":\"批改英语作业\"}\n```",
+        );
+        assert!(matches!(d, Some(GuardDecision::StartNew(_))));
+        assert!(parse_guard_decision("不是 JSON").is_none());
+    }
+
+    #[tokio::test]
+    async fn llm_guard_returns_start_new() {
+        let model = Arc::new(ScriptedModel::new(vec![Ok(
+            r#"{"action":"start_new","goal":"批改英语作业"}"#.into(),
+        )]));
+        let guard = LlmGuard::new(model);
+        let decision = guard
+            .decide(&GuardInput {
+                goal: Some(Goal {
+                    text: "复习数学".into(),
+                }),
+                summary: "..".into(),
+                new_text: Some("帮我批改英语作业".into()),
+            })
+            .await
+            .unwrap();
+        match decision {
+            GuardDecision::StartNew(goal) => assert_eq!(goal.text, "批改英语作业"),
+            _ => panic!("应 start_new"),
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduler_falls_back_to_continue_on_guard_failure() {
+        let store = MemoryStorage::new();
+        let clock = FakeClock::new(Utc::now());
+        let bus = InterruptBus::new();
+        let guard = Arc::new(LlmGuard::new(Arc::new(ScriptedModel::new(vec![
+            Ok(r#"{"action":"continue","goal":""}"#.into()),
+            Err("模型 500".into()),
+        ]))));
+        let scheduler = SessionScheduler::new(
+            Arc::new(store.clone()),
+            guard,
+            Arc::new(clock.clone()),
+            Arc::new(StubSummarizer),
+            bus.clone(),
+        );
+        let first = scheduler.on_new_message("帮我看看这道题").await.unwrap();
+        let second = scheduler.on_new_message("换个目标继续").await.unwrap();
+        // 守卫失败 → 存疑即继续：不切会话、消息照常落盘。
+        assert_eq!(first.session_key, second.session_key);
+        assert_eq!(store.read_all(&first.session_key).await.unwrap().len(), 2);
+        let leftovers = bus.take_all();
+        assert!(leftovers.is_empty(), "意外中断：{leftovers:?}");
+    }
+
+    #[tokio::test]
+    async fn llm_summarizer_falls_back_on_model_error() {
+        // 8+ 条消息才走 LLM；连续失败 3 次（含重试）后降级 stub。
+        let model = Arc::new(ScriptedModel::new(vec![
+            Err("HTTP 503 Service Unavailable".into()),
+            Err("HTTP 503 Service Unavailable".into()),
+            Err("HTTP 503 Service Unavailable".into()),
+        ]));
+        let messages: Vec<Message> = (0..8).map(|i| Message::user(format!("消息 {i}"))).collect();
+        let summarizer = LlmSummarizer::new(model).with_retry(2, Duration::ZERO);
+        let text = summarizer.summarize(&messages, None).await;
+        assert!(text.contains("共 8 条消息"));
+    }
+
+    #[tokio::test]
+    async fn llm_guard_retries_transient_errors() {
+        // 第一次 503 → 重试成功，守卫返回 start_new。
+        let model = Arc::new(ScriptedModel::new(vec![
+            Err("HTTP 503 Service Unavailable".into()),
+            Ok(r#"{"action":"start_new","goal":"批改英语作业"}"#.into()),
+        ]));
+        let guard = LlmGuard::new(model).with_retry(2, Duration::ZERO);
+        let decision = guard
+            .decide(&GuardInput {
+                goal: Some(Goal {
+                    text: "复习数学".into(),
+                }),
+                summary: "..".into(),
+                new_text: Some("帮我批改英语作业".into()),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(decision, GuardDecision::StartNew(_)));
+    }
+
+    #[tokio::test]
+    async fn llm_summarizer_retries_transient_errors() {
+        let model = Arc::new(ScriptedModel::new(vec![
+            Err("HTTP 503 Service Unavailable".into()),
+            Ok("本会话完成三套英语作业批改，错题已归档。".into()),
+        ]));
+        let messages: Vec<Message> = (0..8).map(|i| Message::user(format!("消息 {i}"))).collect();
+        let summarizer = LlmSummarizer::new(model).with_retry(2, Duration::ZERO);
+        let text = summarizer.summarize(&messages, None).await;
+        assert!(text.contains("三套英语作业批改"));
+    }
+
+    #[tokio::test]
+    async fn short_session_summary_skips_llm() {
+        let model = Arc::new(ScriptedModel::new(vec![]));
+        let summarizer = LlmSummarizer::new(model.clone());
+        let text = summarizer
+            .summarize(&[Message::user("你好"), Message::user("继续")], None)
+            .await;
+        assert!(text.contains("共 2 条消息"));
+        assert_eq!(model.call_count(), 0, "短会话摘要不应调用模型");
+    }
+
+    #[tokio::test]
+    async fn frequency_limit_falls_back_to_continue() {
+        let store = MemoryStorage::new();
+        let clock = FakeClock::new(Utc::now());
+        let bus = InterruptBus::new();
+        let scheduler = SessionScheduler::new(
+            Arc::new(store.clone()),
+            Arc::new(StubGuard::new()),
+            Arc::new(clock.clone()),
+            Arc::new(StubSummarizer),
+            bus.clone(),
+        );
+        // 首条建会话；随后 5 条"新会话"触发 5 次切换（达到 1 小时上限）。
+        let first = scheduler.on_new_message("帮我看看这道题").await.unwrap();
+        let mut last_key = first.session_key;
+        for _ in 0..5 {
+            let ctx = scheduler.on_new_message("新会话").await.unwrap();
+            last_key = ctx.session_key;
+        }
+        // 第 7 条超限：降级 continue，不报错、消息不丢、仍落在最近活动会话。
+        let ctx = scheduler.on_new_message("新会话").await.unwrap();
+        assert_eq!(ctx.session_key, last_key);
+        let metas = store.list_sessions().await.unwrap();
+        let active = metas
+            .iter()
+            .find(|m| m.status == SessionStatus::Active)
+            .unwrap();
+        assert_eq!(active.key, last_key);
+        let msgs = store.read_all(&last_key).await.unwrap();
+        assert!(
+            msgs.iter().any(|m| matches!(
+                &m.kind,
+                crate::kernel::message::MessageKind::User { text, .. } if text == "新会话"
+            )),
+            "降级 continue 时用户消息必须落盘"
+        );
+        let metas = store.list_sessions().await.unwrap();
+        assert_eq!(metas.len(), 6, "1 个初始会话 + 5 次切换");
+    }
+
+    #[tokio::test]
+    async fn switch_carries_recent_history_into_new_session() {
+        let (scheduler, _, store, _) = setup();
+        scheduler.on_new_message("帮我看看这道题").await.unwrap();
+        scheduler.on_new_message("继续讲第二题").await.unwrap();
+        let ctx = scheduler.on_new_message("生成周复习报告").await.unwrap();
+        let msgs = store.read_path(&ctx.session_key).await.unwrap();
+        assert!(
+            matches!(
+                msgs[0].kind,
+                crate::kernel::message::MessageKind::System { .. }
+            ),
+            "新会话应以梗概开头"
+        );
+        assert!(
+            matches!(
+                msgs.last().unwrap().kind,
+                crate::kernel::message::MessageKind::User { .. }
+            ),
+            "新会话以当前用户消息结尾"
+        );
+        let user_count = msgs
+            .iter()
+            .filter(|m| matches!(m.kind, crate::kernel::message::MessageKind::User { .. }))
+            .count();
+        assert!(
+            user_count >= 3,
+            "新会话应携带旧消息副本（2 条）+ 当前消息：实际 {user_count}"
+        );
+        // parent 链连续：从末尾回溯能一路走到根（副本首条 parent=None）。
+        let by_id: std::collections::HashMap<_, _> = msgs.iter().map(|m| (m.id, m)).collect();
+        let mut cur = msgs.last().unwrap().parent_id;
+        let mut steps = 0;
+        while let Some(id) = cur {
+            let m = by_id.get(&id).expect("parent 必须存在");
+            cur = m.parent_id;
+            steps += 1;
+        }
+        assert!(steps >= 2, "parent 链应连续：{steps}");
     }
 }

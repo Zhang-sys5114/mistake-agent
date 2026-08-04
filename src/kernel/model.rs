@@ -14,7 +14,7 @@ use crate::kernel::contract::full_to_wire;
 use crate::kernel::message::{Message, MessageKind};
 use crate::kernel::services::{
     AbortSignal, ItemKind, ModelChunk, ModelError, ModelKind, ModelRequest, ModelResponse,
-    ModelService, ModelStream, ResponseFormat, TokenUsage, ToolSchema,
+    ModelService, ModelStream, ResponseFormat, TokenUsage, ToolChoice, ToolSchema,
 };
 use crate::kernel::settings::{Settings, Transport};
 
@@ -117,12 +117,22 @@ fn messages_to_responses_input(messages: &[Message]) -> Result<Vec<Value>, Model
                 "role": "system",
                 "content": [{"type": "input_text", "text": text}],
             })),
+            // thinking 模式要求把推理 item 按 id 回传，否则下一轮协议报错。
+            MessageKind::Reasoning { id, .. } => items.push(json!({
+                "type": "reasoning",
+                "id": id,
+            })),
             MessageKind::ToolCall {
                 entry,
                 params,
                 result,
+                call_id,
             } => {
-                let call_id = msg.id.to_string();
+                let call_id = if call_id.is_empty() {
+                    msg.id.to_string()
+                } else {
+                    call_id.clone()
+                };
                 let arguments = serde_json::to_string(params)
                     .map_err(|e| ModelError::Protocol(format!("参数序列化失败：{e}")))?;
                 items.push(json!({
@@ -175,12 +185,19 @@ fn messages_to_cc(messages: &[Message]) -> Vec<Value> {
             MessageKind::System { text } => {
                 out.push(json!({"role": "system", "content": text}));
             }
+            // Chat Completions 无 reasoning 概念：忽略（Ollama 等兼容端）。
+            MessageKind::Reasoning { .. } => {}
             MessageKind::ToolCall {
                 entry,
                 params,
                 result,
+                call_id,
             } => {
-                let call_id = msg.id.to_string();
+                let call_id = if call_id.is_empty() {
+                    msg.id.to_string()
+                } else {
+                    call_id.clone()
+                };
                 let arguments = serde_json::to_string(params).unwrap_or_else(|_| "{}".into());
                 out.push(json!({
                     "role": "assistant",
@@ -273,6 +290,18 @@ impl ResponsesModelService {
         if let Some(fmt) = &request.response_format {
             body["text"] = json!({"format": text_format(fmt)});
         }
+        if let Some(choice) = &request.tool_choice {
+            body["tool_choice"] = match choice {
+                ToolChoice::Auto => json!("auto"),
+                ToolChoice::Required => json!("required"),
+                ToolChoice::Function { name } => json!({
+                    "type": "function",
+                    "name": name,
+                }),
+            };
+            // API 限制：thinking 模式不支持 tool_choice，强制调用时关闭思考。
+            body["reasoning"] = json!({"effort": "none"});
+        }
         Ok(body)
     }
 }
@@ -325,27 +354,43 @@ impl ModelService for ResponsesModelService {
                         for ev in parser.push_chunk(&bytes) {
                             match ev.name.as_str() {
                                 "response.output_item.added" => {
-                                    if let Ok(v) = serde_json::from_str::<Value>(&ev.data)
-                                        && v["type"] == "function_call"
-                                    {
-                                        last_tool_index += 1;
-                                        let index = last_tool_index;
-                                        let call_id =
-                                            v["call_id"].as_str().unwrap_or_default().to_string();
-                                        let name =
-                                            v["name"].as_str().unwrap_or_default().to_string();
-                                        let _ = tx
-                                            .send(Ok(ModelChunk::ToolCallStart {
-                                                index,
-                                                call_id,
-                                                name,
-                                            }))
-                                            .await;
+                                    if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
+                                        // DeepSeek Responses 事件里，item 的类型/字段在 `item` 子对象
+                                        // （顶层 `type` 是事件名本身），与 OpenAI 文档示例一致。
+                                        let item = &v["item"];
+                                        if item["type"] == "reasoning" {
+                                            let id =
+                                                item["id"].as_str().unwrap_or_default().to_string();
+                                            let _ = tx
+                                                .send(Ok(ModelChunk::ReasoningItemStart { id }))
+                                                .await;
+                                        } else if item["type"] == "function_call" {
+                                            last_tool_index += 1;
+                                            let index = v["output_index"]
+                                                .as_u64()
+                                                .map(|i| i as usize)
+                                                .unwrap_or(last_tool_index);
+                                            let call_id = item["call_id"]
+                                                .as_str()
+                                                .unwrap_or_default()
+                                                .to_string();
+                                            let name = item["name"]
+                                                .as_str()
+                                                .unwrap_or_default()
+                                                .to_string();
+                                            let _ = tx
+                                                .send(Ok(ModelChunk::ToolCallStart {
+                                                    index,
+                                                    call_id,
+                                                    name,
+                                                }))
+                                                .await;
+                                        }
                                     }
                                 }
                                 "response.output_item.done" => {
                                     if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
-                                        match v["type"].as_str() {
+                                        match v["item"]["type"].as_str() {
                                             Some("message") => {
                                                 let _ = tx
                                                     .send(Ok(ModelChunk::ItemDone {
@@ -357,6 +402,13 @@ impl ModelService for ResponsesModelService {
                                                 let _ = tx
                                                     .send(Ok(ModelChunk::ItemDone {
                                                         kind: ItemKind::FunctionCall,
+                                                    }))
+                                                    .await;
+                                            }
+                                            Some("reasoning") => {
+                                                let _ = tx
+                                                    .send(Ok(ModelChunk::ItemDone {
+                                                        kind: ItemKind::Reasoning,
                                                     }))
                                                     .await;
                                             }
@@ -390,7 +442,13 @@ impl ModelService for ResponsesModelService {
                                 "response.completed" | "response.incomplete" => {
                                     if !done {
                                         if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
-                                            let usage = parse_usage(&v["usage"]);
+                                            // usage 位于 `response.usage`（顶层无 usage）。
+                                            let usage_src = if v["response"]["usage"].is_object() {
+                                                &v["response"]["usage"]
+                                            } else {
+                                                &v["usage"]
+                                            };
+                                            let usage = parse_usage(usage_src);
                                             let _ = tx.send(Ok(ModelChunk::Usage(usage))).await;
                                         }
                                         let _ = tx.send(Ok(ModelChunk::Done)).await;
@@ -620,6 +678,61 @@ pub fn build_vision_service(settings: &Settings) -> Arc<dyn ModelService> {
     ))
 }
 
+/// 配置热更新的模型服务（ADR-0015/0019）：持有共享 Settings，按 ModelKind 重建底层适配器。
+/// `refresh()` 在 set_settings 保存成功后调用，下一次模型调用即用新配置；
+/// 不重建时行为与构建期快照完全一致。
+pub struct LiveSettingsModelService {
+    settings: Arc<std::sync::RwLock<Settings>>,
+    kind: ModelKind,
+    current: std::sync::RwLock<Arc<dyn ModelService>>,
+}
+
+impl LiveSettingsModelService {
+    pub fn new(settings: Arc<std::sync::RwLock<Settings>>, kind: ModelKind) -> Self {
+        let snapshot = settings.read().expect("settings poisoned").clone();
+        let current = match kind {
+            ModelKind::Main => build_main_service(&snapshot),
+            ModelKind::Vision => build_vision_service(&snapshot),
+        };
+        Self {
+            settings,
+            kind,
+            current: std::sync::RwLock::new(current),
+        }
+    }
+
+    /// 按当前 settings 重建底层适配器（set_settings 成功后调用）。
+    pub fn refresh(&self) {
+        let snapshot = self.settings.read().expect("settings poisoned").clone();
+        let rebuilt = match self.kind {
+            ModelKind::Main => build_main_service(&snapshot),
+            ModelKind::Vision => build_vision_service(&snapshot),
+        };
+        *self.current.write().expect("model service poisoned") = rebuilt;
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelService for LiveSettingsModelService {
+    async fn stream(
+        &self,
+        request: &ModelRequest,
+        signal: &AbortSignal,
+    ) -> Result<ModelStream, ModelError> {
+        let svc = self.current.read().expect("model service poisoned").clone();
+        svc.stream(request, signal).await
+    }
+
+    async fn complete(
+        &self,
+        request: &ModelRequest,
+        signal: &AbortSignal,
+    ) -> Result<ModelResponse, ModelError> {
+        let svc = self.current.read().expect("model service poisoned").clone();
+        svc.complete(request, signal).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,5 +760,93 @@ mod tests {
         assert_eq!(items[1]["type"], "function_call");
         assert_eq!(items[1]["name"], "demo_hello");
         assert_eq!(items[2]["type"], "function_call_output");
+    }
+
+    /// 回归测试（ticket 02）：DeepSeek Responses 真实事件形状——
+    /// item 的类型在 `item` 子对象里，usage 在 `response.usage`。
+    /// 用本地假 HTTP 服务喂探针抓到的 SSE 序列，验证消息/工具调用/usage 映射。
+    #[tokio::test]
+    async fn responses_stream_maps_real_event_shapes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let sse = concat!(
+            "event: response.created\ndata: {\"type\":\"response.created\"}\n\n",
+            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc1\",\"call_id\":\"call_1\",\"name\":\"get_weather\",\"arguments\":\"\"},\"output_index\":1}\n\n",
+            "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc1\",\"output_index\":1,\"delta\":\"{\\\"city\\\":\\\"北京\\\"}\"}\n\n",
+            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc1\",\"call_id\":\"call_1\",\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"北京\\\"}\"},\"output_index\":1}\n\n",
+            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"id\":\"m1\"},\"output_index\":2}\n\n",
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"output_index\":2,\"delta\":\"北京今天晴天\"}\n\n",
+            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"id\":\"m1\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"北京今天晴天\"}]},\"output_index\":2}\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":84,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":27,\"output_tokens_details\":{\"reasoning_tokens\":17}}}}\n\n",
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = sock.read(&mut buf).await;
+            let header =
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+            sock.write_all(header.as_bytes()).await.unwrap();
+            sock.write_all(sse.as_bytes()).await.unwrap();
+            let _ = sock.shutdown().await;
+        });
+
+        let svc = ResponsesModelService::new(
+            format!("http://{addr}"),
+            "test-key".into(),
+            "deepseek-v4-flash".into(),
+        );
+        let request = ModelRequest {
+            model: ModelKind::Main,
+            messages: vec![Message::user("北京天气？")],
+            tools: None,
+            reasoning_effort: None,
+            response_format: None,
+            tool_choice: None,
+        };
+        let mut stream = svc
+            .stream(&request, &AbortSignal::new())
+            .await
+            .expect("stream 应成功");
+
+        let mut text = String::new();
+        let mut tool_name = String::new();
+        let mut tool_args = String::new();
+        let mut message_done = false;
+        let mut call_done = false;
+        let mut usage = None;
+        while let Some(chunk) = stream.next().await {
+            match chunk.expect("chunk 无错误") {
+                ModelChunk::TextDelta(d) => text.push_str(&d),
+                ModelChunk::ToolCallStart { name, .. } => tool_name = name,
+                ModelChunk::ToolCallDelta { data, .. } => tool_args.push_str(&data),
+                ModelChunk::ItemDone {
+                    kind: ItemKind::Message,
+                } => message_done = true,
+                ModelChunk::ItemDone {
+                    kind: ItemKind::FunctionCall,
+                } => call_done = true,
+                ModelChunk::ItemDone {
+                    kind: ItemKind::Reasoning,
+                } => {}
+                ModelChunk::Usage(u) => usage = Some(u),
+                ModelChunk::ReasoningDelta(_)
+                | ModelChunk::ReasoningItemStart { .. }
+                | ModelChunk::Done => {}
+            }
+        }
+        assert_eq!(tool_name, "get_weather");
+        assert_eq!(tool_args, r#"{"city":"北京"}"#);
+        assert!(call_done);
+        assert_eq!(text, "北京今天晴天");
+        assert!(message_done);
+        let usage = usage.expect("usage 应解析到");
+        assert_eq!(usage.input_tokens, Some(84));
+        assert_eq!(usage.output_tokens, Some(27));
+        assert_eq!(usage.cached_tokens, Some(0));
+        assert_eq!(usage.reasoning_tokens, Some(17));
     }
 }

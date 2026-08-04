@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::kernel::audit::{AuditRecord, Auditor};
-use crate::kernel::message::Message;
+use crate::kernel::events::{Event, EventSink};
+use crate::kernel::message::{Message, MessageId};
 
 /// 服务标识：v2 封闭集合（ADR-0014）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -90,6 +91,20 @@ pub struct ModelRequest {
     /// DeepSeek 思考模式 effort（none/minimal/low/medium/high/xhigh/max）。
     pub reasoning_effort: Option<String>,
     pub response_format: Option<ResponseFormat>,
+    /// 工具选择策略：强制调用指定工具时用 Function{name}（API 要求关闭思考模式）。
+    pub tool_choice: Option<ToolChoice>,
+}
+
+/// 工具选择策略（OpenAI Responses 兼容）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolChoice {
+    Auto,
+    Required,
+    /// 强制调用指定工具（wire name）。
+    Function {
+        name: String,
+    },
 }
 
 impl ModelRequest {
@@ -100,6 +115,7 @@ impl ModelRequest {
             tools: None,
             reasoning_effort: None,
             response_format: None,
+            tool_choice: None,
         }
     }
 }
@@ -116,12 +132,17 @@ pub struct ToolSchema {
 pub enum ItemKind {
     Message,
     FunctionCall,
+    Reasoning,
 }
 
 #[derive(Debug, Clone)]
 pub enum ModelChunk {
     TextDelta(String),
     ReasoningDelta(String),
+    /// 推理 item 开始（携带 id，后续轮次必须按 id 回传给 API）。
+    ReasoningItemStart {
+        id: String,
+    },
     ToolCallStart {
         index: usize,
         call_id: String,
@@ -344,6 +365,35 @@ pub trait SessionStore: Send + Sync {
     async fn append_message(&self, key: &SessionKey, msg: &Message) -> Result<(), StorageError>;
     async fn read_path(&self, key: &SessionKey) -> Result<Vec<Message>, StorageError>;
     async fn read_all(&self, key: &SessionKey) -> Result<Vec<Message>, StorageError>;
+    /// 设置活跃路径末端（消息树分支切换；None = 退化为线性全链）。
+    async fn set_active_path(
+        &self,
+        key: &SessionKey,
+        message_id: Option<MessageId>,
+    ) -> Result<(), StorageError>;
+    /// 在 message_id 处派生新分支：消息复制新 id（parent 不变、文本替换），
+    /// 编辑点之后的旧消息保留在 JSONL 但不再属于活跃路径（ADR-0007 历史不截断）。
+    /// 返回新活跃路径。
+    async fn derive_branch(
+        &self,
+        key: &SessionKey,
+        message_id: MessageId,
+        text: &str,
+    ) -> Result<Vec<Message>, StorageError>;
+    /// 切换到以 message_id 为末端的活跃路径（沿 parent 链回溯）。
+    async fn switch_branch(
+        &self,
+        key: &SessionKey,
+        message_id: MessageId,
+    ) -> Result<Vec<Message>, StorageError>;
+    /// 压缩接入：把摘要消息追加进会话，并把 tail_start（保留段首条）的 parent 改挂到摘要下，
+    /// 使活跃路径变为 `摘要 → 保留段 → …`，旧前缀仍在 JSONL 但不进上下文。
+    async fn splice_compaction(
+        &self,
+        key: &SessionKey,
+        summary: &Message,
+        tail_start: MessageId,
+    ) -> Result<(), StorageError>;
     async fn set_goal(&self, key: &SessionKey, goal: &Goal) -> Result<(), StorageError>;
     async fn archive(&self, key: &SessionKey) -> Result<(), StorageError>;
     async fn list_sessions(&self) -> Result<Vec<SessionMeta>, StorageError>;
@@ -453,11 +503,15 @@ impl MemoryPath {
         let segments: Vec<String> = raw_segments.iter().map(|s| s.trim().to_string()).collect();
         if segments
             .iter()
-            .any(|s| s == ".." || s.contains('\\') || s.chars().any(|c| c.is_control()))
+            .any(|s| s == "." || s == ".." || s.contains('\\') || s.chars().any(|c| c.is_control()))
         {
             return Err(MemoryError::InvalidPath(format!("非法路径段：{raw}")));
         }
         Ok(Self { segments })
+    }
+
+    pub fn segments(&self) -> &[String] {
+        &self.segments
     }
 
     pub fn as_str(&self) -> String {
@@ -492,20 +546,57 @@ pub trait MemoryService: Send + Sync {
 #[derive(Clone)]
 pub struct MemoryHandle {
     inner: Arc<dyn MemoryService>,
+    events: Arc<dyn EventSink>,
+    auditor: Auditor,
 }
 
 impl MemoryHandle {
+    /// 无观测构造（测试/插件单测用；事件与审计为 no-op，对外签名不变）。
     pub fn new(inner: Arc<dyn MemoryService>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            events: Arc::new(crate::kernel::events::MemoryEventSink::default()),
+            auditor: Auditor::new(Arc::new(crate::kernel::audit::MemoryAuditSink::default())),
+        }
+    }
+
+    /// 生产构造：save/remove 发 MemoryChanged 事件并审计，show 审计 MemoryRead。
+    pub fn with_observability(
+        inner: Arc<dyn MemoryService>,
+        events: Arc<dyn EventSink>,
+        auditor: Auditor,
+    ) -> Self {
+        Self {
+            inner,
+            events,
+            auditor,
+        }
     }
     pub async fn save(&self, p: &MemoryPath, c: &str) -> Result<(), MemoryError> {
-        self.inner.save(p, c).await
+        let result = self.inner.save(p, c).await;
+        if result.is_ok() {
+            let path = p.as_str();
+            self.auditor
+                .record(AuditRecord::MemoryWrite { path: path.clone() });
+            self.events.emit(Event::MemoryChanged { path });
+        }
+        result
     }
     pub async fn show(&self, p: Option<&MemoryPath>) -> Result<MemoryView, MemoryError> {
+        self.auditor.record(AuditRecord::MemoryRead {
+            path: p.map(|x| x.as_str()),
+        });
         self.inner.show(p).await
     }
     pub async fn remove(&self, p: &MemoryPath) -> Result<(), MemoryError> {
-        self.inner.remove(p).await
+        let result = self.inner.remove(p).await;
+        if result.is_ok() {
+            let path = p.as_str();
+            self.auditor
+                .record(AuditRecord::MemoryRemove { path: path.clone() });
+            self.events.emit(Event::MemoryChanged { path });
+        }
+        result
     }
 }
 

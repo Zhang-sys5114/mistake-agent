@@ -49,6 +49,15 @@ pub enum MessageKind {
         entry: String,
         params: serde_json::Value,
         result: Result<serde_json::Value, ToolError>,
+        /// 第一轮模型返回的真实 call_id（Responses API 要求按原值回传；
+        /// 旧数据/手动构造缺省为空，回传时回退消息 id）。
+        #[serde(default)]
+        call_id: String,
+    },
+    /// 模型推理（思维链）：id 用于 Responses API 后续轮次回传，text 供前端展示。
+    Reasoning {
+        id: String,
+        text: String,
     },
     System {
         text: String,
@@ -99,6 +108,16 @@ impl Message {
         params: serde_json::Value,
         result: Result<serde_json::Value, ToolError>,
     ) -> Self {
+        Self::tool_call_with_id(entry, params, result, String::new())
+    }
+
+    /// 带真实 call_id 的工具调用消息（agent loop 使用）。
+    pub fn tool_call_with_id(
+        entry: impl Into<String>,
+        params: serde_json::Value,
+        result: Result<serde_json::Value, ToolError>,
+        call_id: String,
+    ) -> Self {
         Self {
             id: MessageId::new(),
             parent_id: None,
@@ -106,6 +125,7 @@ impl Message {
                 entry: entry.into(),
                 params,
                 result,
+                call_id,
             },
             created_at: chrono::Utc::now(),
         }

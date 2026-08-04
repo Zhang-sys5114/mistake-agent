@@ -16,8 +16,9 @@ use crate::kernel::message::{Message, MessageId, MessageKind, append_to_path};
 use crate::kernel::prompt::agent_system_prompt;
 use crate::kernel::services::{
     AbortSignal, ItemKind, ModelChunk, ModelKind, ModelRequest, ModelService, TokenUsage,
-    ToolSchema,
+    ToolChoice, ToolSchema,
 };
+use crate::kernel::session::{InterruptBus, Summarizer};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -36,7 +37,11 @@ pub enum StopReason {
     ConsecutiveFailures,
     TurnTimeout,
     UserAborted,
-    InternalAbort { reason: InterruptReason },
+    /// 回合失败（模型/协议/内部错误），前端应恢复可聊天状态。
+    Failed,
+    InternalAbort {
+        reason: InterruptReason,
+    },
 }
 
 pub struct TurnInput {
@@ -44,6 +49,8 @@ pub struct TurnInput {
     pub tools: Vec<ToolSchema>,
     pub signal: AbortSignal,
     pub turn_budget: Duration,
+    /// 强制首轮调用的工具（wire name）；执行后后续轮次恢复 auto。
+    pub forced_tool: Option<String>,
 }
 
 #[derive(Debug)]
@@ -51,6 +58,20 @@ pub struct TurnOutcome {
     pub messages: Vec<Message>,
     pub stop_reason: StopReason,
     pub tool_calls: usize,
+    /// 本回合发生的上下文压缩（None = 未压缩）。
+    pub compaction: Option<CompactionInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompactionInfo {
+    /// 已写入 messages 的摘要消息（RPC 需要跳过重复落盘并接入存储链）。
+    pub summary: Message,
+    /// 保留段首条消息 id（其 parent 应改挂到 summary 下）。
+    pub tail_start: MessageId,
+    /// 压缩掉的旧消息条数。
+    pub summarized: usize,
+    /// 压缩时会话末尾消息 id（活跃路径推进目标）。
+    pub tail_end: MessageId,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -64,6 +85,7 @@ pub enum LoopError {
 struct ToolCallAcc {
     name: String,
     arguments: String,
+    call_id: String,
 }
 
 pub struct AgentLoop {
@@ -73,6 +95,12 @@ pub struct AgentLoop {
     events: Arc<dyn EventSink>,
     max_tool_calls: usize,
     max_consecutive_failures: usize,
+    summarizer: Arc<dyn Summarizer>,
+    bus: InterruptBus,
+    /// 压缩阈值（按 token 粗估：字符数/2；达 75% 触发）。
+    context_limit_tokens: usize,
+    /// 压缩时保留的最近消息条数。
+    compaction_keep_last: usize,
 }
 
 impl AgentLoop {
@@ -81,6 +109,8 @@ impl AgentLoop {
         dispatch: Arc<Dispatch>,
         auditor: Auditor,
         events: Arc<dyn EventSink>,
+        summarizer: Arc<dyn Summarizer>,
+        bus: InterruptBus,
     ) -> Self {
         Self {
             model,
@@ -89,16 +119,45 @@ impl AgentLoop {
             events,
             max_tool_calls: 25,
             max_consecutive_failures: 3,
+            summarizer,
+            bus,
+            context_limit_tokens: 131_072,
+            compaction_keep_last: 15,
         }
     }
 
+    #[cfg(test)]
+    pub fn with_compaction_limits(
+        mut self,
+        context_limit_tokens: usize,
+        compaction_keep_last: usize,
+    ) -> Self {
+        self.context_limit_tokens = context_limit_tokens;
+        self.compaction_keep_last = compaction_keep_last;
+        self
+    }
+
     pub async fn run_turn(&self, input: TurnInput) -> Result<TurnOutcome, LoopError> {
-        let start_len = input.messages.len();
+        // 回合边界消费环境变更中断（ADR-0023）：记录审计，上下文重组由调度层完成。
+        for interrupt in self.bus.take_all() {
+            log::info!("回合边界消费中断：{interrupt:?}");
+            self.auditor.record(AuditRecord::Interrupt {
+                name: interrupt_name(&interrupt),
+                reason: format!("{interrupt:?}"),
+            });
+        }
+
+        let preexisting: std::collections::HashSet<MessageId> =
+            input.messages.iter().map(|m| m.id).collect();
         let mut conversation = input.messages;
         let turn_deadline = Instant::now() + input.turn_budget;
         let mut tool_calls = 0usize;
         let mut consecutive_failures = 0usize;
         let mut last_code: Option<ToolErrorCode> = None;
+        let mut remaining_forced = input.forced_tool.clone();
+        // 强制调用回合全程关闭思考模式：Responses API 要求 thinking 的
+        // reasoning_text 必须随历史回传，混用 none/thinking 会协议报错。
+        let reasoning_off = input.forced_tool.is_some();
 
         let stop_reason = loop {
             if input.signal.is_cancelled() {
@@ -111,16 +170,58 @@ impl AgentLoop {
             // 系统提示每次请求注入（不落消息树），保证无状态 API 拿到完整人格设定。
             let mut req_messages = vec![Message::system(agent_system_prompt())];
             req_messages.extend(conversation.iter().cloned());
-            let request = ModelRequest {
+            let mut request = ModelRequest {
                 model: ModelKind::Main,
                 messages: req_messages,
                 tools: Some(input.tools.clone()),
-                reasoning_effort: None,
+                reasoning_effort: if reasoning_off {
+                    Some("none".into())
+                } else {
+                    None
+                },
                 response_format: None,
+                tool_choice: None,
             };
+            if let Some(wire) = remaining_forced.take() {
+                request.tool_choice = Some(ToolChoice::Function { name: wire });
+            }
             let started = Instant::now();
             let mut stream = match self.model.stream(&request, &input.signal).await {
                 Ok(s) => s,
+                // 瞬时错误（503/限流/传输）重试一次；系统性错误与取消不重试。
+                Err(e)
+                    if !e.is_systemic()
+                        && !matches!(e, crate::kernel::services::ModelError::Cancelled) =>
+                {
+                    log::warn!("主模型流失败，1 次重试：{e}");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    if input.signal.is_cancelled() {
+                        break StopReason::UserAborted;
+                    }
+                    match self.model.stream(&request, &input.signal).await {
+                        Ok(s) => s,
+                        Err(e2) => {
+                            self.auditor.record(AuditRecord::LlmCall {
+                                provider: "main".into(),
+                                model: "main".into(),
+                                kind: "stream".into(),
+                                tokens_in: None,
+                                tokens_out: None,
+                                duration_ms: started.elapsed().as_millis() as u64,
+                                ok: false,
+                            });
+                            if e2.is_systemic() {
+                                break StopReason::InternalAbort {
+                                    reason: InterruptReason::ModelUnavailable,
+                                };
+                            }
+                            if matches!(e2, crate::kernel::services::ModelError::Cancelled) {
+                                break StopReason::UserAborted;
+                            }
+                            return Err(LoopError::Model(e2.to_string()));
+                        }
+                    }
+                }
                 Err(e) => {
                     self.auditor.record(AuditRecord::LlmCall {
                         provider: "main".into(),
@@ -144,6 +245,7 @@ impl AgentLoop {
             };
 
             let mut pending_bubble: Option<Message> = None;
+            let mut pending_reasoning: Option<Message> = None;
             let mut calls: BTreeMap<usize, ToolCallAcc> = BTreeMap::new();
             let mut calls_done: Vec<(usize, ToolCallAcc)> = Vec::new();
             let mut usage: Option<TokenUsage> = None;
@@ -167,11 +269,27 @@ impl AgentLoop {
                         });
                     }
                     Ok(ModelChunk::ReasoningDelta(delta)) => {
+                        if let Some(r) = pending_reasoning.as_mut()
+                            && let MessageKind::Reasoning { text, .. } = &mut r.kind
+                        {
+                            text.push_str(&delta);
+                        }
                         self.events.emit(Event::ReasoningDelta { delta });
+                    }
+                    Ok(ModelChunk::ReasoningItemStart { id }) => {
+                        pending_reasoning = Some(Message {
+                            id: MessageId::new(),
+                            parent_id: None,
+                            kind: MessageKind::Reasoning {
+                                id,
+                                text: String::new(),
+                            },
+                            created_at: chrono::Utc::now(),
+                        });
                     }
                     Ok(ModelChunk::ToolCallStart {
                         index,
-                        call_id: _call_id,
+                        call_id,
                         name,
                     }) => {
                         calls.insert(
@@ -179,6 +297,7 @@ impl AgentLoop {
                             ToolCallAcc {
                                 name,
                                 arguments: String::new(),
+                                call_id,
                             },
                         );
                     }
@@ -211,6 +330,14 @@ impl AgentLoop {
                             calls_done.push((idx, acc));
                         }
                     }
+                    Ok(ModelChunk::ItemDone {
+                        kind: ItemKind::Reasoning,
+                    }) => {
+                        // 推理 item 必须按 id 回传，无论文本是否为空都要保留。
+                        if let Some(r) = pending_reasoning.take() {
+                            append_to_path(&mut conversation, r);
+                        }
+                    }
                     Ok(ModelChunk::Usage(u)) => {
                         usage = Some(u);
                     }
@@ -227,11 +354,12 @@ impl AgentLoop {
                         });
                         if e.is_systemic() {
                             return Ok(TurnOutcome {
-                                messages: conversation[start_len..].to_vec(),
+                                messages: new_messages(&conversation, &preexisting),
                                 stop_reason: StopReason::InternalAbort {
                                     reason: InterruptReason::ModelUnavailable,
                                 },
                                 tool_calls,
+                                compaction: None,
                             });
                         }
                         return Err(LoopError::Model(e.to_string()));
@@ -296,7 +424,12 @@ impl AgentLoop {
                         if consecutive_failures >= self.max_consecutive_failures {
                             append_to_path(
                                 &mut conversation,
-                                Message::tool_call(full_name, params, result),
+                                Message::tool_call_with_id(
+                                    full_name,
+                                    params,
+                                    result,
+                                    acc.call_id.clone(),
+                                ),
                             );
                             stop = Some(StopReason::ConsecutiveFailures);
                             break;
@@ -305,7 +438,7 @@ impl AgentLoop {
                 }
                 append_to_path(
                     &mut conversation,
-                    Message::tool_call(full_name, params, result),
+                    Message::tool_call_with_id(full_name, params, result, acc.call_id.clone()),
                 );
             }
             if let Some(s) = stop {
@@ -313,10 +446,12 @@ impl AgentLoop {
             }
         };
 
+        let compaction = self.maybe_compact(&mut conversation).await;
         let outcome = TurnOutcome {
-            messages: conversation[start_len..].to_vec(),
+            messages: new_messages(&conversation, &preexisting),
             stop_reason,
             tool_calls,
+            compaction,
         };
         self.events.emit(Event::TurnEnd {
             stop_reason: outcome.stop_reason.clone(),
@@ -326,5 +461,229 @@ impl AgentLoop {
             tool_calls,
         });
         Ok(outcome)
+    }
+
+    /// 上下文用量 ≥ 窗口 75% 时压缩：最近 N 条不压，其余交给摘要器；
+    /// 摘要为空则重试一次，仍失败就下回合再试（原始消息仍在会话 JSONL）。
+    async fn maybe_compact(&self, conversation: &mut Vec<Message>) -> Option<CompactionInfo> {
+        let total_chars: usize = conversation.iter().map(message_chars).sum();
+        let est_tokens = total_chars / 2 + 1;
+        if est_tokens < self.context_limit_tokens * 3 / 4 {
+            return None;
+        }
+        let keep_from = conversation.len().saturating_sub(self.compaction_keep_last);
+        if keep_from == 0 {
+            return None;
+        }
+        let to_compact = conversation[..keep_from].to_vec();
+        let mut summary = self.summarizer.summarize(&to_compact, None).await;
+        if summary.trim().is_empty() {
+            summary = self.summarizer.summarize(&to_compact, None).await;
+        }
+        let summary = summary.trim();
+        if summary.is_empty() {
+            log::warn!("压缩摘要为空，下回合再试");
+            return None;
+        }
+        let mut tail = conversation[keep_from..].to_vec();
+        let tail_start = tail.first().map(|m| m.id)?;
+        let tail_end = tail.last().map(|m| m.id)?;
+        let mut sys = Message::system(format!("上下文压缩摘要：{summary}"));
+        sys.parent_id = None;
+        // 内存链同步：保留段首条挂到摘要下，旧前缀从活跃路径剔除（JSONL 原样保留）。
+        if let Some(first) = tail.first_mut() {
+            first.parent_id = Some(sys.id);
+        }
+        let info = CompactionInfo {
+            summary: sys.clone(),
+            tail_start,
+            summarized: to_compact.len(),
+            tail_end,
+        };
+        *conversation = std::iter::once(sys).chain(tail).collect();
+        Some(info)
+    }
+}
+
+fn interrupt_name(interrupt: &crate::kernel::session::Interrupt) -> String {
+    match interrupt {
+        crate::kernel::session::Interrupt::SessionSwitched { .. } => "session_switched",
+        crate::kernel::session::Interrupt::GoalUpdated { .. } => "goal_updated",
+        crate::kernel::session::Interrupt::SettingsChanged => "settings_changed",
+        crate::kernel::session::Interrupt::MemoryChanged { .. } => "memory_changed",
+        crate::kernel::session::Interrupt::CompactionDone { .. } => "compaction_done",
+    }
+    .into()
+}
+
+fn message_chars(msg: &Message) -> usize {
+    match &msg.kind {
+        MessageKind::User { text, .. }
+        | MessageKind::Assistant { text }
+        | MessageKind::System { text } => text.len(),
+        MessageKind::Reasoning { text, .. } => text.len(),
+        MessageKind::ToolCall { entry, params, .. } => {
+            entry.len() + serde_json::to_string(params).unwrap_or_default().len()
+        }
+    }
+}
+
+/// 本回合新增的消息（排除回合开始前已存在的消息；压缩摘要也算新增）。
+fn new_messages(
+    conversation: &[Message],
+    preexisting: &std::collections::HashSet<MessageId>,
+) -> Vec<Message> {
+    conversation
+        .iter()
+        .filter(|m| !preexisting.contains(&m.id))
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::audit::MemoryAuditSink;
+    use crate::kernel::events::MemoryEventSink;
+    use crate::kernel::registry::Registry;
+    use crate::kernel::services::{ModelError, ModelResponse, ModelStream, ServiceHandles};
+    use crate::kernel::session::{Interrupt, InterruptBus, StubSummarizer};
+
+    struct ScriptedLoopModel;
+
+    #[async_trait::async_trait]
+    impl ModelService for ScriptedLoopModel {
+        async fn stream(
+            &self,
+            _request: &ModelRequest,
+            _signal: &AbortSignal,
+        ) -> Result<ModelStream, ModelError> {
+            let chunks = vec![
+                Ok(ModelChunk::TextDelta("好的，已处理。".into())),
+                Ok(ModelChunk::ItemDone {
+                    kind: ItemKind::Message,
+                }),
+                Ok(ModelChunk::Done),
+            ];
+            Ok(Box::new(futures_util::stream::iter(chunks)))
+        }
+
+        async fn complete(
+            &self,
+            _request: &ModelRequest,
+            _signal: &AbortSignal,
+        ) -> Result<ModelResponse, ModelError> {
+            Err(ModelError::Transport("测试模型不支持 complete".into()))
+        }
+    }
+
+    fn setup_loop(
+        bus: InterruptBus,
+        context_limit: usize,
+    ) -> (Arc<AgentLoop>, Arc<MemoryAuditSink>, Arc<MemoryEventSink>) {
+        let events = Arc::new(MemoryEventSink::default());
+        let sink = Arc::new(MemoryAuditSink::default());
+        let auditor = Auditor::new(sink.clone());
+        let registry = Arc::new(Registry::new(
+            ServiceHandles::default(),
+            Arc::new(crate::kernel::logger::Logger),
+        ));
+        let dispatch = Arc::new(Dispatch::new(
+            registry,
+            auditor.clone(),
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+            Duration::from_secs(10 * 60),
+            events.clone(),
+        ));
+        let loop_engine = Arc::new(
+            AgentLoop::new(
+                Arc::new(ScriptedLoopModel),
+                dispatch,
+                auditor,
+                events.clone(),
+                Arc::new(StubSummarizer),
+                bus,
+            )
+            .with_compaction_limits(context_limit, 2),
+        );
+        (loop_engine, sink, events)
+    }
+
+    fn long_messages(count: usize) -> Vec<Message> {
+        (0..count)
+            .map(|i| {
+                Message::user(format!(
+                    "第 {i} 条长消息：{}",
+                    "数学错题讲解与知识点分析内容填充。".repeat(8)
+                ))
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn compaction_compresses_old_messages_and_keeps_tail() {
+        let bus = InterruptBus::new();
+        let (loop_engine, _, _) = setup_loop(bus.clone(), 100);
+        let input = TurnInput {
+            messages: long_messages(6),
+            tools: Vec::new(),
+            signal: AbortSignal::new(),
+            turn_budget: Duration::from_secs(60),
+            forced_tool: None,
+        };
+        let outcome = loop_engine.run_turn(input).await.unwrap();
+        let compaction = outcome.compaction.expect("达到阈值应触发压缩");
+        assert!(compaction.summarized > 0);
+        assert!(
+            matches!(
+                outcome.messages[0].kind,
+                MessageKind::System { ref text } if text.contains("上下文压缩摘要")
+            ),
+            "摘要应作为 system 消息写入"
+        );
+        assert!(outcome.messages.len() <= 3, "保留摘要 + 最近 2 条");
+    }
+
+    #[tokio::test]
+    async fn below_threshold_skips_compaction() {
+        let (loop_engine, _, _) = setup_loop(InterruptBus::new(), 100_000);
+        let input = TurnInput {
+            messages: vec![Message::user("短消息")],
+            tools: Vec::new(),
+            signal: AbortSignal::new(),
+            turn_budget: Duration::from_secs(60),
+            forced_tool: None,
+        };
+        let outcome = loop_engine.run_turn(input).await.unwrap();
+        assert!(outcome.compaction.is_none());
+    }
+
+    #[tokio::test]
+    async fn turn_boundary_consumes_interrupts_and_audits() {
+        let bus = InterruptBus::new();
+        bus.send(Interrupt::SettingsChanged);
+        bus.send(Interrupt::MemoryChanged {
+            path: "数学/函数".into(),
+        });
+        let (loop_engine, sink, _) = setup_loop(bus, 100_000);
+        let input = TurnInput {
+            messages: vec![Message::user("你好")],
+            tools: Vec::new(),
+            signal: AbortSignal::new(),
+            turn_budget: Duration::from_secs(60),
+            forced_tool: None,
+        };
+        loop_engine.run_turn(input).await.unwrap();
+        let records = sink.take();
+        let interrupts: Vec<_> = records
+            .iter()
+            .filter(|r| matches!(r, AuditRecord::Interrupt { .. }))
+            .collect();
+        assert_eq!(interrupts.len(), 2);
+        assert!(records.iter().any(|r| matches!(
+            r,
+            AuditRecord::Interrupt { name, .. } if name == "settings_changed"
+        )));
     }
 }
