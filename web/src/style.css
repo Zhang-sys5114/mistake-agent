@@ -1324,44 +1324,153 @@ textarea {
 }
 
 .oobe-card {
-  width: min(680px, 100%);
+  width: min(760px, 100%);
   max-height: 92vh;
-  overflow-y: auto;
-  padding: var(--space-xl);
+  overflow: hidden;
   background: var(--color-surface);
   border: 1px solid var(--color-border-soft);
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-lg);
 }
 
-.oobe-head {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--space-sm);
-  margin-bottom: var(--space-lg);
-  text-align: center;
+.oobe-wizard {
+  display: grid;
+  grid-template-columns: 190px 1fr;
+  grid-template-rows: 1fr auto;
 }
 
-.oobe-head h1 {
+.oobe-steps {
+  grid-row: 1 / span 2;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-xl) var(--space-md);
+  background: var(--color-primary-soft);
+  border-right: 1px solid var(--color-border-soft);
+}
+
+.oobe-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.oobe-step.active {
+  background: var(--color-surface);
+  color: var(--color-primary-deep);
+  box-shadow: var(--shadow-sm);
+}
+
+.oobe-step.done {
+  color: var(--color-primary-deep);
+}
+
+.oobe-step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  border-radius: 50%;
+  background: var(--color-muted);
+  color: var(--color-text-weak);
+  font-size: 12px;
+}
+
+.oobe-step.active .oobe-step-num,
+.oobe-step.done .oobe-step-num {
+  background: var(--color-primary);
+  color: #ffffff;
+}
+
+.oobe-body {
+  grid-row: 1;
+  overflow-y: auto;
+  padding: var(--space-xl);
+}
+
+.oobe-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  max-width: 460px;
+  margin: 0 auto;
+}
+
+.oobe-welcome {
+  align-items: center;
+  text-align: center;
+  padding: var(--space-xl) 0;
+}
+
+.oobe-welcome h1,
+.oobe-page h2 {
   font-family: var(--font-display);
-  font-size: 24px;
   color: var(--color-text-strong);
 }
 
-.oobe-head p {
+.oobe-welcome h1 {
+  font-size: 26px;
+}
+
+.oobe-page h2 {
+  font-size: 20px;
+}
+
+.oobe-tip {
   font-size: 14px;
   color: var(--color-text-weak);
 }
 
-.oobe-form {
-  max-width: none;
+.oobe-summary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
 }
 
-.oobe-actions {
+.oobe-summary-card {
+  padding: var(--space-md);
+}
+
+.oobe-summary-head {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: var(--space-sm);
+}
+
+.oobe-summary-grid {
+  display: grid;
+  grid-template-columns: 52px 1fr;
+  gap: 4px 12px;
+  font-size: 13px;
+}
+
+.oobe-summary-grid dt {
+  color: var(--color-text-weak);
+}
+
+.oobe-summary-grid dd {
+  word-break: break-all;
+}
+
+.oobe-foot {
+  grid-row: 2;
+  display: flex;
+  align-items: center;
   gap: var(--space-sm);
+  padding: var(--space-md) var(--space-xl);
+  border-top: 1px solid var(--color-border-soft);
+}
+
+.oobe-foot-spacer {
+  flex: 1;
 }
 
 .tool-panel-overlay {
