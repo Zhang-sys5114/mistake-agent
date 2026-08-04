@@ -85,6 +85,8 @@ async function save({ skipDone = false } = {}) {
   saving.value = true;
   error.value = "";
   notice.value = "";
+  // TODO: OOBE 保存设置后，还应初始化数据根目录（sessions/mistakes/memory/audit/logs/uploads）
+  // 并在缺失时写入默认 AGENTS.md（见 docs/TODO.md）。
   const patch = {
     log_level: form.log_level,
     main_model: {
