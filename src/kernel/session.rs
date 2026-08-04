@@ -258,6 +258,7 @@ impl GuardModel for LlmTurnDecider {
         let payload = json!({
             "goal": input.goal.as_ref().map(|g| &g.text),
             "transcript": transcript,
+            "new_text": input.new_text,
         });
         let request = ModelRequest {
             model: ModelKind::Main,
@@ -587,9 +588,9 @@ impl SessionScheduler {
         self.bus.clone()
     }
 
-    /// 新消息到达：空闲超时检查 → 返回回合上下文。
-    /// 切换决策不再在此发生（ADR-0030）：新消息默认继续当前会话；
-    /// 切换只由「回合结束决策器」或主模型调用的 session::switch 工具发起。
+    /// 新消息到达（ADR-0032）：先由主模型判断要不要切换上下文，再返回回合上下文回答。
+    /// 顺序：空闲超时（系统级）→ 主模型决策 start_new / update_goal / continue
+    /// → 追加用户消息并进入回合；决策失败默认 continue（存疑即继续）。
     pub async fn on_new_message(&self, text: &str) -> Result<TurnContext, SchedulerError> {
         let now = self.clock.now();
         let metas = self.store.list_sessions().await?;
@@ -624,8 +625,56 @@ impl SessionScheduler {
             return self.append_user(&to, text).await;
         }
 
-        // 默认继续当前会话（切换决策归主模型）。
-        self.continue_in(&meta, text, now).await
+        // 先判断（主模型）：这条新消息要不要切换上下文。
+        let path = self.store.read_path(&meta.key).await?;
+        let transcript = path
+            .iter()
+            .rev()
+            .take(30)
+            .rev()
+            .map(message_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let input = GuardInput {
+            goal: meta.goal.clone(),
+            summary: transcript,
+            new_text: Some(text.to_string()),
+        };
+        let decision = match self.decider.decide(&input).await {
+            Ok(d) => {
+                log::info!("新消息上下文决策：{d:?}");
+                d
+            }
+            Err(e) => {
+                log::warn!("新消息上下文决策失败，按 continue 兜底：{e}");
+                GuardDecision::Continue
+            }
+        };
+        match decision {
+            GuardDecision::StartNew(goal) => {
+                if goal.text.trim().is_empty() {
+                    log::warn!("新消息决策返回空目标，降级继续当前会话");
+                    return self.continue_in(&meta, text, now).await;
+                }
+                if !self.switch_allowed(now) {
+                    log::warn!("切换过于频繁，新消息 start_new 降级忽略");
+                    return self.continue_in(&meta, text, now).await;
+                }
+                // 先切换上下文（归档旧会话 + 梗概 + 历史副本），再把新消息放进新会话回答。
+                let (from, to) = self.switch_session(Some(&meta), goal.clone(), now).await?;
+                self.record_switch(now);
+                self.bus.send(Interrupt::SessionSwitched { from, to, goal });
+                self.append_user(&to, text).await
+            }
+            GuardDecision::UpdateGoal(goal) => {
+                if !goal.text.trim().is_empty() {
+                    self.store.set_goal(&meta.key, &goal).await?;
+                    self.bus.send(Interrupt::GoalUpdated { goal });
+                }
+                self.continue_in(&meta, text, now).await
+            }
+            GuardDecision::Continue => self.continue_in(&meta, text, now).await,
+        }
     }
 
     /// 在活动会话中追加用户消息并推进 active_path。
@@ -944,6 +993,16 @@ mod tests {
         (scheduler, clock, store, bus)
     }
 
+    /// 确定性 continue 守卫：测试“新消息默认继续当前会话”时替代关键词版 StubGuard。
+    struct ContinueGuard;
+
+    #[async_trait]
+    impl GuardModel for ContinueGuard {
+        async fn decide(&self, _input: &GuardInput) -> Result<GuardDecision, GuardError> {
+            Ok(GuardDecision::Continue)
+        }
+    }
+
     #[tokio::test]
     async fn first_message_creates_session() {
         let (scheduler, _, store, _) = setup();
@@ -978,14 +1037,70 @@ mod tests {
 
     #[tokio::test]
     async fn new_message_continues_current_session() {
-        let (scheduler, _, store, _) = setup();
+        let store = MemoryStorage::new();
+        let clock = FakeClock::new(Utc::now());
+        let bus = InterruptBus::new();
+        let scheduler = SessionScheduler::new(
+            Arc::new(store.clone()),
+            Arc::new(ContinueGuard),
+            Arc::new(clock.clone()),
+            Arc::new(StubSummarizer),
+            bus.clone(),
+        );
         let first = scheduler.on_new_message("帮我看看这道题").await.unwrap();
-        let second = scheduler.on_new_message("生成周复习报告").await.unwrap();
-        // ADR-0030：新消息默认继续当前会话；切换决策归主模型。
+        let second = scheduler.on_new_message("继续讲第二题").await.unwrap();
+        // 主模型决策 continue：新消息继续当前会话（ADR-0032）。
         assert_eq!(first.session_key, second.session_key);
         let metas = store.list_sessions().await.unwrap();
         assert_eq!(metas.len(), 1, "不应自动切换新会话");
         assert_eq!(metas[0].status, SessionStatus::Active, "唯一会话保持活动");
+    }
+
+    #[tokio::test]
+    async fn new_message_start_new_switches_before_turn() {
+        // StubGuard 命中“报告”关键词 → start_new：先切换上下文，再把新消息放进新会话。
+        let (scheduler, _, store, bus) = setup();
+        let first = scheduler.on_new_message("帮我看看这道题").await.unwrap();
+        let second = scheduler.on_new_message("生成周复习报告").await.unwrap();
+        assert_ne!(first.session_key, second.session_key, "应切换到新会话");
+        let metas = store.list_sessions().await.unwrap();
+        assert_eq!(metas.len(), 2, "旧会话归档 + 新会话");
+        let archived = metas
+            .iter()
+            .find(|m| m.status == SessionStatus::Archived)
+            .expect("旧会话应归档");
+        assert_eq!(archived.key, first.session_key);
+        let active = metas
+            .iter()
+            .find(|m| m.status == SessionStatus::Active)
+            .expect("应有活动会话");
+        assert_eq!(active.key, second.session_key);
+        // 新会话末尾必须是用户新消息（先切上下文，再进入回合回答）。
+        let msgs = store.read_path(&second.session_key).await.unwrap();
+        assert!(
+            matches!(
+                msgs.last().unwrap().kind,
+                crate::kernel::message::MessageKind::User { .. }
+            ),
+            "新会话应包含用户消息"
+        );
+        assert!(
+            msgs.iter().any(|m| {
+                matches!(
+                    m.kind,
+                    crate::kernel::message::MessageKind::System { ref text }
+                        if text.contains("上一会话梗概")
+                )
+            }),
+            "新会话应注入旧会话梗概"
+        );
+        let interrupts = bus.take_all();
+        assert!(
+            interrupts
+                .iter()
+                .any(|i| matches!(i, Interrupt::SessionSwitched { .. })),
+            "应发出会话切换中断"
+        );
     }
 
     #[tokio::test]

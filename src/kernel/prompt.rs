@@ -38,13 +38,19 @@ pub fn grading_system_prompt() -> &'static str {
      即使只有一题，也必须用数组包裹（如 [{...}]），不要输出对象。"
 }
 
-/// 回合结束会话决策提示（守卫模型退役后由主模型决策）。
+/// 会话切换决策提示（主模型决策，ADR-0030/0032）：
+/// - new_text 非空（新消息到达）：先判断要不要切换上下文，再进入回合回答；
+/// - new_text 为 null（回合结束）：判断目标是否完成、要不要开新会话。
 pub fn turn_decider_prompt() -> &'static str {
-    "你是会话调度决策者。在一个回合结束时，判断会话目标是否仍然有效。\
-     输入：当前目标（goal）、最近对话（transcript）。\
+    "你是会话调度决策者。\
+     输入：当前目标（goal）、最近对话（transcript）、新的用户消息（new_text，可能为 null）。\
      输出 JSON：{\"action\":\"continue\"|\"update_goal\"|\"start_new\",\"goal\":\"更新后的目标文本\"}。\
-     规则：目标仍有效或不确定时 continue；同一目标的细化或延续用 update_goal；\
-     当前目标已明确完成且对话明显转向新任务时 start_new（goal 为新目标）；存疑一律 continue（避免丢上下文）。"
+     规则：\
+     - new_text 非空（新消息到达）：先判断这条消息要不要切换上下文——与当前目标明显无关、\
+       开启全新任务时 start_new（goal 为新目标）；同一目标的细化或延续用 update_goal；否则 continue。\
+     - new_text 为 null（回合结束）：目标仍有效或不确定时 continue；当前目标已明确完成且对话\
+       明显转向新任务时 start_new（goal 为新目标）；同一目标的细化用 update_goal。\
+     - 存疑一律 continue（避免丢上下文）。"
 }
 
 /// 压缩/交接摘要提示（M2 落地；M1.5 用 StubSummarizer）。

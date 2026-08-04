@@ -77,15 +77,15 @@ _Avoid_: 事件（Event 指面向 GUI 的播报）
 _Avoid_: 全名（指内部 namespace::tool）
 
 **Session scheduler（会话调度）**:
-独立的内核级模块（非服务插件），负责 SessionKey 派生、会话生命周期与任务层切换；切换决策归主模型（回合结束 LlmTurnDecider + 回合内 session::switch 工具，ADR-0030）；持久化委托 storage 服务。
+独立的内核级模块（非服务插件），负责 SessionKey 派生、会话生命周期与任务层切换；切换决策归主模型（新消息到达先判断是否切换、回合内 session::switch 工具、回合结束 LlmTurnDecider，ADR-0030/0032）；持久化委托 storage 服务。
 _Avoid_: 会话管理（易与用户可见的管理界面混淆）
 
 **Guard model（守卫模型）**:
-（已退役，ADR-0030）原设计由 Session scheduler 调用的独立调度模型；现切换决策全部归主模型：回合结束由 LlmTurnDecider 判断 continue / update_goal / start_new（失败降级 continue），回合内由主模型调用 session::switch 工具主动切换。
+（已退役，ADR-0030）原设计由 Session scheduler 调用的独立调度模型；现切换决策全部归主模型：新消息到达先判断是否切换上下文（ADR-0032，先判断后回答），回合结束由 LlmTurnDecider 判断 continue / update_goal / start_new（失败降级 continue），回合内由主模型调用 session::switch 工具主动切换。
 _Avoid_: 调度模型（易与主模型混淆）
 
 **Goal（会话目标）**:
-当前会话要完成的学习目标，由守卫模型在 start_new 时生成并写入会话元数据；守卫模型据此在 continue / update_goal / start_new 三动作间决策，存疑即继续。
+当前会话要完成的学习目标，由主模型在 start_new 时生成并写入会话元数据；主模型据此在 continue / update_goal / start_new 三动作间决策，存疑即继续。
 _Avoid_: 任务名（过窄，Goal 可含更丰富描述）
 
 **History route（历史路由）**:

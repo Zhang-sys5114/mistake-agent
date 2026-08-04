@@ -36,10 +36,12 @@
 `subject` 为学科（数学/英语/物理/化学/生物/语文等，无法判断填"未分类"），`reference_answer` 为该题参考答案（可 null）；
 强制数组包裹。
 
-### 4. 守卫模型提示（guard_prompt）— M2 落地
+### 4. 会话切换决策提示（turn_decider_prompt）— M2 落地，ADR-0030/0032
 
-会话调度守卫（生产实现 = 主模型 + guard_prompt 独立调用，输出严格 JSON）：continue / update_goal / start_new 三动作，
-存疑即 continue，start_new 仅当目标明显无关；守卫解析失败/调用失败时按 continue 兜底（存疑即继续）。
+生产实现 = 主模型 + turn_decider_prompt 独立调用，输出严格 JSON：continue / update_goal / start_new 三动作；
+输入含 new_text（新消息，可能为 null）——**new_text 非空 = 新消息到达，先判断是否切换上下文再回答**；
+new_text 为 null = 回合结束判断目标是否完成。存疑即 continue，start_new 仅当目标明显无关；
+解析失败/调用失败时按 continue 兜底（存疑即继续）。
 
 ### 5. 压缩/交接摘要提示（summarize_prompt）— M2 落地
 
