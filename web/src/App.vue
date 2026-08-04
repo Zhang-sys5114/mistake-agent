@@ -6,6 +6,7 @@ import ChatPage from "./components/ChatPage.vue";
 import MistakesPage from "./components/MistakesPage.vue";
 import SessionsPage from "./components/SessionsPage.vue";
 import SettingsPage from "./components/SettingsPage.vue";
+import OobePage from "./components/OobePage.vue";
 
 const kernel = useKernel();
 provide("kernel", kernel);
@@ -14,6 +15,7 @@ const ready = ref(false);
 const busy = ref(false);
 const status = ref("准备中");
 const view = ref("chat");
+const oobeOpen = ref(false);
 
 const navItems = [
   { id: "chat", label: "聊天", icon: "mdi:chat-processing-outline" },
@@ -43,6 +45,14 @@ onMounted(async () => {
     await kernel.start();
     ready.value = true;
     status.value = "就绪";
+    try {
+      const s = await kernel.call("get_settings", {}, 8000);
+      if (!s.main_model?.key_set || !s.vision_model?.key_set) {
+        oobeOpen.value = true;
+      }
+    } catch {
+      // 设置读取失败不阻塞主界面。
+    }
   } catch (e) {
     status.value = "内核异常";
     console.error("内核启动失败：", e);
@@ -52,6 +62,8 @@ onMounted(async () => {
 
 <template>
   <div class="app">
+    <OobePage v-if="oobeOpen" :kernel="kernel" @done="oobeOpen = false" />
+
     <aside class="sidebar">
       <div class="brand">
         <span class="brand-mark">

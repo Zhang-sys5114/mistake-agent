@@ -14,12 +14,12 @@ use crate::kernel::events::{Event, EventSink};
 use crate::kernel::logger::{Logger, LoggerHandle};
 use crate::kernel::loop_mod::{AgentLoop, TurnInput, TurnOutcome};
 use crate::kernel::memory::{FileMemoryService, InMemoryMemory};
-use crate::kernel::message::MessageId;
+use crate::kernel::message::{Message, MessageId};
 use crate::kernel::model::{LiveSettingsModelService, RoutingModelService};
 use crate::kernel::registry::Registry;
 use crate::kernel::services::{
-    AbortSignal, ComputeHandle, MemoryHandle, MemoryService, ModelHandle, ModelKind,
-    ServiceHandles, SessionStore, StorageHandle,
+    AbortSignal, ComputeHandle, MemoryHandle, MemoryService, ModelHandle, ModelKind, ModelRequest,
+    ModelService, ServiceHandles, SessionStore, StorageHandle,
 };
 use crate::kernel::session::{
     Interrupt, InterruptBus, LlmSummarizer, LlmTurnDecider, SessionKey, SessionScheduler,
@@ -71,6 +71,8 @@ pub enum Method {
     },
     /// 用户可调工具/命令清单（GUI 工具面板）。
     ListTools,
+    /// 连通性自检：主模型轻量调用（OOBE 引导"测试连接"用）。
+    TestConnection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -518,6 +520,36 @@ impl Kernel {
                     result: Some(json!({ "tools": tools })),
                     error: None,
                 }))
+            }
+            Method::TestConnection => {
+                let started = std::time::Instant::now();
+                let model_req = ModelRequest {
+                    model: ModelKind::Main,
+                    messages: vec![Message::user("回复：ok")],
+                    tools: None,
+                    reasoning_effort: Some("none".into()),
+                    tool_choice: None,
+                    response_format: None,
+                };
+                match self
+                    .main_service
+                    .complete(&model_req, &AbortSignal::new())
+                    .await
+                {
+                    Ok(_) => Ok(Some(RpcFrame::Response {
+                        id: request.id,
+                        result: Some(json!({
+                            "ok": true,
+                            "latency_ms": started.elapsed().as_millis() as u64,
+                        })),
+                        error: None,
+                    })),
+                    Err(e) => Ok(Some(RpcFrame::Response {
+                        id: request.id,
+                        result: None,
+                        error: Some(RpcError::new("connection_failed", e.to_string())),
+                    })),
+                }
             }
             Method::EditMessage { message_id, text } => {
                 let key = self.active_session_key().await?;
