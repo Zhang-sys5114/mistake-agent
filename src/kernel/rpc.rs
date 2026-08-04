@@ -71,11 +71,13 @@ pub enum Method {
     },
     /// 用户可调工具/命令清单（GUI 工具面板）。
     ListTools,
-    /// 连通性自检：主模型轻量调用（OOBE 引导"测试连接"用）。
-    /// 可携带表单中的临时 api_key（不落盘，仅本次请求生效）。
+    /// 连通性自检：主/视觉模型轻量调用（OOBE 引导"测试连接"用）。
+    /// 可携带表单中的临时 api_key（不落盘，仅本次请求生效）；model 取 "main"/"vision"。
     TestConnection {
         #[serde(default)]
         api_key: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
     },
 }
 
@@ -525,8 +527,9 @@ impl Kernel {
                     error: None,
                 }))
             }
-            Method::TestConnection { api_key } => {
+            Method::TestConnection { api_key, model } => {
                 let started = std::time::Instant::now();
+                let is_vision = model.as_deref() == Some("vision");
                 let model_req = ModelRequest {
                     model: ModelKind::Main,
                     messages: vec![Message::user("回复：ok")],
@@ -540,14 +543,36 @@ impl Kernel {
                 {
                     // 临时 key：仅本次请求生效（不落盘、不改 settings）。
                     let snapshot = self.settings.read().expect("settings poisoned").clone();
-                    let mut main_cfg = snapshot.main_model.clone();
-                    main_cfg.api_key = key.trim().to_string();
-                    let temp_settings = crate::kernel::settings::Settings {
-                        log_level: snapshot.log_level,
-                        main_model: main_cfg,
-                        vision_model: snapshot.vision_model.clone(),
+                    let mut model_cfg = if is_vision {
+                        snapshot.vision_model.clone()
+                    } else {
+                        snapshot.main_model.clone()
                     };
-                    crate::kernel::model::build_main_service(&temp_settings)
+                    model_cfg.api_key = key.trim().to_string();
+                    let temp_settings = if is_vision {
+                        crate::kernel::settings::Settings {
+                            log_level: snapshot.log_level,
+                            main_model: snapshot.main_model.clone(),
+                            vision_model: model_cfg,
+                        }
+                    } else {
+                        crate::kernel::settings::Settings {
+                            log_level: snapshot.log_level,
+                            main_model: model_cfg,
+                            vision_model: snapshot.vision_model.clone(),
+                        }
+                    };
+                    if is_vision {
+                        crate::kernel::model::build_vision_service(&temp_settings)
+                            .complete(&model_req, &AbortSignal::new())
+                            .await
+                    } else {
+                        crate::kernel::model::build_main_service(&temp_settings)
+                            .complete(&model_req, &AbortSignal::new())
+                            .await
+                    }
+                } else if is_vision {
+                    self.vision_service
                         .complete(&model_req, &AbortSignal::new())
                         .await
                 } else {

@@ -73,8 +73,11 @@ function validateStep(stepIndex) {
   return true;
 }
 
-function next() {
+async function next() {
   if (!validateStep(step.value)) return;
+  // 每走一步自动测对应模型的连通性（失败不阻止，结果就地展示）。
+  if (step.value === 1) await testConnection("main");
+  if (step.value === 2) await testConnection("vision");
   step.value += 1;
 }
 
@@ -116,12 +119,14 @@ async function save({ skipDone = false } = {}) {
   }
 }
 
-async function testConnection() {
+async function testConnection(model = "main") {
+  const isVision = model === "vision";
+  const cfg = isVision ? form.vision : form.main;
   error.value = "";
   testResult.value = null;
-  if (!form.main.key_set && !form.main.api_key.trim()) {
-    error.value = "请先填写主模型 API Key";
-    return;
+  if (!cfg.key_set && !cfg.api_key.trim()) {
+    error.value = `请先填写${isVision ? "视觉" : "主"}模型 API Key`;
+    return false;
   }
   testing.value = true;
   try {
@@ -129,15 +134,16 @@ async function testConnection() {
     // 不依赖"先保存再测试"的顺序——前端填什么，后端就测什么。
     const r = await props.kernel.call(
       "test_connection",
-      { api_key: form.main.api_key },
+      { api_key: cfg.api_key, model: isVision ? "vision" : undefined },
       30000,
     );
-    testResult.value = { ok: true, latency: r.latency_ms };
+    testResult.value = { ok: true, latency: r.latency_ms, model };
   } catch (e) {
-    testResult.value = { ok: false, error: e.message };
+    testResult.value = { ok: false, error: e.message, model };
   } finally {
     testing.value = false;
   }
+  return Boolean(testResult.value?.ok);
 }
 
 async function finish() {
@@ -206,6 +212,11 @@ load();
           <form v-else-if="step === 1" key="main" class="oobe-page" @submit.prevent="next">
             <h2>配置主模型</h2>
             <p class="oobe-tip">负责对话、调度与判分（DeepSeek）。</p>
+            <div v-if="testResult && testResult.model === 'main'" class="alert" :class="{ success: testResult.ok }" role="status">
+              <Icon :icon="testResult.ok ? 'mdi:check-circle-outline' : 'mdi:alert-circle-outline'" width="18" />
+              <span v-if="testResult.ok">主模型连接成功（{{ testResult.latency }}ms）</span>
+              <span v-else>主模型连接失败：{{ testResult.error }}</span>
+            </div>
             <label class="field">
               <span>API 地址</span>
               <input v-model="form.main.api_url" type="url" required placeholder="https://api.deepseek.com" />
@@ -236,6 +247,11 @@ load();
           <form v-else-if="step === 2" key="vision" class="oobe-page" @submit.prevent="next">
             <h2>配置视觉模型</h2>
             <p class="oobe-tip">负责识别作业图片与手写内容（SiliconFlow）。</p>
+            <div v-if="testResult && testResult.model === 'vision'" class="alert" :class="{ success: testResult.ok }" role="status">
+              <Icon :icon="testResult.ok ? 'mdi:check-circle-outline' : 'mdi:alert-circle-outline'" width="18" />
+              <span v-if="testResult.ok">视觉模型连接成功（{{ testResult.latency }}ms）</span>
+              <span v-else>视觉模型连接失败：{{ testResult.error }}</span>
+            </div>
             <label class="field">
               <span>API 地址</span>
               <input v-model="form.vision.api_url" type="url" required placeholder="https://api.siliconflow.cn/v1" />
@@ -298,7 +314,7 @@ load();
           下一步<Icon icon="mdi:arrow-right" width="18" />
         </button>
         <template v-else>
-          <button class="btn ghost" :disabled="testing || saving" @click="testConnection">
+          <button class="btn ghost" :disabled="testing || saving" @click="testConnection('main')">
             <Icon :icon="testing ? 'mdi:loading' : 'mdi:connection'" :class="{ spin: testing }" width="18" />
             {{ testing ? "测试中…" : "测试连接" }}
           </button>
