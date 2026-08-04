@@ -72,10 +72,25 @@ impl Settings {
         if let Ok(text) = std::fs::read_to_string(&path) {
             return serde_json::from_str(&text).map_err(|e| format!("settings.json 解析失败：{e}"));
         }
-        // 环境变量回退（开发/集成测试用）。
-        let main_key = env::var("DEEPSEEK_API_KEY").map_err(|_| {
-            "缺少模型配置：未找到 settings.json，且未设置 DEEPSEEK_API_KEY".to_string()
-        })?;
+        // 环境变量回退（开发/集成测试用）；两者都没有时返回空默认配置，
+        // 让应用可启动、由 OOBE 引导填写（不阻塞首次使用）。
+        let Ok(main_key) = env::var("DEEPSEEK_API_KEY") else {
+            return Ok(Self {
+                log_level: default_log_level(),
+                main_model: ModelConfig {
+                    api_url: "https://api.deepseek.com".into(),
+                    api_key: String::new(),
+                    model: Some("deepseek-v4-flash".into()),
+                    transport: Some(Transport::Responses),
+                },
+                vision_model: ModelConfig {
+                    api_url: "https://api.siliconflow.cn/v1".into(),
+                    api_key: String::new(),
+                    model: Some("Qwen/Qwen3-VL-32B-Instruct".into()),
+                    transport: None,
+                },
+            });
+        };
         let main_url =
             env::var("DEEPSEEK_API_URL").unwrap_or_else(|_| "https://api.deepseek.com".into());
         let vision_key = env::var("SILICONFLOW_API_KEY").ok();
