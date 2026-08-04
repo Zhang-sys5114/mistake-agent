@@ -72,7 +72,11 @@ pub enum Method {
     /// 用户可调工具/命令清单（GUI 工具面板）。
     ListTools,
     /// 连通性自检：主模型轻量调用（OOBE 引导"测试连接"用）。
-    TestConnection,
+    /// 可携带表单中的临时 api_key（不落盘，仅本次请求生效）。
+    TestConnection {
+        #[serde(default)]
+        api_key: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -521,7 +525,7 @@ impl Kernel {
                     error: None,
                 }))
             }
-            Method::TestConnection => {
+            Method::TestConnection { api_key } => {
                 let started = std::time::Instant::now();
                 let model_req = ModelRequest {
                     model: ModelKind::Main,
@@ -531,11 +535,27 @@ impl Kernel {
                     tool_choice: None,
                     response_format: None,
                 };
-                match self
-                    .main_service
-                    .complete(&model_req, &AbortSignal::new())
-                    .await
+                let result = if let Some(key) = api_key
+                    && !key.trim().is_empty()
                 {
+                    // 临时 key：仅本次请求生效（不落盘、不改 settings）。
+                    let snapshot = self.settings.read().expect("settings poisoned").clone();
+                    let mut main_cfg = snapshot.main_model.clone();
+                    main_cfg.api_key = key.trim().to_string();
+                    let temp_settings = crate::kernel::settings::Settings {
+                        log_level: snapshot.log_level,
+                        main_model: main_cfg,
+                        vision_model: snapshot.vision_model.clone(),
+                    };
+                    crate::kernel::model::build_main_service(&temp_settings)
+                        .complete(&model_req, &AbortSignal::new())
+                        .await
+                } else {
+                    self.main_service
+                        .complete(&model_req, &AbortSignal::new())
+                        .await
+                };
+                match result {
                     Ok(_) => Ok(Some(RpcFrame::Response {
                         id: request.id,
                         result: Some(json!({
@@ -616,6 +636,11 @@ impl Kernel {
                     }
                     settings.public_view()
                 };
+                log::info!(
+                    "设置已保存并热更新：main_key_set={} vision_key_set={}",
+                    view["main_model"]["key_set"],
+                    view["vision_model"]["key_set"]
+                );
                 // 模型配置热更新：下一次模型调用即用新端点/模型/key。
                 self.main_service.refresh();
                 self.vision_service.refresh();

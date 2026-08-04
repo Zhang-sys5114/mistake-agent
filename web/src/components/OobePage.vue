@@ -123,11 +123,15 @@ async function testConnection() {
     error.value = "请先填写主模型 API Key";
     return;
   }
-  const saved = await save({ skipDone: true });
-  if (!saved) return;
   testing.value = true;
   try {
-    const r = await props.kernel.call("test_connection", {}, 30000);
+    // 直接把表单里的 key 带给后端做一次临时测试（不落盘），
+    // 不依赖"先保存再测试"的顺序——前端填什么，后端就测什么。
+    const r = await props.kernel.call(
+      "test_connection",
+      { api_key: form.main.api_key },
+      30000,
+    );
     testResult.value = { ok: true, latency: r.latency_ms };
   } catch (e) {
     testResult.value = { ok: false, error: e.message };
