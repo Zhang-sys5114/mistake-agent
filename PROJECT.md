@@ -194,7 +194,7 @@ mistake-agent/
 - 守卫模型与摘要器真接入（LlmGuard/LlmSummarizer）；消息树编辑/切分支（derive_branch/switch_branch）、上下文压缩（75% 阈值、最近 15 条保留）、InterruptBus 回合边界消费全部落地；审计记录点补齐（含 SessionSwitched/Memory*/SettingsChanged/Interrupt/MessageEdited/BranchSwitched）。
 - 用户插件 8 个：demo/hello、grading（场景一：上传→OCR→判分→错题归档，输出 subject/reference_answer）、memory、compute、practice、report、exam、tracking——五个场景工具均可从会话内触达。
 - 场景一真实链路复验通过（2026-08-04）：图片/文本 PDF → Qwen3-VL OCR → deepseek-v4-flash（Responses API json_schema）判分 → 错题归档；assistant 消息落盘与 usage 解析已修复并有 live_api 断言。
-- Tauri GUI 正式化（Vue 3 + Vite，按 ui-ux-pro-max 设计系统）：聊天/错题本/会话历史/设置四页，思维链默认折叠、流式打字机、工具进度、停止、消息树编辑与分支切换、Pyodide 验算执行端（本地 WASM）、Iconify 图标、Markdown+KaTeX+DOMPurify 防 XSS、几何图渲染。
+- Tauri GUI 正式化（Vue 3 + Vite，按 ui-ux-pro-max 设计系统）：聊天/错题本/会话历史/设置四页 + **OOBE 首次引导**（test_connection 连通性自检）；思维链默认折叠、流式打字机、工具进度、停止、消息树编辑与分支切换、Pyodide 验算执行端（本地 WASM）、Iconify 图标、Markdown+KaTeX+DOMPurify 防 XSS、附件（图片/PDF 持久展示）、错题本搜索/排序。
 - **Standalone**：kernel 内嵌 GUI 进程，mistake-agent 单二进制即可运行（不再需要 sidecar 同目录）。
 - 验收命令：`cd web && npm install && npm run build`；`cargo test`（54 项单元）；`cargo test --test live_api -- --ignored`（真实 API：hello 落盘+usage、三套样例、memory 往返）；`cargo run --bin sidecar`（kernel CLI）；`cargo run --bin mistake-agent`（GUI）。
 
