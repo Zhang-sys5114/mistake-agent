@@ -34,7 +34,7 @@ impl UserPlugin for GradingPlugin {
                     title: Some("上传作业批改".into()),
                     group: Some("批改".into()),
                     description:
-                        "上传作业图片或文本型 PDF，自动识别题目与作答、判分、把错题归档进错题本。用法：grading::upload <作业文件路径>"
+                        "上传作业图片或文本型 PDF，自动识别题目与作答、判分、把错题归档进错题本。文件由应用「选择作业文件」按钮上传后自动暂存，file 参数使用消息里给出的暂存路径。"
                             .into(),
                     params: schemars::schema_for!(UploadParams),
                     policy: CallerPolicy::UserAndModel,

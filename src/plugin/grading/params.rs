@@ -6,7 +6,8 @@ use serde_json::json;
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct UploadParams {
-    /// 本地图片（png/jpg/jpeg/webp/bmp）或文本型 PDF 路径。
+    /// 作业文件（应用「选择作业文件」按钮上传后自动暂存的临时路径，支持图片或文本型 PDF；
+    /// 不要要求用户手动输入路径）。
     pub file: String,
 }
 
