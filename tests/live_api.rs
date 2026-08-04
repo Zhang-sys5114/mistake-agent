@@ -77,6 +77,13 @@ async fn hello_turn_real_api() {
     );
     let events = events.take();
     assert!(
+        events.iter().any(|e| matches!(
+            e,
+            mistake_agent::kernel::events::Event::CacheStatsUpdated { .. }
+        )),
+        "回合落盘后应实时推送缓存统计事件"
+    );
+    assert!(
         events
             .iter()
             .any(|e| matches!(e, mistake_agent::kernel::events::Event::MessageDelta { .. })),

@@ -44,6 +44,10 @@ pub enum Event {
     Compaction {
         session: SessionKey,
     },
+    /// 缓存命中统计更新：回合 usage 落盘后实时推送（载荷 = get_cache_stats 快照）。
+    CacheStatsUpdated {
+        stats: serde_json::Value,
+    },
     /// 验算请求（kernel → GUI/Pyodide 执行端）：GUI 执行后回 Method::ComputeResult。
     ComputeRequest {
         id: u64,

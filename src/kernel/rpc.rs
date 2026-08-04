@@ -478,6 +478,10 @@ impl Kernel {
                             }
                             if let Some(usage) = &outcome.usage {
                                 cache.record_main(&persist_key, usage);
+                                // 实时推送：前端收到事件即更新，无需再查一次（可能读到旧值）。
+                                events.emit(Event::CacheStatsUpdated {
+                                    stats: cache.snapshot(Some(persist_key)),
+                                });
                             }
                             auditor.record(AuditRecord::Lifecycle {
                                 phase: "turn_finished".into(),

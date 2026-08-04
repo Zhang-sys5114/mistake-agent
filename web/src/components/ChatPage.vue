@@ -357,7 +357,9 @@ function handleFrame(frame) {
       busy.value = false;
       setStatus(false, "就绪");
       refreshAllHistory();
-      loadCacheStats();
+      break;
+    case "cache_stats_updated":
+      cacheStats.value = e.stats;
       break;
     case "error":
       finalize();

@@ -93,7 +93,7 @@ v2 同一轮多个工具调用**串行执行**；并行列入后续（按依赖�
 `compute::verify` 让模型跑 Python 验算（解方程、数值验证、单位换算）。执行端为 GUI WebView 内的 **Pyodide**（Python + SymPy/NumPy 的 WASM 构建），WASM 即沙箱（默认无文件、无网络），经 RPC 桥接；超时、审计由 kernel 侧 compute 插件负责。GUI 离线时验算不可用（可接受）。
 
 ### GUI 通信协议
-GUI → kernel：`send_user_message`、`trigger_command(entry, params)`、`edit_message`、`switch_branch`、`abort`、`get_state`、`get_settings/set_settings`、`list_sessions`、`read_session`、`list_tools`、`test_connection`、`check_balance`、`get_cache_stats`、`compute_result`（Pyodide 验算回执）。kernel → GUI：事件流（message_delta、reasoning_delta、tool_start/end、tool_progress、turn_end、session_switched、memory_changed、compaction、compute_request、error）。**命令唯一通道是 trigger_command**：GUI 不传可任意执行的文本命令，前端门禁由此结构性成立；找不到同名 Command 时回退放行同名 Tool（用户对 UserAndModel/UserOnly 工具均可调）。
+GUI → kernel：`send_user_message`、`trigger_command(entry, params)`、`edit_message`、`switch_branch`、`abort`、`get_state`、`get_settings/set_settings`、`list_sessions`、`read_session`、`list_tools`、`test_connection`、`check_balance`、`get_cache_stats`、`compute_result`（Pyodide 验算回执）。kernel → GUI：事件流（message_delta、reasoning_delta、tool_start/end、tool_progress、turn_end、session_switched、memory_changed、compaction、cache_stats_updated、compute_request、error）。**命令唯一通道是 trigger_command**：GUI 不传可任意执行的文本命令，前端门禁由此结构性成立；找不到同名 Command 时回退放行同名 Tool（用户对 UserAndModel/UserOnly 工具均可调）。
 
 **Standalone（ADR-0029）**：kernel 直接运行在 Tauri GUI 进程内（mpsc + Channel 桥接），mistake-agent 不依赖任何外部进程/二进制；`src/bin/sidecar.rs` 保留为独立 CLI 调试入口，仅用于脚本与管道测试。
 
