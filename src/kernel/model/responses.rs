@@ -287,10 +287,17 @@ impl ModelService for ResponsesModelService {
 }
 
 fn parse_usage(v: &Value) -> TokenUsage {
+    let input_tokens = v["input_tokens"].as_u64();
+    let cached_tokens = v["input_tokens_details"]["cached_tokens"].as_u64();
     TokenUsage {
-        input_tokens: v["input_tokens"].as_u64(),
+        input_tokens,
         output_tokens: v["output_tokens"].as_u64(),
-        cached_tokens: v["input_tokens_details"]["cached_tokens"].as_u64(),
+        cached_tokens,
+        // input_tokens 含缓存命中部分：未命中 = 输入 - 命中。
+        cache_miss_tokens: match (input_tokens, cached_tokens) {
+            (Some(i), Some(c)) => Some(i.saturating_sub(c)),
+            _ => None,
+        },
         reasoning_tokens: v["output_tokens_details"]["reasoning_tokens"].as_u64(),
     }
 }

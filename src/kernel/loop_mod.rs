@@ -60,6 +60,8 @@ pub struct TurnOutcome {
     pub tool_calls: usize,
     /// 本回合发生的上下文压缩（None = 未压缩）。
     pub compaction: Option<CompactionInfo>,
+    /// 本回合所有主模型流调用的累计 token 用量（缓存命中统计用）。
+    pub usage: Option<TokenUsage>,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +88,26 @@ struct ToolCallAcc {
     name: String,
     arguments: String,
     call_id: String,
+}
+
+/// 累加一次流调用的 token 用量到回合级累计器。
+fn add_usage(acc: &mut TokenUsage, u: &TokenUsage) {
+    acc.input_tokens = Some(acc.input_tokens.unwrap_or(0) + u.input_tokens.unwrap_or(0));
+    acc.output_tokens = Some(acc.output_tokens.unwrap_or(0) + u.output_tokens.unwrap_or(0));
+    acc.cached_tokens = Some(acc.cached_tokens.unwrap_or(0) + u.cached_tokens.unwrap_or(0));
+    acc.cache_miss_tokens =
+        Some(acc.cache_miss_tokens.unwrap_or(0) + u.cache_miss_tokens.unwrap_or(0));
+    acc.reasoning_tokens =
+        Some(acc.reasoning_tokens.unwrap_or(0) + u.reasoning_tokens.unwrap_or(0));
+}
+
+/// 没有任何输入 token 信息时返回 None（缓存统计会跳过空 usage）。
+fn usage_opt(u: &TokenUsage) -> Option<TokenUsage> {
+    if u.input_tokens.is_none() && u.cached_tokens.is_none() && u.cache_miss_tokens.is_none() {
+        None
+    } else {
+        Some(u.clone())
+    }
 }
 
 pub struct AgentLoop {
@@ -159,6 +181,7 @@ impl AgentLoop {
         let mut consecutive_failures = 0usize;
         let mut last_code: Option<ToolErrorCode> = None;
         let mut remaining_forced = input.forced_tool.clone();
+        let mut turn_usage = TokenUsage::default();
         // 强制调用回合全程关闭思考模式：Responses API 要求 thinking 的
         // reasoning_text 必须随历史回传，混用 none/thinking 会协议报错。
         let reasoning_off = input.forced_tool.is_some();
@@ -343,6 +366,7 @@ impl AgentLoop {
                         }
                     }
                     Ok(ModelChunk::Usage(u)) => {
+                        add_usage(&mut turn_usage, &u);
                         usage = Some(u);
                     }
                     Ok(ModelChunk::Done) => break,
@@ -364,6 +388,7 @@ impl AgentLoop {
                                 },
                                 tool_calls,
                                 compaction: None,
+                                usage: usage_opt(&turn_usage),
                             });
                         }
                         return Err(LoopError::Model(e.to_string()));
@@ -475,6 +500,7 @@ impl AgentLoop {
             stop_reason,
             tool_calls,
             compaction,
+            usage: usage_opt(&turn_usage),
         };
         self.events.emit(Event::TurnEnd {
             stop_reason: outcome.stop_reason.clone(),

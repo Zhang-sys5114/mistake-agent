@@ -173,7 +173,12 @@ pub struct ToolCallSpec {
 pub struct TokenUsage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    /// 缓存命中的输入 tokens（Responses API: input_tokens_details.cached_tokens；
+    /// Chat Completions: prompt_cache_hit_tokens）。
     pub cached_tokens: Option<u64>,
+    /// 缓存未命中的输入 tokens（Responses API 由 input - cached 推算；
+    /// Chat Completions: prompt_cache_miss_tokens）。
+    pub cache_miss_tokens: Option<u64>,
     pub reasoning_tokens: Option<u64>,
 }
 

@@ -6,6 +6,7 @@
 
 pub mod audit;
 pub mod balance;
+pub mod cache;
 pub mod compute;
 pub mod context;
 pub mod contract;

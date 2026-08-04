@@ -24,6 +24,7 @@ const tools = ref([]); // 用户可见工具（list_tools，供输入候选）
 const suggestions = ref([]);
 const activeSuggestion = ref(-1);
 const armedTool = ref(null); // Tab 确认的待调用工具 { entry, title, icon }
+const cacheStats = ref(null); // 上下文缓存命中统计（get_cache_stats）
 const inputEl = ref(null);
 
 let unsubscribe = null;
@@ -90,6 +91,48 @@ async function loadTools() {
     tools.value = [];
   }
 }
+
+/** 聊天上下文缓存命中率（后端统计主模型回合调用，按会话 + 全局）。 */
+async function loadCacheStats() {
+  try {
+    cacheStats.value = await props.kernel.call("get_cache_stats", {}, 8000);
+  } catch {
+    // 统计读取失败不影响聊天。
+  }
+}
+
+function fmtTokens(n) {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
+/** 优先展示当前会话的命中率，没有会话样本时用全局累计。 */
+const cacheRateText = computed(() => {
+  const s = cacheStats.value;
+  const session = s?.sessions?.find((x) => x.key === s.active_key) || s?.sessions?.[0];
+  const src = session || s?.main;
+  if (!src || src.hit_rate == null) return "—";
+  return `${(src.hit_rate * 100).toFixed(1)}%`;
+});
+
+const cacheTitle = computed(() => {
+  const s = cacheStats.value;
+  const session = s?.sessions?.find((x) => x.key === s.active_key) || s?.sessions?.[0];
+  const lines = [];
+  if (session) {
+    lines.push(
+      `本会话：${session.calls} 次调用 · 命中 ${fmtTokens(session.hit_tokens)} · 未命中 ${fmtTokens(session.miss_tokens)} tokens`,
+    );
+  }
+  if (s?.main?.calls) {
+    lines.push(
+      `累计：${s.main.calls} 次调用 · 命中率 ${s.main.hit_rate == null ? "—" : `${(s.main.hit_rate * 100).toFixed(1)}%`}`,
+    );
+  }
+  lines.push("点击刷新");
+  return lines.join("\n");
+});
 
 /** Tab 确认：补全工具名并进入待调用状态（工具名保留在输入框，后面接参数）。 */
 function armTool(tool) {
@@ -314,6 +357,7 @@ function handleFrame(frame) {
       busy.value = false;
       setStatus(false, "就绪");
       refreshAllHistory();
+      loadCacheStats();
       break;
     case "error":
       finalize();
@@ -455,6 +499,7 @@ onMounted(() => {
   unsubscribe = props.kernel.onFrame(handleFrame);
   loadTools();
   ensureHistory();
+  loadCacheStats();
 });
 watch(
   () => props.ready,
@@ -468,6 +513,18 @@ onUnmounted(() => unsubscribe?.());
 
 <template>
   <div class="chat-page">
+    <div class="chat-topbar">
+      <button
+        class="cache-chip"
+        :title="cacheTitle"
+        aria-label="聊天上下文缓存命中率"
+        @click="loadCacheStats"
+      >
+        <Icon icon="mdi:database-sync-outline" width="15" />
+        <span>上下文缓存命中 {{ cacheRateText }}</span>
+      </button>
+    </div>
+
     <AttachmentViewer
       v-if="viewer"
       :attachment="viewer"

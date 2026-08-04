@@ -86,6 +86,8 @@ impl ChatCompletionsModelService {
         let usage = TokenUsage {
             input_tokens: data["usage"]["prompt_tokens"].as_u64(),
             output_tokens: data["usage"]["completion_tokens"].as_u64(),
+            cached_tokens: data["usage"]["prompt_cache_hit_tokens"].as_u64(),
+            cache_miss_tokens: data["usage"]["prompt_cache_miss_tokens"].as_u64(),
             ..Default::default()
         };
         Ok(ModelResponse {

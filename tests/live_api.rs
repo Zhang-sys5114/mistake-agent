@@ -121,6 +121,39 @@ async fn hello_turn_real_api() {
     });
     assert!(usage_ok, "审计中应有 tokens_in/tokens_out 非空的 llm_call");
 
+    // 聊天上下文缓存命中统计：回合 usage 应已按会话累计（真实 API 返回 cached_tokens）。
+    let stats_frame = kernel
+        .handle(RpcRequest {
+            id: 2,
+            method: Method::GetCacheStats,
+        })
+        .await
+        .expect("get_cache_stats 请求失败")
+        .expect("应有响应帧");
+    let stats = match stats_frame {
+        mistake_agent::kernel::rpc::RpcFrame::Response { result, error, .. } => {
+            assert!(error.is_none(), "缓存统计不应报错：{error:?}");
+            result.expect("应有统计结果")
+        }
+        _ => panic!("缓存统计应返回 response 帧"),
+    };
+    assert!(
+        stats["main"]["calls"].as_u64().unwrap_or(0) >= 1,
+        "主模型应有至少 1 次回合调用：{stats}"
+    );
+    assert!(
+        stats["main"]["hit_tokens"].is_u64() && stats["main"]["miss_tokens"].is_u64(),
+        "应有命中/未命中 token 统计：{stats}"
+    );
+    assert!(
+        stats["sessions"].as_array().is_some_and(|a| !a.is_empty()),
+        "应有会话明细：{stats}"
+    );
+    eprintln!(
+        "缓存命中统计真实链路通过：{} 次调用，命中 {} / 未命中 {} tokens",
+        stats["main"]["calls"], stats["main"]["hit_tokens"], stats["main"]["miss_tokens"],
+    );
+
     eprintln!("hello 回合真实链路通过，事件数：{}", events.len());
 }
 
@@ -415,5 +448,67 @@ async fn check_balance_real_api() {
         vision["data"]["charge_balance"].as_str().unwrap_or(""),
         vision["data"]["balance"].as_str().unwrap_or(""),
         vision["data"]["total_balance"].as_str().unwrap_or(""),
+    );
+}
+
+/// 链路 6：新消息先判断上下文再回答 —— 第二条消息走主模型预决策（ADR-0032），
+/// 随后正常进入回合；回合缓存统计应累计 2 次主模型调用。
+#[tokio::test]
+#[ignore]
+async fn pre_turn_context_decision_real_api() {
+    if !real_api_ready() {
+        eprintln!("SKIP: 未配置真实 API key");
+        return;
+    }
+    let events = Arc::new(MemoryEventSink::default());
+    let kernel = Kernel::new(events.clone()).await.expect("kernel 启动失败");
+
+    let send = |id: u64, text: &str| RpcRequest {
+        id,
+        method: Method::SendUserMessage {
+            text: text.to_string(),
+            force_tool: None,
+        },
+    };
+    kernel
+        .handle(send(20, "帮我看看这道题"))
+        .await
+        .expect("首条消息失败");
+    assert!(
+        wait_idle(&kernel, Duration::from_secs(120)).await,
+        "首个回合 120s 内未结束"
+    );
+    // 第二条消息：先由主模型判断是否切换上下文（大概率 continue），再进入回合回答。
+    kernel
+        .handle(send(21, "继续讲一下"))
+        .await
+        .expect("第二条消息失败");
+    assert!(
+        wait_idle(&kernel, Duration::from_secs(120)).await,
+        "第二个回合 120s 内未结束"
+    );
+
+    let stats_frame = kernel
+        .handle(RpcRequest {
+            id: 22,
+            method: Method::GetCacheStats,
+        })
+        .await
+        .expect("get_cache_stats 请求失败")
+        .expect("应有响应帧");
+    let stats = match stats_frame {
+        mistake_agent::kernel::rpc::RpcFrame::Response { result, error, .. } => {
+            assert!(error.is_none(), "缓存统计不应报错：{error:?}");
+            result.expect("应有统计结果")
+        }
+        _ => panic!("缓存统计应返回 response 帧"),
+    };
+    assert!(
+        stats["main"]["calls"].as_u64().unwrap_or(0) >= 2,
+        "两个回合应累计 2 次主模型调用：{stats}"
+    );
+    eprintln!(
+        "预决策 + 双回合真实链路通过：主模型 {} 次调用，缓存命中率 {}",
+        stats["main"]["calls"], stats["main"]["hit_rate"]
     );
 }

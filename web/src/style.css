@@ -737,6 +737,34 @@ textarea {
   height: 100%;
 }
 
+.chat-topbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px var(--space-2xl) 0;
+}
+
+.cache-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-text-weak);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-soft);
+  border-radius: var(--radius-pill);
+  padding: 4px 12px;
+  transition:
+    color 0.2s var(--ease-out),
+    border-color 0.2s var(--ease-out),
+    box-shadow 0.2s var(--ease-out);
+}
+
+.cache-chip:hover {
+  color: var(--color-primary-deep);
+  border-color: var(--color-border);
+  box-shadow: var(--shadow-sm);
+}
+
 #messages {
   flex: 1;
   overflow-y: auto;

@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use crate::kernel::audit::{AuditRecord, Auditor};
+use crate::kernel::cache::CacheTracker;
 use crate::kernel::compute::BridgeCompute;
 use crate::kernel::contract::{CallerPolicy, full_to_wire};
 use crate::kernel::dispatch::Dispatch;
@@ -81,6 +82,8 @@ pub enum Method {
     },
     /// 账户余额查询：DeepSeek /user/balance + SiliconFlow /user/info（只读，不落盘 key）。
     CheckBalance,
+    /// 聊天上下文缓存命中统计（主模型回合调用累计，按会话 + 全局）。
+    GetCacheStats,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +162,7 @@ pub struct Kernel {
     main_service: Arc<LiveSettingsModelService>,
     vision_service: Arc<LiveSettingsModelService>,
     state: Arc<Mutex<KernelState>>,
+    cache: Arc<CacheTracker>,
 }
 
 impl Kernel {
@@ -195,6 +199,7 @@ impl Kernel {
             settings.clone(),
             ModelKind::Vision,
         ));
+        let cache = Arc::new(CacheTracker::default());
 
         let auditor = Auditor::new(storage.clone());
         let router = Arc::new(RoutingModelService::new(
@@ -262,6 +267,7 @@ impl Kernel {
             main_service,
             vision_service,
             state: Arc::new(Mutex::new(KernelState { turn: None })),
+            cache,
         }))
     }
 
@@ -348,6 +354,7 @@ impl Kernel {
                 let store = self.store.clone();
                 let events = self.events.clone();
                 let auditor = self.auditor.clone();
+                let cache = self.cache.clone();
                 let state_for_task = self.state.clone();
                 let mut state = self.state.lock().await;
                 if state.turn.is_some() {
@@ -418,6 +425,9 @@ impl Kernel {
                                 events.emit(Event::Error {
                                     message: format!("回合收尾失败：{e}"),
                                 });
+                            }
+                            if let Some(usage) = &outcome.usage {
+                                cache.record_main(&key, usage);
                             }
                             auditor.record(AuditRecord::Lifecycle {
                                 phase: "turn_finished".into(),
@@ -610,6 +620,15 @@ impl Kernel {
                     result: Some(
                         serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({})),
                     ),
+                    error: None,
+                }))
+            }
+            Method::GetCacheStats => {
+                let active = self.active_session_key().await.ok();
+                let snapshot = self.cache.snapshot(active);
+                Ok(Some(RpcFrame::Response {
+                    id: request.id,
+                    result: Some(snapshot),
                     error: None,
                 }))
             }
