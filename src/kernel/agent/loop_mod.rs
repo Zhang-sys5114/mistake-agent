@@ -8,17 +8,17 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::kernel::agent::dispatch::{Caller, Dispatch};
+use crate::kernel::agent::session::{InterruptBus, SessionKey, SessionSwitch, Summarizer};
 use crate::kernel::audit::{AuditRecord, Auditor};
 use crate::kernel::contract::{ToolError, ToolErrorCode};
-use crate::kernel::dispatch::{Caller, Dispatch};
 use crate::kernel::events::{Event, EventSink};
 use crate::kernel::message::{Message, MessageId, MessageKind, append_to_path};
-use crate::kernel::prompt::agent_system_prompt;
-use crate::kernel::services::{
+use crate::kernel::plugin::services::{
     AbortSignal, ItemKind, ModelChunk, ModelKind, ModelRequest, ModelService, TokenUsage,
     ToolChoice, ToolSchema,
 };
-use crate::kernel::session::{InterruptBus, SessionKey, SessionSwitch, Summarizer};
+use crate::kernel::prompt::agent_system_prompt;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -221,7 +221,7 @@ impl AgentLoop {
                 // 瞬时错误（503/限流/传输）重试一次；系统性错误与取消不重试。
                 Err(e)
                     if !e.is_systemic()
-                        && !matches!(e, crate::kernel::services::ModelError::Cancelled) =>
+                        && !matches!(e, crate::kernel::plugin::services::ModelError::Cancelled) =>
                 {
                     log::warn!("主模型流失败，1 次重试：{e}");
                     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -245,7 +245,8 @@ impl AgentLoop {
                                     reason: InterruptReason::ModelUnavailable,
                                 };
                             }
-                            if matches!(e2, crate::kernel::services::ModelError::Cancelled) {
+                            if matches!(e2, crate::kernel::plugin::services::ModelError::Cancelled)
+                            {
                                 break StopReason::UserAborted;
                             }
                             return Err(LoopError::Model(e2.to_string()));
@@ -267,7 +268,7 @@ impl AgentLoop {
                             reason: InterruptReason::ModelUnavailable,
                         };
                     }
-                    if matches!(e, crate::kernel::services::ModelError::Cancelled) {
+                    if matches!(e, crate::kernel::plugin::services::ModelError::Cancelled) {
                         break StopReason::UserAborted;
                     }
                     return Err(LoopError::Model(e.to_string()));
@@ -562,13 +563,13 @@ impl AgentLoop {
     }
 }
 
-fn interrupt_name(interrupt: &crate::kernel::session::Interrupt) -> String {
+fn interrupt_name(interrupt: &crate::kernel::agent::session::Interrupt) -> String {
     match interrupt {
-        crate::kernel::session::Interrupt::SessionSwitched { .. } => "session_switched",
-        crate::kernel::session::Interrupt::GoalUpdated { .. } => "goal_updated",
-        crate::kernel::session::Interrupt::SettingsChanged => "settings_changed",
-        crate::kernel::session::Interrupt::MemoryChanged { .. } => "memory_changed",
-        crate::kernel::session::Interrupt::CompactionDone { .. } => "compaction_done",
+        crate::kernel::agent::session::Interrupt::SessionSwitched { .. } => "session_switched",
+        crate::kernel::agent::session::Interrupt::GoalUpdated { .. } => "goal_updated",
+        crate::kernel::agent::session::Interrupt::SettingsChanged => "settings_changed",
+        crate::kernel::agent::session::Interrupt::MemoryChanged { .. } => "memory_changed",
+        crate::kernel::agent::session::Interrupt::CompactionDone { .. } => "compaction_done",
     }
     .into()
 }
@@ -600,11 +601,11 @@ fn new_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::agent::session::{Interrupt, InterruptBus, StubSummarizer};
     use crate::kernel::audit::MemoryAuditSink;
     use crate::kernel::events::MemoryEventSink;
+    use crate::kernel::plugin::services::{ModelError, ModelResponse, ModelStream, ServiceHandles};
     use crate::kernel::registry::Registry;
-    use crate::kernel::services::{ModelError, ModelResponse, ModelStream, ServiceHandles};
-    use crate::kernel::session::{Interrupt, InterruptBus, StubSummarizer};
 
     struct ScriptedLoopModel;
 

@@ -11,7 +11,7 @@ use reqwest::Client;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::settings::Settings;
+use crate::kernel::settings::Settings;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BalanceReport {
@@ -61,7 +61,7 @@ pub async fn check_balance(settings: &Settings) -> BalanceReport {
 
 async fn provider_balance(
     client: &Client,
-    cfg: &super::settings::ModelConfig,
+    cfg: &crate::kernel::settings::ModelConfig,
     url: String,
     display: fn(&Value) -> Value,
 ) -> ProviderBalance {

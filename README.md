@@ -19,8 +19,8 @@ Tauri GUI（Vue 3，进程内 Kernel，standalone 单二进制）
         │  RPC（Tauri Channel/命令桥接，JSON Lines 协议）
         ▼
 Kernel（agent loop · 工具注册与调度 · 会话调度 · 守卫模型 · 审计）
-        ├─ 内核插件：storage（会话/错题/审计）· memory · model（双模型）· compute（Pyodide 桥接）
-        └─ 用户插件：grading · practice · report · exam · tracking · memory 工具
+        ├─ 内核插件：storage · memory · compute · model · session（KernelPlugin 两段式契约，ADR-0035）
+        └─ 用户插件：grading · practice · report · exam · tracking
 ```
 
 - 主模型：DeepSeek `deepseek-v4-flash`（Responses API，thinking + 工具调用）

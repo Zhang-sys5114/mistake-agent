@@ -7,13 +7,13 @@ use std::time::Duration;
 
 use schemars::Schema;
 
-use crate::kernel::context::{EntryRegistrar, PluginContext, RegistrarTargets};
+use crate::kernel::agent::dispatch::{CommandHandler, EventHandler, ToolHandler};
+use crate::kernel::context::{EntryRegistrar, KernelContext, PluginContext, RegistrarTargets};
 use crate::kernel::contract::{
     CallerPolicy, Info, LoadPolicy, PluginError, ToolDef, full_name, full_to_wire,
 };
-use crate::kernel::dispatch::{CommandHandler, EventHandler, ToolHandler};
 use crate::kernel::logger::LoggerHandle;
-use crate::kernel::services::{ServiceHandles, ToolSchema};
+use crate::kernel::plugin::services::{ServiceHandles, ServiceId, ToolSchema};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
@@ -62,9 +62,36 @@ pub trait UserPlugin {
     fn register(ctx: PluginContext<'_>) -> Result<(), PluginError>;
 }
 
+/// 编译期内置内核插件描述符（ADR-0035）。
+pub struct KernelDescriptor {
+    pub info: Info,
+    pub register: fn(KernelContext<'_>) -> Result<(), PluginError>,
+}
+
+impl KernelDescriptor {
+    pub fn from_plugin<P: KernelPlugin>() -> Self {
+        Self {
+            info: P::info(),
+            register: P::register,
+        }
+    }
+}
+
+/// 内核插件两段式契约（ADR-0035）：与 UserPlugin 同形（info + register），
+/// 但注册上下文注入**全量**服务句柄——内核插件在信任边界内，是服务的提供者。
+pub trait KernelPlugin {
+    fn info() -> Info;
+    fn register(ctx: KernelContext<'_>) -> Result<(), PluginError>;
+}
+
+enum PluginBody {
+    User(fn(PluginContext<'_>) -> Result<(), PluginError>),
+    Kernel(fn(KernelContext<'_>) -> Result<(), PluginError>),
+}
+
 struct PluginEntry {
     info: Info,
-    register: fn(PluginContext<'_>) -> Result<(), PluginError>,
+    body: PluginBody,
     loaded: AtomicBool,
 }
 
@@ -93,7 +120,18 @@ impl Registry {
 
     /// 注册插件：启动时 fail-fast 校验（Q11）。
     pub fn register_plugin(&self, desc: PluginDescriptor) -> Result<(), PluginError> {
-        let info = desc.info;
+        self.register_inner(desc.info, PluginBody::User(desc.register))
+    }
+
+    /// 注册内核插件（ADR-0035）：与用户插件**同一张注册表**校验
+    /// （namespace/wire 唯一、CallerPolicy、懒/急加载），但跳过 requires 能力检查——
+    /// 内核插件是服务的提供者，register 收到全量句柄；provides 声明服务身份且不得重复。
+    pub fn register_kernel_plugin(&self, desc: KernelDescriptor) -> Result<(), PluginError> {
+        self.register_inner(desc.info, PluginBody::Kernel(desc.register))
+    }
+
+    fn register_inner(&self, info: Info, body: PluginBody) -> Result<(), PluginError> {
+        let is_kernel = matches!(&body, PluginBody::Kernel(_));
         {
             let entries = self.entries.read().expect("registry poisoned");
             if entries.contains_key(&info.namespace) {
@@ -101,15 +139,35 @@ impl Registry {
             }
         }
 
-        let available = self.services.available();
-        let missing: Vec<_> = info
-            .requires
-            .iter()
-            .filter(|r| !available.contains(r))
-            .copied()
-            .collect();
-        if !missing.is_empty() {
-            return Err(PluginError::CapabilityUnavailable(missing));
+        if is_kernel {
+            // 每个 ServiceId 至多由一个内核插件提供（fail-fast）。
+            let mut provided: HashSet<ServiceId> = HashSet::new();
+            {
+                let entries = self.entries.read().expect("registry poisoned");
+                for e in entries.values() {
+                    provided.extend(e.info.provides.iter().copied());
+                }
+            }
+            for id in &info.provides {
+                if !provided.insert(*id) {
+                    return Err(PluginError::ServiceTaken(*id));
+                }
+            }
+        } else if !info.provides.is_empty() {
+            return Err(PluginError::ProvisionNotAllowed(info.provides.clone()));
+        }
+
+        if !is_kernel {
+            let available = self.services.available();
+            let missing: Vec<_> = info
+                .requires
+                .iter()
+                .filter(|r| !available.contains(r))
+                .copied()
+                .collect();
+            if !missing.is_empty() {
+                return Err(PluginError::CapabilityUnavailable(missing));
+            }
         }
 
         let mut fulls: HashSet<String> = HashSet::new();
@@ -155,7 +213,7 @@ impl Registry {
         let eager = matches!(info.load, LoadPolicy::Eager);
         let entry = Arc::new(PluginEntry {
             info,
-            register: desc.register,
+            body,
             loaded: AtomicBool::new(false),
         });
         self.entries
@@ -185,12 +243,25 @@ impl Registry {
             wire_to_full: &self.wire_to_full,
         };
         let registrar = EntryRegistrar::new(namespace, &entry.info, targets);
-        let ctx = PluginContext {
-            handles: self.services.filter(&entry.info.requires),
-            logger: self.logger.clone(),
-            registrar,
+        let result = match &entry.body {
+            PluginBody::User(register) => {
+                let ctx = PluginContext {
+                    handles: self.services.filter(&entry.info.requires),
+                    logger: self.logger.clone(),
+                    registrar,
+                };
+                register(ctx)
+            }
+            PluginBody::Kernel(register) => {
+                let ctx = KernelContext {
+                    // 内核插件在信任边界内：注入全量句柄，不做 requires 过滤。
+                    handles: self.services.clone(),
+                    logger: self.logger.clone(),
+                    registrar,
+                };
+                register(ctx)
+            }
         };
-        let result = (entry.register)(ctx);
         if result.is_err() {
             entry.loaded.store(false, Ordering::SeqCst);
         }
@@ -327,9 +398,9 @@ pub fn tool_def(name: &str, description: &str, policy: CallerPolicy) -> ToolDef 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::dispatch::ToolCallContext;
+    use crate::kernel::agent::dispatch::ToolCallContext;
     use crate::kernel::logger::Logger;
-    use crate::kernel::services::ServiceId;
+    use crate::kernel::plugin::services::ServiceId;
     use serde_json::{Value, json};
 
     fn logger() -> LoggerHandle {
@@ -486,5 +557,103 @@ mod tests {
         assert_eq!(entries[0]["entry"], "demo::shown");
         assert_eq!(entries[0]["title"], "可见工具");
         assert_eq!(entries[0]["group"], "测试");
+    }
+
+    #[test]
+    fn kernel_plugin_lazy_registration_binds_handler() {
+        let registry = Registry::new(ServiceHandles::default(), logger());
+        let desc = KernelDescriptor {
+            info: Info {
+                namespace: "kernel_demo".into(),
+                provides: vec![ServiceId::Memory],
+                tools: vec![tool_def("ping", "内核工具", CallerPolicy::UserAndModel)],
+                ..Default::default()
+            },
+            register: |ctx| {
+                ctx.registrar.tool(
+                    "ping",
+                    std::sync::Arc::new(|_ctx: &ToolCallContext, _p: Value| {
+                        Box::pin(async move { Ok(json!({"kernel": true})) })
+                    }),
+                )
+            },
+        };
+        registry.register_kernel_plugin(desc).unwrap();
+        // 懒加载：注册后 handler 表为空，首次 ensure 才绑定。
+        assert!(registry.handlers.read().unwrap().is_empty());
+        let entry = registry.ensure_tool("kernel_demo::ping").unwrap();
+        assert_eq!(entry.full_name, "kernel_demo::ping");
+        assert_eq!(registry.model_tools().len(), 1);
+        assert_eq!(registry.model_tools()[0].name, "kernel_demo_ping");
+    }
+
+    #[test]
+    fn duplicate_service_provision_rejected() {
+        let registry = Registry::new(ServiceHandles::default(), logger());
+        let desc = KernelDescriptor {
+            info: Info {
+                namespace: "a".into(),
+                provides: vec![ServiceId::Memory],
+                ..Default::default()
+            },
+            register: |_| Ok(()),
+        };
+        registry.register_kernel_plugin(desc).unwrap();
+        let desc2 = KernelDescriptor {
+            info: Info {
+                namespace: "b".into(),
+                provides: vec![ServiceId::Memory],
+                ..Default::default()
+            },
+            register: |_| Ok(()),
+        };
+        assert!(matches!(
+            registry.register_kernel_plugin(desc2),
+            Err(PluginError::ServiceTaken(ServiceId::Memory))
+        ));
+    }
+
+    #[test]
+    fn user_plugin_cannot_declare_provides() {
+        let registry = Registry::new(ServiceHandles::default(), logger());
+        let desc = PluginDescriptor {
+            info: Info {
+                namespace: "demo".into(),
+                provides: vec![ServiceId::Storage],
+                ..Default::default()
+            },
+            register: |_| Ok(()),
+        };
+        assert!(matches!(
+            registry.register_plugin(desc),
+            Err(PluginError::ProvisionNotAllowed(_))
+        ));
+    }
+
+    #[test]
+    fn kernel_and_user_wire_collision_rejected() {
+        let registry = Registry::new(ServiceHandles::default(), logger());
+        // 内核插件 a::b_c 与用户插件 a_b::c 共享 wire a_b_c。
+        let kernel = KernelDescriptor {
+            info: Info {
+                namespace: "a".into(),
+                tools: vec![tool_def("b_c", "t1", CallerPolicy::UserAndModel)],
+                ..Default::default()
+            },
+            register: |_| Ok(()),
+        };
+        registry.register_kernel_plugin(kernel).unwrap();
+        let user = PluginDescriptor {
+            info: Info {
+                namespace: "a_b".into(),
+                tools: vec![tool_def("c", "t2", CallerPolicy::UserAndModel)],
+                ..Default::default()
+            },
+            register: |_| Ok(()),
+        };
+        assert!(matches!(
+            registry.register_plugin(user),
+            Err(PluginError::WireNameCollision(_))
+        ));
     }
 }

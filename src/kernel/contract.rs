@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use schemars::Schema;
 use serde::{Deserialize, Serialize};
 
-use crate::kernel::services::ServiceId;
+use crate::kernel::plugin::services::ServiceId;
 
 /// 调用方策略：决定 EntryPoint 谁能调用。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
@@ -33,6 +33,10 @@ pub struct Info {
     pub namespace: String,
     #[serde(default)]
     pub requires: Vec<ServiceId>,
+    /// 内核插件声明的服务提供（ADR-0035）：每个 ServiceId 至多由一个内核插件提供；
+    /// 用户插件不得声明（注册表 fail-fast 拒绝）。
+    #[serde(default)]
+    pub provides: Vec<ServiceId>,
     #[serde(default)]
     pub load: LoadPolicy,
     #[serde(default)]
@@ -178,6 +182,10 @@ pub enum PluginError {
     NamespaceTaken(String),
     #[error("声明的服务不可用：{0:?}")]
     CapabilityUnavailable(Vec<ServiceId>),
+    #[error("服务已被内核插件提供：{0:?}")]
+    ServiceTaken(ServiceId),
+    #[error("只有内核插件能声明 provides：{0:?}")]
+    ProvisionNotAllowed(Vec<ServiceId>),
     #[error("入口点已存在：{0}")]
     DuplicateEntry(String),
     #[error("未声明的入口点：{0}")]

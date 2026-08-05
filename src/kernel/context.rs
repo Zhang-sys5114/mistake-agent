@@ -4,11 +4,11 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::Duration;
 
+use crate::kernel::agent::dispatch::{CommandHandler, EventHandler, ToolHandler};
 use crate::kernel::contract::{CallerPolicy, Info, PluginError, full_name, full_to_wire};
-use crate::kernel::dispatch::{CommandHandler, EventHandler, ToolHandler};
 use crate::kernel::logger::LoggerHandle;
+use crate::kernel::plugin::services::ServiceHandles;
 use crate::kernel::registry::{EntryKind, Handler, RegisteredEntry};
-use crate::kernel::services::ServiceHandles;
 
 /// 注册目标：kernel 注册表内部结构，只经 EntryRegistrar 暴露受限写入。
 pub struct RegistrarTargets<'a> {
@@ -110,6 +110,14 @@ impl<'a> EntryRegistrar<'a> {
 
 /// 插件注册上下文（ADR-0003 两段式第二阶段）。
 pub struct PluginContext<'a> {
+    pub handles: ServiceHandles,
+    pub logger: LoggerHandle,
+    pub registrar: EntryRegistrar<'a>,
+}
+
+/// 内核插件注册上下文（ADR-0035）：与 PluginContext 同形，但注入**全量**服务句柄——
+/// 内核插件在信任边界内，不按 requires 过滤；requires 对内核插件无意义。
+pub struct KernelContext<'a> {
     pub handles: ServiceHandles,
     pub logger: LoggerHandle,
     pub registrar: EntryRegistrar<'a>,

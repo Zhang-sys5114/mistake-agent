@@ -342,7 +342,7 @@ impl ModelHandle {
 
 // ---------- Storage 契约（Q8：角色拆分，插件只见 MistakeStore） ----------
 
-use crate::kernel::session::{Goal, SessionKey, SessionMeta};
+use crate::kernel::agent::session::{Goal, SessionKey, SessionMeta};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {

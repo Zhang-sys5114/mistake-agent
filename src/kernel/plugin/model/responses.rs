@@ -4,7 +4,7 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{Value, json};
 
-use crate::kernel::services::{
+use crate::kernel::plugin::services::{
     AbortSignal, ItemKind, ModelChunk, ModelError, ModelRequest, ModelService, ModelStream,
     TokenUsage, ToolChoice,
 };

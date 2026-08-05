@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::kernel::contract::full_to_wire;
 use crate::kernel::message::{Message, MessageKind};
-use crate::kernel::services::{ModelError, ResponseFormat, ToolSchema};
+use crate::kernel::plugin::services::{ModelError, ResponseFormat, ToolSchema};
 
 // ---------- SSE 解析（Responses API 语义事件） ----------
 
@@ -21,6 +21,36 @@ pub use responses::ResponsesModelService;
 pub use routing::{
     LiveSettingsModelService, RoutingModelService, build_main_service, build_vision_service,
 };
+
+// ---------- 内核插件入口（ADR-0035）：model 服务身份声明 ----------
+//
+// 服务实例（双模型 LiveSettingsModelService + RoutingModelService）由 Kernel::new
+// 引导构造（依赖 settings 热更新），注册表侧只声明 ServiceId 提供与 namespace 占用。
+
+use crate::kernel::context::KernelContext;
+use crate::kernel::contract::{Info, PluginError};
+use crate::kernel::plugin::services::ServiceId;
+use crate::kernel::registry::{KernelDescriptor, KernelPlugin};
+
+pub struct ModelPlugin;
+
+impl KernelPlugin for ModelPlugin {
+    fn info() -> Info {
+        Info {
+            namespace: "model".into(),
+            provides: vec![ServiceId::Model],
+            ..Default::default()
+        }
+    }
+
+    fn register(_ctx: KernelContext<'_>) -> Result<(), PluginError> {
+        Ok(())
+    }
+}
+
+pub fn descriptor() -> KernelDescriptor {
+    KernelDescriptor::from_plugin::<ModelPlugin>()
+}
 
 pub(crate) fn responses_endpoint(api_url: &str) -> String {
     let base = api_url.trim_end_matches('/');

@@ -8,10 +8,10 @@
 
 use std::collections::HashMap;
 
+use crate::kernel::agent::session::{SessionKey, SessionMeta};
 use crate::kernel::audit::AuditRecord;
 use crate::kernel::message::Message;
-use crate::kernel::services::Mistake;
-use crate::kernel::session::{SessionKey, SessionMeta};
+use crate::kernel::plugin::services::Mistake;
 
 mod core;
 mod file;
@@ -29,3 +29,33 @@ pub(crate) struct Inner {
 pub use core::{AnyStorage, active_chain, active_session, last_message_id};
 pub use file::FileStorage;
 pub use mem::MemoryStorage;
+
+// ---------- 内核插件入口（ADR-0035）：storage 服务身份声明 ----------
+//
+// 服务实例（AnyStorage/FileStorage/MemoryStorage）由 Kernel::new 引导构造
+// （依赖数据根目录与启动回退策略），注册表侧只声明 ServiceId 提供与 namespace 占用。
+
+use crate::kernel::context::KernelContext;
+use crate::kernel::contract::{Info, PluginError};
+use crate::kernel::plugin::services::ServiceId;
+use crate::kernel::registry::{KernelDescriptor, KernelPlugin};
+
+pub struct StoragePlugin;
+
+impl KernelPlugin for StoragePlugin {
+    fn info() -> Info {
+        Info {
+            namespace: "storage".into(),
+            provides: vec![ServiceId::Storage],
+            ..Default::default()
+        }
+    }
+
+    fn register(_ctx: KernelContext<'_>) -> Result<(), PluginError> {
+        Ok(())
+    }
+}
+
+pub fn descriptor() -> KernelDescriptor {
+    KernelDescriptor::from_plugin::<StoragePlugin>()
+}

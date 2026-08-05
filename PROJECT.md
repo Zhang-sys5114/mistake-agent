@@ -51,7 +51,7 @@
 
 ### 信任模型（核心设计）
 
-- **内核插件之间**：同一信任边界内，可直接调用类型化接口。
+- **内核插件之间**：同一信任边界内，可直接调用类型化接口；插件本身经 `KernelPlugin` 两段式契约注册（info + register，ADR-0035），与用户插件同表校验。
 - **用户插件**：只能在注册时通过能力声明（requires）获得受限**服务句柄**（StorageHandle、ModelHandle…），看不到完整服务接口、内核内部或文件系统。
 - **用户插件之间**：不直接通信，只通过工具结果和 kernel 事件流协作。
 - **调用方向**：kernel 会主动调用用户插件的回调（工具/命令/事件），但能力边界不因调用方向改变。
@@ -95,7 +95,7 @@ v2 同一轮多个工具调用**串行执行**；并行列入后续（按依赖�
 ### GUI 通信协议
 GUI → kernel：`send_user_message`、`trigger_command(entry, params)`、`edit_message`、`switch_branch`、`abort`、`get_state`、`get_settings/set_settings`、`list_sessions`、`read_session`、`list_tools`、`test_connection`、`check_balance`、`get_cache_stats`、`compute_result`（Pyodide 验算回执）。kernel → GUI：事件流（message_delta、reasoning_delta、tool_start/end、tool_progress、turn_end、session_switched、memory_changed、compaction、cache_stats_updated、compute_request、error）。**命令唯一通道是 trigger_command**：GUI 不传可任意执行的文本命令，前端门禁由此结构性成立；找不到同名 Command 时回退放行同名 Tool（用户对 UserAndModel/UserOnly 工具均可调）。
 
-**Standalone（ADR-0029）**：kernel 直接运行在 Tauri GUI 进程内（mpsc + Channel 桥接），mistake-agent 不依赖任何外部进程/二进制；`src/bin/sidecar.rs` 保留为独立 CLI 调试入口，仅用于脚本与管道测试。
+**Standalone（ADR-0029）**：kernel 直接运行在 Tauri GUI 进程内（mpsc + Channel 桥接），mistake-agent 不依赖任何外部进程/二进制；sidecar CLI 已彻底移除（2026-08-05），单二进制即全部交付物。
 
 ### 审计与日志
 - **审计（Audit）**：默认全覆盖——任何操作都记录（工具调用、消息完成、编辑、会话切换、记忆变更、配置变更、LLM 调用、compute 执行、越权拒绝、生命周期）。写 `audit/` JSONL，记元数据与引用（大内容不复制）；compute 的代码与结果全量记录。10MB 归档轮转。
@@ -154,7 +154,7 @@ GUI → kernel：`send_user_message`、`trigger_command(entry, params)`、`edit_
 |---|---|
 | 内核 | Rust 2024 edition（单 crate，纯自研） |
 | GUI | Tauri（Rust 壳 + WebView2） |
-| 通信 | 进程内 RPC（Tauri Channel/命令桥接）；sidecar CLI 仅调试用 |
+| 通信 | 进程内 RPC（Tauri Channel/命令桥接，standalone 单二进制） |
 | 存储 | 本地文件：JSONL（会话/审计/记忆）+ 错题本 JSON |
 | 验算 | Pyodide（WASM Python + SymPy/NumPy，跑在 WebView） |
 | LLM | 主模型走 DeepSeek Responses API；视觉模型走 OpenAI 兼容 Chat Completions（SiliconFlow / Ollama） |
@@ -166,21 +166,23 @@ GUI → kernel：`send_user_message`、`trigger_command(entry, params)`、`edit_
 ```
 mistake-agent/
 ├── CONTEXT.md / docs/adr/        ← 术语表与决策留痕（本项目历史）
-├── Cargo.toml                    ← 单 crate（edition = "2024"，Tauri GUI + kernel sidecar 两个 bin）
+├── Cargo.toml                    ← 单 crate（edition = "2024"，唯一 bin：mistake-agent GUI）
 ├── src/
 │   ├── lib.rs                    ← 库出口（kernel 公开面 + plugin 注册聚合）
 │   ├── main.rs                   ← Tauri GUI 入口（进程内 kernel，standalone）
-│   ├── bin/sidecar.rs            ← kernel CLI 调试入口（stdio RPC，GUI 不依赖）
 │   ├── kernel.rs                 ← kernel 模块入口（mod kernel;）
-│   ├── kernel/                   ← 内核子模块（Rust 2018 布局，无 mod.rs）
-│   │   ├── loop.rs               ← agent loop（复杂了再加 loop/ 子目录）
-│   │   ├── session.rs            ← 会话调度（guard.rs / handoff.rs 按需拆分）
-│   │   ├── registry.rs  dispatch.rs  context.rs
-│   │   ├── rpc.rs  events.rs  logger.rs  audit.rs
-│   │   └── services.rs           ← 内核插件入口（子目录 services/ 按需）
+│   ├── kernel/                   ← 内核（Rust 2018 布局，目录即模块）
+│   │   ├── agent/                ← Agent 核心调度层
+│   │   │   ├── loop_mod.rs       ← agent loop（护栏/压缩/中断消费）
+│   │   │   ├── session.rs        ← 会话调度（SessionKey/Goal/切换决策/交接摘要）
+│   │   │   ├── dispatch.rs  rpc.rs  balance.rs  cache.rs
+│   │   ├── plugin/               ← 内核插件层（一插件一文件夹，mod.rs 承载插件 info）
+│   │   │   ├── services.rs       ← 内核插件公共契约（服务 trait + 受控句柄）
+│   │   │   └── storage/  memory/  compute/  model/  session/
+│   │   ├── registry.rs  contract.rs  context.rs
+│   │   └── events.rs  audit.rs  logger.rs  message.rs  prompt.rs  settings.rs
 │   └── plugin.rs                 ← 用户插件入口（mod plugin;）
-│       └── plugin/               ← 用户插件（grading.rs / practice.rs / report.rs /
-│                                     exam.rs / tracking.rs，复杂了各自升级目录）
+│       └── plugin/               ← 用户插件（hello/ grading/ practice/ report/ exam/ tracking/）
 ├── web/                          ← GUI 前端资源（Tauri 加载）
 └── assets/
 ```
@@ -189,17 +191,17 @@ mistake-agent/
 
 ## 9. 当前状态
 
-- **M1–M6 主体已完成（除 Windows 打包）**，设计文档 34 条 ADR + 术语表（CONTEXT.md）。
-- kernel：注册表/两段式契约/dispatch/loop/RPC/session 调度全链路；四服务全部生产实现——storage（文件持久化：会话 JSONL/错题 JSON/审计 JSONL 轮转）、memory（文件持久化 + MemoryHandle 事件/审计）、model（Responses API + Chat Completions，LiveSettingsModelService 热更新）、compute（BridgeCompute → GUI Pyodide）。
+- **M1–M6 主体已完成（除 Windows 打包）**，设计文档 35 条 ADR + 术语表（CONTEXT.md）。
+- kernel：注册表/两段式契约（用户插件 UserPlugin + 内核插件 KernelPlugin，ADR-0035）/dispatch/loop/RPC/session 调度全链路；四服务全部生产实现——storage（文件持久化：会话 JSONL/错题 JSON/审计 JSONL 轮转）、memory（文件持久化 + MemoryHandle 事件/审计）、model（Responses API + Chat Completions，LiveSettingsModelService 热更新）、compute（BridgeCompute → GUI Pyodide）。
 - 会话切换决策归主模型（ADR-0030/0032）：新消息先判断是否切换上下文、回合内 session::switch、回合末 LlmTurnDecider；消息树编辑/切分支（derive_branch/switch_branch）、上下文压缩（75% 阈值、最近 15 条保留）、InterruptBus 回合边界消费全部落地；审计记录点补齐（含 SessionSwitched/Memory*/SettingsChanged/Interrupt/MessageEdited/BranchSwitched）。
 - 聊天页上下文缓存命中率（ADR-0033）：get_cache_stats 按会话 + 全局聚合主模型回合 usage（Responses `cached_tokens` / Chat Completions `prompt_cache_*`）；真实链路实测命中率 97.3%（命中 4864 / 未命中 190 tokens）。
 - 会话切换防污染（ADR-0034）：session::switch 控制消息不落会话树、不随历史携带，切换后回答归新会话；真实链路实测后续回合不再反复切换。
-- 用户插件 8 个：demo/hello、grading（场景一：上传→OCR→判分→错题归档，输出 subject/reference_answer）、memory、compute、practice、report、exam、tracking——五个场景工具均可从会话内触达。
+- 用户插件 6 个：hello、grading（场景一：上传→OCR→判分→错题归档，输出 subject/reference_answer）、practice、report、exam、tracking；内核插件 5 个（storage/memory/compute/model/session），`memory::*`、`compute::verify`、`session::switch` 由内核模块经 KernelPlugin 契约注册（ADR-0035）——五个场景工具均可从会话内触达。
 - 场景一真实链路复验通过（2026-08-04）：图片/文本 PDF → Qwen3-VL OCR → deepseek-v4-flash（Responses API json_schema）判分 → 错题归档；assistant 消息落盘与 usage 解析已修复并有 live_api 断言。
 - Tauri GUI 正式化（Vue 3 + Vite，按 ui-ux-pro-max 设计系统）：聊天/错题本/会话历史/设置四页 + **OOBE 首次引导**（test_connection 连通性自检）；思维链默认折叠、流式打字机、工具进度、停止、消息树编辑与分支切换、Pyodide 验算执行端（本地 WASM）、Iconify 图标、Markdown+KaTeX+DOMPurify 防 XSS、附件（图片/PDF 持久展示）、错题本搜索/排序。
 - 设置页余额卡片（`check_balance` RPC）：DeepSeek `/user/balance` + SiliconFlow `/user/info` 真实查询，只读不落盘（ADR-0031）。
-- **Standalone**：kernel 内嵌 GUI 进程，mistake-agent 单二进制即可运行（不再需要 sidecar 同目录）。
-- 验收命令：`cd web && npm install && npm run build`；`cargo test`（54 项单元）；`cargo test --test live_api -- --ignored`（真实 API：hello 落盘+usage、三套样例、memory 往返）；`cargo run --bin sidecar`（kernel CLI）；`cargo run --bin mistake-agent`（GUI）。
+- **Standalone**：kernel 内嵌 GUI 进程，mistake-agent 单二进制即可运行（sidecar 已彻底移除）。
+- 验收命令：`cd web && npm install && npm run build`；`cargo test`（71 项单元）；`cargo test --test live_api -- --ignored`（真实 API：hello 落盘+usage、三套样例、memory 往返）；`cargo run --bin mistake-agent`（GUI）。
 
 ## 10. 里程碑
 
@@ -208,8 +210,8 @@ mistake-agent/
 | M1 | 单 crate 骨架 + kernel 模块 | ✅ 完成：trait、注册表、dispatch、loop，hello 回合真实跑通 |
 | M1.5 | kernel 的 session 模块 | ✅ 完成：SessionKey、生命周期、交接摘要（LlmSummarizer） |
 | M2 | services：storage / model / memory | ✅ 完成：会话/审计文件持久化、双模型可调用（热更新）、记忆目录可读写 |
-| M3 | RPC + Tauri 壳 | ✅ 完成：GUI ↔ sidecar stdio JSONL 闭环 |
-| M4 | 五个插件 + compute::verify | ✅ 完成：8 插件注册；场景一全链路 + Pyodide 验算桥接 |
+| M3 | RPC + Tauri 壳 | ✅ 完成：GUI ↔ kernel 进程内 RPC 闭环（standalone） |
+| M4 | 五个插件 + compute::verify | ✅ 完成：6 用户插件 + 5 内核插件注册；场景一全链路 + Pyodide 验算桥接 |
 | M5 | 消息树 / 记忆路由 / 设置向导 / 审计日志 | ✅ 完成：编辑/切分支、memory 工具、设置页、审计补全 |
 | M6 | Windows 打包 + 测试 + 文档 | 🟡 除 Windows 打包外完成：54 单测 + 3 真实 API 链路 + 文档同步；setup.exe 待 Windows 环境 |
 
@@ -229,14 +231,14 @@ mistake-agent/
 
 - 入口点命名：`namespace::tool`——插件只写短名（`upload`），kernel 拼全名（`grading::upload`），撞名从机制上不可能；模型可见名经 wire name 映射（`::`→`_`，如 `grading::upload` → `grading_upload`），内部名、审计名与 `trigger_command` 不变（ADR-0020）。
 - 三类入口点：**Tool**（LLM 调度）、**Command**（GUI/用户调度）、**Event**（kernel 生命周期调度）。
-- 内核服务：`ServiceId::{Storage, Memory, Compute, Model}`。
+- 内核服务：`ServiceId::{Storage, Memory, Compute, Model}`；内核插件经 `KernelPlugin` 两段式契约注册（info 声明 namespace/provides/入口点，register 绑定 handler，ADR-0035）。
 - 会话调度是独立内核级模块（kernel-session），**不占 ServiceId**；切换决策由主模型完成（LlmTurnDecider，失败降级 continue）。
 - 工具列表示例：`grading::upload / grading::list / practice::generate / report::weekly / exam::compose / tracking::checkin / compute::verify / memory::save / memory::show / memory::remove`；会话历史经 RPC `list_sessions / read_session` 提供（不注册为模型工具）。
 
 ## 13. 术语表（浓缩）
 
 - **Kernel（内核）**：核心调度层——agent loop、会话、工具注册与调度、事件/RPC、指令加载。
-- **Kernel plugin（内核插件）**：信任边界内的特权子系统（storage/memory/compute/model）。
+- **Kernel plugin（内核插件）**：信任边界内的特权子系统（storage/memory/compute/model + session 调度模块），经 `KernelPlugin` 两段式契约注册。
 - **User plugin（用户插件）**：注册工具/命令/事件回调的业务插件，回调由 kernel 主动调用。
 - **Service / Service handle**：内核插件提供的受控能力 / 注入用户插件的受限接口（等价 OS 的 fd）。
 - **CallerPolicy**：UserAndModel 或 UserOnly，决定入口点谁能调用。
@@ -260,5 +262,5 @@ mistake-agent/
 
 ## 14. 风险与后续优化
 
-- **风险**：Pyodide 桥接与 Tauri sidecar 打包是 Windows 侧的主要工程风险，M3-M4 要尽早验证；settings 明文存 key 是已知取舍（DPAPI 列后续）；主模型每回合新消息预决策 + 回合末决策共两次小调用，有少量成本（可接受）。
+- **风险**：Pyodide 桥接与 Windows 打包是 Windows 侧的主要工程风险，M3-M4 要尽早验证；settings 明文存 key 是已知取舍（DPAPI 列后续）；主模型每回合新消息预决策 + 回合末决策共两次小调用，有少量成本（可接受）。
 - **后续优化**：工具并行（拓扑排序）、子 agent、wasmtime 内嵌 Python（compute 收进 kernel）、第三方插件/技能系统、数据目录可配置、家长端报表、Windows 凭据管理器。

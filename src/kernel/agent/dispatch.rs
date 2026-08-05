@@ -11,13 +11,13 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use crate::kernel::agent::loop_mod::InterruptReason;
 use crate::kernel::audit::{AuditRecord, Auditor};
 use crate::kernel::contract::{CallerPolicy, ToolError};
 use crate::kernel::events::EventSink;
 use crate::kernel::logger::LoggerHandle;
-use crate::kernel::loop_mod::InterruptReason;
+use crate::kernel::plugin::services::AbortSignal;
 use crate::kernel::registry::{Handler, RegisteredEntry, Registry};
-use crate::kernel::services::AbortSignal;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 

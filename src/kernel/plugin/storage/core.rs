@@ -6,13 +6,13 @@ use async_trait::async_trait;
 
 use super::file::FileStorage;
 use super::mem::MemoryStorage;
+use crate::kernel::agent::session::{Goal, SessionKey, SessionMeta, SessionStatus};
 use crate::kernel::audit::{AuditRecord, AuditSink};
 use crate::kernel::message::{Message, MessageId};
-use crate::kernel::services::{
+use crate::kernel::plugin::services::{
     Mistake, MistakeFilter, MistakeId, MistakePatch, MistakeStore, SessionStore, StorageError,
     StorageService,
 };
-use crate::kernel::session::{Goal, SessionKey, SessionMeta, SessionStatus};
 
 #[derive(Clone)]
 pub enum AnyStorage {

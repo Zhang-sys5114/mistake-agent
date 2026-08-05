@@ -6,11 +6,11 @@
 
 use serde_json::{Value, json};
 
+use crate::kernel::agent::dispatch::ToolCallContext;
 use crate::kernel::context::PluginContext;
 use crate::kernel::contract::{CallerPolicy, Info, PluginError, ToolDef, ToolError};
-use crate::kernel::dispatch::ToolCallContext;
+use crate::kernel::plugin::services::MistakeFilter;
 use crate::kernel::registry::{PluginDescriptor, UserPlugin};
-use crate::kernel::services::MistakeFilter;
 mod core;
 mod params;
 
@@ -24,8 +24,8 @@ impl UserPlugin for GradingPlugin {
         Info {
             namespace: "grading".into(),
             requires: vec![
-                crate::kernel::services::ServiceId::Storage,
-                crate::kernel::services::ServiceId::Model,
+                crate::kernel::plugin::services::ServiceId::Storage,
+                crate::kernel::plugin::services::ServiceId::Model,
             ],
             tools: vec![
                 ToolDef {
@@ -114,7 +114,7 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    use crate::kernel::services::{
+    use crate::kernel::plugin::services::{
         Mistake, MistakeFilter, MistakeId, MistakePatch, MistakeStore, StorageError, StorageHandle,
     };
     use crate::plugin::grading::core::stage_path_allowed;

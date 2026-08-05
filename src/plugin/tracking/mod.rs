@@ -7,13 +7,13 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::kernel::agent::dispatch::ToolCallContext;
 use crate::kernel::context::PluginContext;
 use crate::kernel::contract::{CallerPolicy, Info, PluginError, ToolDef, ToolError};
-use crate::kernel::dispatch::ToolCallContext;
-use crate::kernel::registry::{PluginDescriptor, UserPlugin};
-use crate::kernel::services::{
+use crate::kernel::plugin::services::{
     MemoryError, MemoryHandle, MemoryPath, MistakeFilter, ServiceId, StorageHandle,
 };
+use crate::kernel::registry::{PluginDescriptor, UserPlugin};
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct CheckinParams {
@@ -181,7 +181,7 @@ fn map_memory_error(e: MemoryError) -> ToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::services::{
+    use crate::kernel::plugin::services::{
         MemoryPath, MemoryService, MemoryView, Mistake, MistakeId, MistakePatch, MistakeStore,
         StorageError,
     };
@@ -225,7 +225,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl crate::kernel::services::MemoryService for FakeMemory {
+    impl crate::kernel::plugin::services::MemoryService for FakeMemory {
         async fn save(&self, path: &MemoryPath, content: &str) -> Result<(), MemoryError> {
             self.entries
                 .lock()

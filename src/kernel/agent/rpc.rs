@@ -6,28 +6,28 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::kernel::audit::{AuditRecord, Auditor};
-use crate::kernel::cache::CacheTracker;
-use crate::kernel::compute::BridgeCompute;
-use crate::kernel::contract::{CallerPolicy, full_to_wire};
-use crate::kernel::dispatch::Dispatch;
-use crate::kernel::events::{Event, EventSink};
-use crate::kernel::logger::{Logger, LoggerHandle};
-use crate::kernel::loop_mod::{AgentLoop, TurnInput, TurnOutcome};
-use crate::kernel::memory::{FileMemoryService, InMemoryMemory};
-use crate::kernel::message::{Message, MessageId};
-use crate::kernel::model::{LiveSettingsModelService, RoutingModelService};
-use crate::kernel::registry::Registry;
-use crate::kernel::services::{
-    AbortSignal, ComputeHandle, MemoryHandle, MemoryService, ModelHandle, ModelKind, ModelRequest,
-    ModelService, ServiceHandles, SessionStore, StorageHandle,
-};
-use crate::kernel::session::{
+use crate::kernel::agent::cache::CacheTracker;
+use crate::kernel::agent::dispatch::Dispatch;
+use crate::kernel::agent::loop_mod::{AgentLoop, TurnInput, TurnOutcome};
+use crate::kernel::agent::session::{
     Interrupt, InterruptBus, LlmSummarizer, LlmTurnDecider, SessionKey, SessionScheduler,
     SessionStatus, SessionSwitch, SystemClock,
 };
+use crate::kernel::audit::{AuditRecord, Auditor};
+use crate::kernel::contract::{CallerPolicy, full_to_wire};
+use crate::kernel::events::{Event, EventSink};
+use crate::kernel::logger::{Logger, LoggerHandle};
+use crate::kernel::message::{Message, MessageId};
+use crate::kernel::plugin::compute::BridgeCompute;
+use crate::kernel::plugin::memory::{FileMemoryService, InMemoryMemory};
+use crate::kernel::plugin::model::{LiveSettingsModelService, RoutingModelService};
+use crate::kernel::plugin::services::{
+    AbortSignal, ComputeHandle, MemoryHandle, MemoryService, ModelHandle, ModelKind, ModelRequest,
+    ModelService, ServiceHandles, SessionStore, StorageHandle,
+};
+use crate::kernel::plugin::storage::{AnyStorage, FileStorage};
+use crate::kernel::registry::Registry;
 use crate::kernel::settings::Settings;
-use crate::kernel::storage::{AnyStorage, FileStorage};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
@@ -217,7 +217,7 @@ impl Kernel {
             Ok(file) => AnyStorage::File(file),
             Err(e) => {
                 eprintln!("[kernel] 文件存储打开失败，回退内存存储：{e}");
-                AnyStorage::Mem(crate::kernel::storage::MemoryStorage::new())
+                AnyStorage::Mem(crate::kernel::plugin::storage::MemoryStorage::new())
             }
         });
         let memory: Arc<dyn MemoryService> = match FileMemoryService::open_default() {
@@ -240,8 +240,8 @@ impl Kernel {
 
         let auditor = Auditor::new(storage.clone());
         let router = Arc::new(RoutingModelService::new(
-            main_service.clone() as Arc<dyn crate::kernel::services::ModelService>,
-            vision_service.clone() as Arc<dyn crate::kernel::services::ModelService>,
+            main_service.clone() as Arc<dyn crate::kernel::plugin::services::ModelService>,
+            vision_service.clone() as Arc<dyn crate::kernel::plugin::services::ModelService>,
         ));
         let handles = ServiceHandles::default()
             .with_storage(StorageHandle::new(storage.clone()))
@@ -258,6 +258,11 @@ impl Kernel {
             ));
 
         let registry = Arc::new(Registry::new(handles, logger));
+        for desc in crate::kernel::plugin::builtin_kernel_plugins() {
+            registry
+                .register_kernel_plugin(desc)
+                .map_err(|e| format!("内核插件注册失败：{e}"))?;
+        }
         for desc in crate::plugin::builtin_plugins() {
             registry
                 .register_plugin(desc)
@@ -329,7 +334,7 @@ impl Kernel {
             .ok_or_else(|| RpcError::new("no_active_session", "没有活动会话"))
     }
 
-    /// 当前是否有回合在跑（sidecar 收尾时轮询用）。
+    /// 当前是否有回合在跑（GUI 关闭收尾时轮询用）。
     pub async fn is_idle(&self) -> bool {
         self.state.lock().await.turn.is_none()
     }
@@ -489,7 +494,7 @@ impl Kernel {
                         }
                         Err(e) => {
                             events.emit(Event::TurnEnd {
-                                stop_reason: crate::kernel::loop_mod::StopReason::Failed,
+                                stop_reason: crate::kernel::agent::loop_mod::StopReason::Failed,
                             });
                             events.emit(Event::Error {
                                 message: format!("回合失败：{e}"),
@@ -629,11 +634,11 @@ impl Kernel {
                         }
                     };
                     if is_vision {
-                        crate::kernel::model::build_vision_service(&temp_settings)
+                        crate::kernel::plugin::model::build_vision_service(&temp_settings)
                             .complete(&model_req, &AbortSignal::new())
                             .await
                     } else {
-                        crate::kernel::model::build_main_service(&temp_settings)
+                        crate::kernel::plugin::model::build_main_service(&temp_settings)
                             .complete(&model_req, &AbortSignal::new())
                             .await
                     }
@@ -664,7 +669,7 @@ impl Kernel {
             }
             Method::CheckBalance => {
                 let settings = self.settings.read().expect("settings poisoned").clone();
-                let report = crate::kernel::balance::check_balance(&settings).await;
+                let report = crate::kernel::agent::balance::check_balance(&settings).await;
                 self.auditor.record(AuditRecord::BalanceChecked {
                     main_ok: report.main.ok,
                     vision_ok: report.vision.ok,
@@ -777,7 +782,7 @@ impl Kernel {
             } => {
                 let delivered = self.compute.deliver(
                     id,
-                    crate::kernel::services::ComputeResult {
+                    crate::kernel::plugin::services::ComputeResult {
                         stdout,
                         stderr,
                         duration_ms,
@@ -796,8 +801,8 @@ impl Kernel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::session::SessionMeta;
-    use crate::kernel::storage::MemoryStorage;
+    use crate::kernel::agent::session::SessionMeta;
+    use crate::kernel::plugin::storage::MemoryStorage;
 
     #[tokio::test]
     async fn switch_tool_call_not_persisted_and_children_reparented() {

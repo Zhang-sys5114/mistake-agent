@@ -7,11 +7,11 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::kernel::agent::dispatch::ToolCallContext;
 use crate::kernel::context::PluginContext;
 use crate::kernel::contract::{CallerPolicy, Info, PluginError, ToolDef, ToolError};
-use crate::kernel::dispatch::ToolCallContext;
+use crate::kernel::plugin::services::{MistakeFilter, ServiceId, StorageHandle};
 use crate::kernel::registry::{PluginDescriptor, UserPlugin};
-use crate::kernel::services::{MistakeFilter, ServiceId, StorageHandle};
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct WeeklyParams {
@@ -110,7 +110,9 @@ async fn weekly_handler(storage: StorageHandle, params: Value) -> Result<Value, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::services::{Mistake, MistakeId, MistakePatch, MistakeStore, StorageError};
+    use crate::kernel::plugin::services::{
+        Mistake, MistakeId, MistakePatch, MistakeStore, StorageError,
+    };
     use std::sync::Mutex;
 
     #[derive(Default)]

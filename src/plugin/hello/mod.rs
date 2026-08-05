@@ -4,9 +4,9 @@ use serde_json::{Value, json};
 
 use std::sync::Arc;
 
+use crate::kernel::agent::dispatch::ToolCallContext;
 use crate::kernel::context::PluginContext;
 use crate::kernel::contract::{CallerPolicy, Info, PluginError, ToolDef, empty_params};
-use crate::kernel::dispatch::ToolCallContext;
 use crate::kernel::registry::{PluginDescriptor, UserPlugin};
 
 pub struct HelloPlugin;

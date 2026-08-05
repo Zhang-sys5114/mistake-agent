@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::kernel::services::{
+use crate::kernel::plugin::services::{
     AbortSignal, ModelError, ModelKind, ModelRequest, ModelResponse, ModelService, ModelStream,
 };
 use crate::kernel::settings::{Settings, Transport};
@@ -135,8 +135,8 @@ impl ModelService for LiveSettingsModelService {
 mod tests {
     use super::*;
     use crate::kernel::message::Message;
-    use crate::kernel::model::responses::{ResponsesModelService, SseParser};
-    use crate::kernel::services::{ItemKind, ModelChunk};
+    use crate::kernel::plugin::model::responses::{ResponsesModelService, SseParser};
+    use crate::kernel::plugin::services::{ItemKind, ModelChunk};
     use futures_util::StreamExt;
 
     #[test]

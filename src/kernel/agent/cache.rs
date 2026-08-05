@@ -10,8 +10,8 @@ use std::sync::Mutex;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::kernel::services::TokenUsage;
-use crate::kernel::session::SessionKey;
+use crate::kernel::agent::session::SessionKey;
+use crate::kernel::plugin::services::TokenUsage;
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct CacheStats {

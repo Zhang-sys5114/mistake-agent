@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::kernel::dispatch::Caller;
+use crate::kernel::agent::dispatch::Caller;
+use crate::kernel::agent::session::SessionKey;
 use crate::kernel::message::MessageId;
-use crate::kernel::session::SessionKey;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "record", rename_all = "snake_case")]

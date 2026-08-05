@@ -12,11 +12,11 @@
 └───────────────────────────────────────────────────────────┘
 ```
 
-- GUI → kernel：前端经 `kernel_send` 提交**请求帧**（`RpcRequest`，见 src/kernel/rpc.rs），进程内 mpsc 通道投递。
+- GUI → kernel：前端经 `kernel_send` 提交**请求帧**（`RpcRequest`，见 src/kernel/agent/rpc.rs），进程内 mpsc 通道投递。
 - kernel → GUI：`Kernel::handle` 返回**响应帧**（带 id 回执），`EventSink`（ChannelEventSink）发**事件帧**（无 id 播报，`Event`），统一经 Tauri `Channel<String>` 推给前端。
 - Tauri 侧桥接（src/main.rs 的 Tauri 命令，非 RPC 方法）：`start_kernel`（进程内创建 Kernel + 请求循环）、`kernel_send`（投递一行 JSONL 请求）、`pick_homework_file`（rfd 文件对话框，返回作业路径）。
 - 通信格式：JSON Lines（每行一个完整 JSON 对象），UTF-8。
-- `src/bin/sidecar.rs` 保留为**独立 CLI 调试入口**（stdio JSONL），GUI 不再依赖该二进制。
+- 无 sidecar：kernel 直接运行在 GUI 进程内（standalone，ADR-0029），协议帧格式与早期 sidecar 时代一致、前端零改动。
 
 ## 2. 帧格式（GUI ↔ kernel）
 
@@ -115,7 +115,7 @@ pub trait UserPlugin {
 
 > `trigger_command` 找不到同名 Command 时，会回退放行同名 Tool（用户对 UserAndModel/UserOnly 工具均可调），因此 GUI 可直接触发 `grading::list` 等工具。
 
-## 4. 服务契约（src/kernel/services.rs）
+## 4. 服务契约（src/kernel/plugin/services.rs）
 
 | 服务 | 角色 trait | 注入视图 | 说明 |
 |---|---|---|---|
@@ -130,7 +130,7 @@ pub trait UserPlugin {
 
 - Endpoint：`POST https://api.deepseek.com/responses`（无状态：每次请求全量历史，不支持 `previous_response_id`/`conversation`/`store`）。
 - 模型：`deepseek-v4-flash`（2026-08 起官方支持；v4-pro 待官方放开）。
-- 流式：语义 SSE 事件（`event:`/`data:` 行，空行分隔），结束事件 `response.completed` / `response.incomplete` / `response.failed`，**没有 `data: [DONE]`**（src/kernel/model.rs `SseParser`）。
+- 流式：语义 SSE 事件（`event:`/`data:` 行，空行分隔），结束事件 `response.completed` / `response.incomplete` / `response.failed`，**没有 `data: [DONE]`**（src/kernel/plugin/model/responses.rs `SseParser`）。
 - 事件映射：`output_text.delta`→TextDelta、`reasoning_text.delta`→ReasoningDelta、`function_call_arguments.delta`→ToolCallDelta、`output_item.done`→ItemDone（气泡/工具调用边界）、`response.completed`→Usage+Done。
 - JSON 严格要求：`text.format` 支持 `json_object` 与 `json_schema`（判分用 json_schema 数组，schema 必须内联扁平、避免 `$defs/$ref`，DeepSeek 端不解析引用）。
 - 思考模式默认开启：`reasoning.effort` 可传 `none`（判分用 none 提速）；thinking 下 temperature/top_p 无效。
@@ -178,16 +178,9 @@ pub trait UserPlugin {
 
 ```bash
 cd web && npm install && npm run build    # 前端构建（改过 web/ 后必须执行）
-cargo test                                # 单元测试（14 项）
+cargo test                                # 单元测试（71 项）
 cargo test --test live_api -- --ignored   # 真实 API 验收：hello + samples/ 三套样例
-cargo run --bin sidecar                   # kernel CLI：管道喂 JSONL
 cargo run --bin mistake-agent             # Tauri GUI（Wayland/X11 均可）
-```
-
-sidecar 管道示例：
-
-```bash
-printf '%s\n' '{"id":1,"method":"send_user_message","text":"你好"}' | cargo run --bin sidecar
 ```
 
 门禁：`cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` + `cargo test`。
@@ -197,18 +190,18 @@ printf '%s\n' '{"id":1,"method":"send_user_message","text":"你好"}' | cargo ru
 | 文件 | 内容 |
 |---|---|
 | src/kernel/contract.rs | 入口点元数据、CallerPolicy、ToolError、wire name |
-| src/kernel/services.rs | 四服务契约、受控句柄、ServiceHandles、MemoryPath |
-| src/kernel/model.rs | Responses API / Chat Completions 适配器、SSE 解析、路由服务 |
-| src/kernel/registry.rs / context.rs | 注册表校验、两段式契约、EntryRegistrar |
-| src/kernel/dispatch.rs | Caller 检查、jsonschema 校验、两级取消、延期后门 |
-| src/kernel/loop_mod.rs | agent loop、护栏、气泡完成落盘 |
-| src/kernel/session.rs | SessionScheduler、守卫模型、InterruptBus、空闲超时 |
-| src/kernel/storage.rs / memory.rs / compute.rs | 服务实现（文件持久化 + 桥接执行端） |
-| src/kernel/rpc.rs | 帧类型、Kernel 组装与请求路由 |
-| src/bin/sidecar.rs | stdio JSONL 主循环（独立调试入口，GUI 不依赖） |
+| src/kernel/plugin/services.rs | 四服务契约、受控句柄、ServiceHandles、MemoryPath |
+| src/kernel/plugin/model/ | Responses API / Chat Completions 适配器、SSE 解析、路由服务 |
+| src/kernel/registry.rs / context.rs | 注册表校验、两段式契约（UserPlugin + KernelPlugin）、EntryRegistrar |
+| src/kernel/agent/dispatch.rs | Caller 检查、jsonschema 校验、两级取消、延期后门 |
+| src/kernel/agent/loop_mod.rs | agent loop、护栏、气泡完成落盘 |
+| src/kernel/agent/session.rs | SessionScheduler、LlmTurnDecider、InterruptBus、空闲超时 |
+| src/kernel/plugin/storage/ · memory/ · compute/ · session/ | 内核插件（服务实现 + 工具入口）；plugin/mod.rs 聚合内核插件清单（ADR-0035） |
+| src/kernel/agent/rpc.rs | 帧类型、Kernel 组装与请求路由 |
+| src/main.rs | Tauri 壳：进程内 Kernel + Channel 桥接（standalone，唯一二进制） |
 | src/main.rs | Tauri 壳：进程内 Kernel + Channel 桥接（standalone） |
 | web/ | Vue 3 UI（src/App.vue、composables/useKernel.js，构建产物 web/dist） |
-| src/plugin/grading.rs | 场景一：上传/OCR/判分/归档（含学科与参考答案） |
-| src/plugin/ | memory/session/compute 工具插件（内核服务面向模型与用户的入口） |
+| src/plugin/grading/ | 场景一：上传/OCR/判分/归档（含学科与参考答案） |
+| src/plugin/ | 业务用户插件：hello/grading/practice/report/exam/tracking |
 | tests/live_api.rs | 真实 API 验收测试 |
 | samples/ | 三套作业样例（1 真实照片 + 2 合成卷） |

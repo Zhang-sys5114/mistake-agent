@@ -6,18 +6,24 @@
 
 **Kernel（内核）**:
 本地 Agent 引擎的核心调度层，负责 Agent loop、会话生命周期、工具注册与调度、事件/RPC 和指令/技能加载；不实现任何业务能力。
+代码布局：`src/kernel/agent/`（核心调度层）+ `src/kernel/plugin/`（内核插件，一插件一文件夹）。
 _Avoid_: 核心、引擎（含义过宽）
 
 **Kernel plugin（内核插件）**:
 运行在内核信任边界内的特权子系统，负责敏感资源与能力，如会话存储和验算运行时。
+经 `KernelPlugin` 两段式契约注册（info + register，ADR-0035），注册上下文为全量服务句柄。
 _Avoid_: 内核级插件（口语）、系统服务
+
+**KernelPlugin contract（内核插件两段式契约）**:
+内核插件的注册机制，与用户插件 `UserPlugin` 同形：`info()` 声明 namespace、`provides`（提供的 ServiceId）与工具/命令/事件，`register(ctx)` 绑定 handler；与用户插件共用同一张注册表校验（namespace/wire 唯一、CallerPolicy、懒/急加载），注册上下文 `KernelContext` 注入全量服务句柄。
+_Avoid_: 直连注册（ADR-0021 旧表述）
 
 **User plugin（用户插件）**:
 通过内核注册工具、命令与事件回调提供业务能力的插件，如批改、练习、复盘；其回调由 kernel 主动调用，但不直接接触敏感资源。
 _Avoid_: 业务插件（过早限定业务范围）、用户态插件（口语）
 
 **Service（服务）**:
-内核插件向 kernel 注册的受控能力（v2 为会话存储、验算运行时、记忆、模型），用户插件只能通过服务句柄访问。
+内核插件向 kernel 提供的受控能力（v2 为会话存储、验算运行时、记忆、模型），由内核插件在 info 中以 `provides` 声明，用户插件只能通过服务句柄访问。
 _Avoid_: API（含义过泛）
 
 **Service handle（服务句柄）**:

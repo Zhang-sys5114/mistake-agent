@@ -1,17 +1,19 @@
-//! session 插件：回合内主动切换会话（ADR-0030）。
-//! 工具声明走标准插件通道（模型可见、懒加载前 Eager），
-//! 实际执行由 agent loop 特殊处理（调用 SessionScheduler::switch），
-//! 不会走到插件 handler——这里只提供一个兜底错误。
+//! session 内核插件：`session::switch` 工具入口（ADR-0030/0035）。
+//!
+//! 与 Session scheduler（`crate::kernel::agent::session`）分离：调度器是独立内核级
+//! 模块（不占 ServiceId），本插件只负责工具声明。实际执行由 agent loop 特殊处理
+//! （调用 SessionScheduler::switch），不会走到插件 handler——这里只提供一个兜底错误。
+
+use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
-use std::sync::Arc;
 
-use crate::kernel::context::PluginContext;
+use crate::kernel::agent::dispatch::ToolCallContext;
+use crate::kernel::context::KernelContext;
 use crate::kernel::contract::{CallerPolicy, Info, PluginError, ToolDef, ToolError};
-use crate::kernel::dispatch::ToolCallContext;
-use crate::kernel::registry::{PluginDescriptor, UserPlugin};
+use crate::kernel::registry::{KernelDescriptor, KernelPlugin};
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct SwitchParams {
@@ -21,10 +23,12 @@ pub struct SwitchParams {
 
 pub struct SessionPlugin;
 
-impl UserPlugin for SessionPlugin {
+impl KernelPlugin for SessionPlugin {
     fn info() -> Info {
         Info {
             namespace: "session".into(),
+            // 会话调度是独立内核级模块（kernel-session），不占 ServiceId（ADR-0030）。
+            provides: vec![],
             load: crate::kernel::contract::LoadPolicy::Eager,
             tools: vec![ToolDef {
                 name: "switch".into(),
@@ -43,7 +47,7 @@ impl UserPlugin for SessionPlugin {
         }
     }
 
-    fn register(ctx: PluginContext<'_>) -> Result<(), PluginError> {
+    fn register(ctx: KernelContext<'_>) -> Result<(), PluginError> {
         ctx.registrar.tool(
             "switch",
             Arc::new(|_ctx: &ToolCallContext, _p: Value| {
@@ -58,6 +62,6 @@ impl UserPlugin for SessionPlugin {
     }
 }
 
-pub fn descriptor() -> PluginDescriptor {
-    PluginDescriptor::from_plugin::<SessionPlugin>()
+pub fn descriptor() -> KernelDescriptor {
+    KernelDescriptor::from_plugin::<SessionPlugin>()
 }

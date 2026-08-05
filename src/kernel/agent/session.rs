@@ -11,11 +11,11 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::kernel::message::{Message, MessageId};
-use crate::kernel::prompt::{summarize_prompt, turn_decider_prompt};
-use crate::kernel::services::{
+use crate::kernel::plugin::services::{
     AbortSignal, ModelError, ModelKind, ModelRequest, ModelResponse, ModelService, ResponseFormat,
     SessionStore, StorageError,
 };
+use crate::kernel::prompt::{summarize_prompt, turn_decider_prompt};
 
 // ---------- SessionKey ----------
 
@@ -919,8 +919,10 @@ fn carry_history(path: &[Message], keep: usize) -> Vec<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::services::{ModelChunk, ModelError, ModelResponse, ModelStream, TokenUsage};
-    use crate::kernel::storage::MemoryStorage;
+    use crate::kernel::plugin::services::{
+        ModelChunk, ModelError, ModelResponse, ModelStream, TokenUsage,
+    };
+    use crate::kernel::plugin::storage::MemoryStorage;
     use std::collections::VecDeque;
 
     /// 脚本模型：按队列顺序返回文本或错误（测试守卫/摘要器用）。

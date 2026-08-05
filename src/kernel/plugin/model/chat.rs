@@ -3,7 +3,7 @@ use std::time::Duration;
 use reqwest::Client;
 use serde_json::{Value, json};
 
-use crate::kernel::services::{
+use crate::kernel::plugin::services::{
     AbortSignal, ModelChunk, ModelError, ModelRequest, ModelResponse, ModelService, ModelStream,
     TokenUsage,
 };

@@ -15,7 +15,7 @@
 
 ### 1. Agent 系统提示（agent_system_prompt）
 
-注入位置：主模型每个请求的消息头（src/kernel/loop_mod.rs 组装 ModelRequest 时注入，不落消息树）。内容见 src/kernel/prompt.rs，要点：
+注入位置：主模型每个请求的消息头（src/kernel/agent/loop_mod.rs 组装 ModelRequest 时注入，不落消息树）。内容见 src/kernel/prompt.rs，要点：
 
 - 角色与受众（中学生、中文、耐心）。
 - 工具流程：`grading::upload`（OCR→判分→归档→讲解）、`grading::list`（错题本查询）。

@@ -4,15 +4,15 @@ use base64::Engine;
 use serde_json::{Value, json};
 use std::path::Path;
 
+use crate::kernel::agent::dispatch::ToolCallContext;
 use crate::kernel::contract::ToolError;
-use crate::kernel::dispatch::ToolCallContext;
 use crate::kernel::events::Event;
 use crate::kernel::message::{Attachment, Message, MessageKind};
-use crate::kernel::prompt::{grading_system_prompt, ocr_prompt};
-use crate::kernel::services::{
+use crate::kernel::plugin::services::{
     AbortSignal, Mistake, MistakeId, ModelHandle, ModelKind, ModelRequest, ResponseFormat,
     StorageHandle,
 };
+use crate::kernel::prompt::{grading_system_prompt, ocr_prompt};
 
 use super::params::{GradedItem, UploadParams};
 pub(crate) async fn upload_handler(
@@ -229,10 +229,10 @@ fn parse_grading_json(text: &str) -> Result<Vec<GradedItem>, ToolError> {
     )))
 }
 
-fn map_model_error(e: crate::kernel::services::ModelError) -> ToolError {
+fn map_model_error(e: crate::kernel::plugin::services::ModelError) -> ToolError {
     match e {
-        crate::kernel::services::ModelError::Timeout => ToolError::timeout(),
-        crate::kernel::services::ModelError::Cancelled => ToolError::aborted(),
+        crate::kernel::plugin::services::ModelError::Timeout => ToolError::timeout(),
+        crate::kernel::plugin::services::ModelError::Cancelled => ToolError::aborted(),
         other if other.is_systemic() => ToolError::model_unavailable(other.to_string()),
         other => ToolError::handler(other.to_string()),
     }

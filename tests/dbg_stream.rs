@@ -2,8 +2,8 @@
 
 use futures_util::StreamExt;
 use mistake_agent::kernel::message::Message;
-use mistake_agent::kernel::model::build_main_service;
-use mistake_agent::kernel::services::{
+use mistake_agent::kernel::plugin::model::build_main_service;
+use mistake_agent::kernel::plugin::services::{
     AbortSignal, ModelChunk, ModelKind, ModelRequest, ToolSchema,
 };
 use mistake_agent::kernel::settings::Settings;

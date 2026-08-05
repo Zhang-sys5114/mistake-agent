@@ -2,9 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::kernel::loop_mod::StopReason;
+use crate::kernel::agent::loop_mod::StopReason;
+use crate::kernel::agent::session::SessionKey;
 use crate::kernel::message::MessageId;
-use crate::kernel::session::SessionKey;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]

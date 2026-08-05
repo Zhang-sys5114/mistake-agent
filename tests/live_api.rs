@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use mistake_agent::kernel::dispatch::Caller;
+use mistake_agent::kernel::agent::dispatch::Caller;
+use mistake_agent::kernel::agent::rpc::{ForcedToolRequest, Kernel, Method, RpcRequest};
+use mistake_agent::kernel::agent::session::SessionKey;
 use mistake_agent::kernel::events::MemoryEventSink;
-use mistake_agent::kernel::rpc::{ForcedToolRequest, Kernel, Method, RpcRequest};
-use mistake_agent::kernel::session::SessionKey;
 use mistake_agent::kernel::settings::Settings;
 use serde_json::json;
 
@@ -139,7 +139,7 @@ async fn hello_turn_real_api() {
         .expect("get_cache_stats 请求失败")
         .expect("应有响应帧");
     let stats = match stats_frame {
-        mistake_agent::kernel::rpc::RpcFrame::Response { result, error, .. } => {
+        mistake_agent::kernel::agent::rpc::RpcFrame::Response { result, error, .. } => {
             assert!(error.is_none(), "缓存统计不应报错：{error:?}");
             result.expect("应有统计结果")
         }
@@ -425,7 +425,7 @@ async fn check_balance_real_api() {
         .expect("check_balance 请求失败")
         .expect("应有响应帧");
     let value = match frame {
-        mistake_agent::kernel::rpc::RpcFrame::Response { result, error, .. } => {
+        mistake_agent::kernel::agent::rpc::RpcFrame::Response { result, error, .. } => {
             assert!(error.is_none(), "余额查询不应报错：{error:?}");
             result.expect("应有余额结果")
         }
@@ -505,7 +505,7 @@ async fn pre_turn_context_decision_real_api() {
         .expect("get_cache_stats 请求失败")
         .expect("应有响应帧");
     let stats = match stats_frame {
-        mistake_agent::kernel::rpc::RpcFrame::Response { result, error, .. } => {
+        mistake_agent::kernel::agent::rpc::RpcFrame::Response { result, error, .. } => {
             assert!(error.is_none(), "缓存统计不应报错：{error:?}");
             result.expect("应有统计结果")
         }
@@ -551,7 +551,7 @@ async fn switch_tool_call_not_polluting_next_context() {
             .expect("list_sessions 失败")
             .expect("应有响应帧");
         match frame {
-            mistake_agent::kernel::rpc::RpcFrame::Response { result, .. } => {
+            mistake_agent::kernel::agent::rpc::RpcFrame::Response { result, .. } => {
                 result.unwrap()["sessions"].as_array().unwrap().len()
             }
             _ => panic!("list_sessions 应返回 response 帧"),
@@ -595,7 +595,7 @@ async fn switch_tool_call_not_polluting_next_context() {
         .unwrap()
         .unwrap();
     let list = match list_frame {
-        mistake_agent::kernel::rpc::RpcFrame::Response { result, .. } => {
+        mistake_agent::kernel::agent::rpc::RpcFrame::Response { result, .. } => {
             result.expect("应有会话列表")
         }
         _ => panic!("list_sessions 应返回 response 帧"),
@@ -615,7 +615,7 @@ async fn switch_tool_call_not_polluting_next_context() {
         .unwrap()
         .unwrap();
     let detail = match detail_frame {
-        mistake_agent::kernel::rpc::RpcFrame::Response { result, .. } => {
+        mistake_agent::kernel::agent::rpc::RpcFrame::Response { result, .. } => {
             result.expect("应有会话详情")
         }
         _ => panic!("read_session 应返回 response 帧"),
