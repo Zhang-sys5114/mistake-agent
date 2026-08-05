@@ -5,7 +5,7 @@
 
 ## 背景
 
-M4 需要 `compute::verify` 在 GUI WebView 内的 Pyodide 执行 Python 验算。执行端与 kernel 分属两个进程（Tauri GUI ↔ sidecar），需要跨 stdio JSONL 的请求-回执协议。同时前端错题本页需要直接经 `trigger_command` 查询错题（`grading::list` 是工具而非命令）。
+M4 需要 `compute::verify` 在 GUI WebView 内的 Pyodide 执行 Python 验算。执行端与 kernel 原分属两个进程（Tauri GUI ↔ sidecar，2026-08-05 已改为进程内 kernel，请求-回执仍走同一事件协议），需要跨界的请求-回执协议。同时前端错题本页需要直接经 `trigger_command` 查询错题（`grading::list` 是工具而非命令）。
 
 ## 决策
 

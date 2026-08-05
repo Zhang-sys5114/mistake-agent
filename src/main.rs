@@ -1,6 +1,5 @@
 //! Tauri GUI 入口：kernel 直接运行在本进程内（standalone，无 sidecar 依赖）。
 //! GUI ↔ kernel 经内存通道桥接：前端请求 → Kernel::handle → 响应/事件帧 → Channel 回推。
-//! src/bin/sidecar.rs 保留为独立 CLI 调试入口，不再被 GUI 依赖。
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -11,8 +10,8 @@ use serde::Serialize;
 use tauri::{Manager, State, ipc::Channel};
 use tokio::sync::mpsc;
 
+use mistake_agent::kernel::agent::rpc::{Kernel, RpcFrame, RpcRequest};
 use mistake_agent::kernel::events::{Event, EventSink};
-use mistake_agent::kernel::rpc::{Kernel, RpcFrame, RpcRequest};
 
 /// 进程内桥接：前端 → kernel 的请求通道 + kernel 句柄。
 struct KernelBridge {
@@ -71,7 +70,7 @@ async fn start_kernel(app: tauri::AppHandle, on_frame: Channel<String>) -> Resul
     Ok(())
 }
 
-/// 前端请求 → kernel（一行 JSONL，语义与 sidecar 协议一致）。
+/// 前端请求 → kernel（一行 JSONL，协议帧格式与早期 sidecar 时代一致，前端零改动）。
 #[tauri::command]
 fn kernel_send(state: State<'_, KernelBridge>, line: String) -> Result<(), String> {
     state.req_tx.send(line).map_err(|e| e.to_string())

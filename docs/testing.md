@@ -47,7 +47,7 @@
 | # | 现象 | 根因 | 状态 |
 |---|---|---|---|
 | 1 | 英语合成卷 3 题中 1 道"本应正确"被判错 | 模型判分歧义（"sunny" vs "sun" 时态/词性判断），非链路故障；属模型行为，后续用判分 prompt 与样例校准 | 观察中 |
-| 2 | sidecar 管道 EOF 后回合被取消（DNS task cancelled） | 回合任务独立于 JoinSet，main 返回触发运行时关闭 | 已修：EOF 后轮询 `is_idle` 再退出 |
+| 2 | 回合任务独立于 JoinSet，main 返回触发运行时关闭 | 关闭时序导致回合被取消（DNS task cancelled） | 已修：关闭前轮询 `is_idle` 再退出 |
 | 3 | Tauri Channel<String> 交付字符串，UI 当对象用导致事件全丢 | 桥接类型不匹配 | 已修：JS 侧 JSON.parse |
 | 4 | 无 IPv6 环境 reqwest 连接失败 | 解析到 v6 后无回退 | 已修：客户端强制 IPv4 本地地址 |
 | 5 | flexi_logger 重复初始化报错 | 全局 logger 只能 init 一次 | 已修：OnceLock 幂等 |

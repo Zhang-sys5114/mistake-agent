@@ -29,9 +29,6 @@ cd web && npm install && npm run build && cd ..
 
 # 开发运行
 cargo run --bin mistake-agent
-
-# 只跑 kernel（CLI）
-cargo run --bin sidecar
 ```
 
 ## 3. 界面操作
@@ -50,16 +47,7 @@ cargo run --bin sidecar
 - **验算**：让 Agent 验算数学题（如"用 Python 验证 3x+5=11 的解"），Agent 调 `compute::verify`，代码在应用内 Pyodide（WASM 沙箱）执行。
 - **练习/复盘/组卷/追踪**：聊天里说"生成一道全等三角形变式题 / 给我周复盘 / 出 5 道薄弱点试卷 / 检查我的掌握度"，Agent 分别调 `practice::generate`、`report::weekly`、`exam::compose`、`tracking::checkin`。
 
-## 4. sidecar CLI 用法（独立调试入口）
-
-```bash
-printf '%s\n' '{"id":1,"method":"send_user_message","text":"你好"}' | cargo run --bin sidecar
-```
-
-stdout 输出 JSONL 帧（response + event），stderr 输出日志（WARN 及以上）。
-GUI 已改为进程内 kernel（standalone），不再需要 sidecar 与主程序同目录；该 CLI 仅用于脚本调试与管道测试。
-
-## 5. 数据与产物
+## 4. 数据与产物
 
 | 路径 | 内容 |
 |---|---|
@@ -70,7 +58,7 @@ GUI 已改为进程内 kernel（standalone），不再需要 sidecar 与主程�
 | audit/audit.jsonl | 审计（10MB 轮转） |
 | logs/ | 分级诊断日志（10MB 轮转） |
 
-## 6. 常见问题
+## 5. 常见问题
 
 - 发送后没反应：确认右上角状态为"就绪"（内核自检通过）；查看 `~/Documents/.mistake-agent/logs/` 诊断日志。
 - 扫描版 PDF：提示不支持，请拍照成图片再上传。

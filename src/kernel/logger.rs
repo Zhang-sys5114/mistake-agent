@@ -95,8 +95,8 @@ fn init_once(level: Level, dir: &Path) -> Result<(), String> {
             Naming::Numbers,
             Cleanup::KeepLogFiles(5),
         )
-        // 双输出：WARN 及以上同步重复到 stderr（参考 ret2shell 多输出；绝不写 stdout，
-        // 因为 sidecar 的 stdout 是 RPC JSONL 通道）。
+        // 双输出：WARN 及以上同步重复到 stderr（参考 ret2shell 多输出；不写 stdout，
+        // stdout 不承载日志，避免与 GUI 进程输出混淆）。
         .duplicate_to_stderr(Duplicate::Warn)
         .write_mode(WriteMode::BufferAndFlush)
         .start()

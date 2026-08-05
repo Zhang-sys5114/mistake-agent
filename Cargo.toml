@@ -12,10 +12,6 @@ path = "src/lib.rs"
 name = "mistake-agent"
 path = "src/main.rs"
 
-[[bin]]
-name = "sidecar"
-path = "src/bin/sidecar.rs"
-
 [dependencies]
 async-trait = "0.1.91"
 base64 = "0.23.0"

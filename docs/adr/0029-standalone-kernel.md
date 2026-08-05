@@ -3,6 +3,8 @@
 日期：2026-08-04
 状态：已采纳
 
+> 更新（2026-08-05）：sidecar 已**彻底移除**——`src/bin/sidecar.rs` 与 Cargo 的 sidecar bin 条目删除，协议帧格式保持不变（前端零改动），mistake-agent 成为唯一二进制交付物。
+
 ## 背景
 
 M3 起 GUI 通过拉起独立 `sidecar` 进程（stdio JSONL）与 kernel 通信，mistake-agent 运行强依赖同目录存在 sidecar 二进制。用户明确要求：**不允许该依赖，mistake-agent 必须 standalone（单二进制即可运行）**。
