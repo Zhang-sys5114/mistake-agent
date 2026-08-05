@@ -159,7 +159,7 @@ mod tests {
         let items = messages_to_responses_input(&[user, call]).unwrap();
         assert_eq!(items.len(), 3);
         assert_eq!(items[1]["type"], "function_call");
-        assert_eq!(items[1]["name"], "demo_hello");
+        assert_eq!(items[1]["name"], "demo__hello");
         assert_eq!(items[2]["type"], "function_call_output");
     }
 

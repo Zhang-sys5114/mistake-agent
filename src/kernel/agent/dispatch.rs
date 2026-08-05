@@ -169,7 +169,7 @@ impl Dispatch {
         result
     }
 
-    /// wire name → 内部全名（Q7：模型调用的是 `namespace_tool`）。
+    /// wire name → 内部全名（Q7：模型调用的是 `namespace__tool`，`::` → `__`）。
     pub fn resolve_wire(&self, wire: &str) -> Option<String> {
         self.registry.resolve_wire(wire)
     }

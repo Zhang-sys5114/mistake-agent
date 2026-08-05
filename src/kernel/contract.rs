@@ -205,9 +205,12 @@ pub fn empty_params() -> Schema {
     schemars::json_schema!({"type": "object"})
 }
 
-/// 全名 → wire name（`::` → `_`，ADR-0020）。
+/// 全名 → wire name（`::` → `__`，ADR-0020）：
+/// 双下划线让 `a::b_c`（→ `a__b_c`）与 `a_b::c`（→ `a_b__c`）不再撞名，
+/// 插件内部的下划线得以保留；真正撞名只剩 `a::b__c` vs `a__b::c` 这类
+/// 病态组合，仍由注册期全局唯一校验兜底。
 pub fn full_to_wire(full: &str) -> String {
-    full.replace("::", "_")
+    full.replace("::", "__")
 }
 
 /// 内部全名：`namespace::short`。

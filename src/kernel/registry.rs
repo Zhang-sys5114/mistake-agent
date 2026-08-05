@@ -299,6 +299,33 @@ impl Registry {
     }
 
     pub fn resolve_wire(&self, wire: &str) -> Option<String> {
+        {
+            let map = self.wire_to_full.read().expect("registry poisoned");
+            if let Some(full) = map.get(wire) {
+                return Some(full.clone());
+            }
+        }
+        // 懒插件尚未注册：按 info 声明的 wire 名反查命中 → 触发懒加载后再查。
+        // 模型只能拿到声明过的工具，wire 名不会凭空出现（Q4 语义）。
+        let namespace = {
+            let entries = self.entries.read().expect("registry poisoned");
+            entries.values().find_map(|e| {
+                let hit =
+                    e.info
+                        .tools
+                        .iter()
+                        .any(|t| full_to_wire(&full_name(&e.info.namespace, &t.name)) == wire)
+                        || e.info
+                            .commands
+                            .iter()
+                            .any(|c| full_to_wire(&full_name(&e.info.namespace, &c.name)) == wire)
+                        || e.info.events.iter().any(|ev| {
+                            full_to_wire(&full_name(&e.info.namespace, &ev.name)) == wire
+                        });
+                hit.then(|| e.info.namespace.clone())
+            })
+        }?;
+        let _ = self.load_plugin(&namespace);
         self.wire_to_full
             .read()
             .expect("registry poisoned")
@@ -315,19 +342,44 @@ impl Registry {
             .and_then(|e| e.icon.clone())
     }
 
+    /// 入口点展示标题（用户友好名；无 title 时回退短名；找不到返回 None）。
+    /// 读 info 元数据，懒加载插件未注册时也可用（force_tool 展示文本用）。
+    pub fn entry_title(&self, full: &str) -> Option<String> {
+        let entries = self.entries.read().expect("registry poisoned");
+        for e in entries.values() {
+            let ns = &e.info.namespace;
+            for t in &e.info.tools {
+                if full_name(ns, &t.name) == full {
+                    return Some(t.title.clone().unwrap_or_else(|| t.name.clone()));
+                }
+            }
+            for c in &e.info.commands {
+                if full_name(ns, &c.name) == full {
+                    return Some(c.title.clone().unwrap_or_else(|| c.name.clone()));
+                }
+            }
+        }
+        None
+    }
+
     /// 模型工具列表：只含 UserAndModel 工具，名字为 wire name（Q7/Q11）。
+    /// 读 info 声明（含未加载的懒插件）：模型第一轮即可见全部声明工具，
+    /// 调用时经 resolve_wire / ensure_tool 触发懒加载（ADR-0003 语义）。
     pub fn model_tools(&self) -> Vec<ToolSchema> {
-        self.handlers
-            .read()
-            .expect("registry poisoned")
-            .values()
-            .filter(|e| e.kind == EntryKind::Tool && e.policy == CallerPolicy::UserAndModel)
-            .map(|e| ToolSchema {
-                name: full_to_wire(&e.full_name),
-                description: e.description.clone(),
-                input_schema: serde_json::to_value(&e.params).unwrap_or_default(),
-            })
-            .collect()
+        let entries = self.entries.read().expect("registry poisoned");
+        let mut out = Vec::new();
+        for e in entries.values() {
+            for t in &e.info.tools {
+                if t.policy == CallerPolicy::UserAndModel {
+                    out.push(ToolSchema {
+                        name: full_to_wire(&full_name(&e.info.namespace, &t.name)),
+                        description: t.description.clone(),
+                        input_schema: serde_json::to_value(&t.params).unwrap_or_default(),
+                    });
+                }
+            }
+        }
+        out
     }
 
     pub fn namespaces(&self) -> Vec<String> {
@@ -432,25 +484,49 @@ mod tests {
     }
 
     #[test]
-    fn wire_collision_rejected() {
+    fn wire_name_mapping_separates_single_underscores() {
+        // 双下划线映射（ADR-0020）：a::b_c → a__b_c，a_b::c → a_b__c，不再撞名。
+        assert_eq!(full_to_wire("a::b_c"), "a__b_c");
+        assert_eq!(full_to_wire("a_b::c"), "a_b__c");
+
         let registry = Registry::new(ServiceHandles::default(), logger());
         let desc = PluginDescriptor {
             info: Info {
                 namespace: "a".into(),
-                tools: vec![
-                    tool_def("b_c", "t1", CallerPolicy::UserAndModel),
-                    tool_def("b", "t2", CallerPolicy::UserAndModel),
-                ],
+                tools: vec![tool_def("b_c", "t1", CallerPolicy::UserAndModel)],
                 ..Default::default()
             },
             register: |_| Ok(()),
         };
-        // a::b_c → a_b_c，与 a::b 不同 wire；真正冲突需 namespace 组合。
-        assert!(registry.register_plugin(desc).is_ok());
+        registry.register_plugin(desc).unwrap();
         let desc2 = PluginDescriptor {
             info: Info {
                 namespace: "a_b".into(),
-                tools: vec![tool_def("c", "t3", CallerPolicy::UserAndModel)],
+                tools: vec![tool_def("c", "t2", CallerPolicy::UserAndModel)],
+                ..Default::default()
+            },
+            register: |_| Ok(()),
+        };
+        registry.register_plugin(desc2).unwrap();
+    }
+
+    #[test]
+    fn double_underscore_wire_collision_rejected() {
+        // 病态组合仍撞：a::b__c → a__b__c 与 a__b::c → a__b__c，注册期全局校验兜底。
+        let registry = Registry::new(ServiceHandles::default(), logger());
+        let desc = PluginDescriptor {
+            info: Info {
+                namespace: "a".into(),
+                tools: vec![tool_def("b__c", "t1", CallerPolicy::UserAndModel)],
+                ..Default::default()
+            },
+            register: |_| Ok(()),
+        };
+        registry.register_plugin(desc).unwrap();
+        let desc2 = PluginDescriptor {
+            info: Info {
+                namespace: "a__b".into(),
+                tools: vec![tool_def("c", "t2", CallerPolicy::UserAndModel)],
                 ..Default::default()
             },
             register: |_| Ok(()),
@@ -501,7 +577,7 @@ mod tests {
         let entry = registry.ensure_tool("demo::hello").unwrap();
         assert_eq!(entry.full_name, "demo::hello");
         assert_eq!(registry.model_tools().len(), 1);
-        assert_eq!(registry.model_tools()[0].name, "demo_hello");
+        assert_eq!(registry.model_tools()[0].name, "demo__hello");
         // 重复注册被拒
         let desc2 = PluginDescriptor {
             info: Info {
@@ -515,6 +591,38 @@ mod tests {
             registry.register_plugin(desc2),
             Err(PluginError::NamespaceTaken(_))
         ));
+    }
+
+    #[test]
+    fn lazy_wire_resolution_loads_plugin_on_first_call() {
+        // 模型走 wire 名：未加载插件也能被解析（按 info 声明反查 → 懒加载），
+        // 解决「模型列表看不到懒插件 → 猜名调用 → unknown_tool」的问题。
+        let registry = Registry::new(ServiceHandles::default(), logger());
+        let desc = PluginDescriptor {
+            info: Info {
+                namespace: "demo".into(),
+                tools: vec![tool_def("hello", "x", CallerPolicy::UserAndModel)],
+                ..Default::default()
+            },
+            register: |ctx| {
+                ctx.registrar.tool(
+                    "hello",
+                    std::sync::Arc::new(|_ctx: &ToolCallContext, _p: Value| {
+                        Box::pin(async move { Ok(json!({"reply": "hi"})) })
+                    }),
+                )
+            },
+        };
+        registry.register_plugin(desc).unwrap();
+        assert!(registry.handlers.read().unwrap().is_empty());
+        // 未加载插件的声明工具仍在模型列表（懒加载发生在调用时）。
+        assert_eq!(registry.model_tools().len(), 1);
+        assert_eq!(registry.model_tools()[0].name, "demo__hello");
+        let full = registry
+            .resolve_wire("demo__hello")
+            .expect("懒加载后应可解析");
+        assert_eq!(full, "demo::hello");
+        assert_eq!(registry.handlers.read().unwrap().len(), 1);
     }
 
     #[test]
@@ -584,7 +692,7 @@ mod tests {
         let entry = registry.ensure_tool("kernel_demo::ping").unwrap();
         assert_eq!(entry.full_name, "kernel_demo::ping");
         assert_eq!(registry.model_tools().len(), 1);
-        assert_eq!(registry.model_tools()[0].name, "kernel_demo_ping");
+        assert_eq!(registry.model_tools()[0].name, "kernel_demo__ping");
     }
 
     #[test]
@@ -633,11 +741,11 @@ mod tests {
     #[test]
     fn kernel_and_user_wire_collision_rejected() {
         let registry = Registry::new(ServiceHandles::default(), logger());
-        // 内核插件 a::b_c 与用户插件 a_b::c 共享 wire a_b_c。
+        // 内核插件 a::b__c 与用户插件 a__b::c 共享 wire a__b__c（病态组合，仍全局唯一校验）。
         let kernel = KernelDescriptor {
             info: Info {
                 namespace: "a".into(),
-                tools: vec![tool_def("b_c", "t1", CallerPolicy::UserAndModel)],
+                tools: vec![tool_def("b__c", "t1", CallerPolicy::UserAndModel)],
                 ..Default::default()
             },
             register: |_| Ok(()),
@@ -645,7 +753,7 @@ mod tests {
         registry.register_kernel_plugin(kernel).unwrap();
         let user = PluginDescriptor {
             info: Info {
-                namespace: "a_b".into(),
+                namespace: "a__b".into(),
                 tools: vec![tool_def("c", "t2", CallerPolicy::UserAndModel)],
                 ..Default::default()
             },
