@@ -201,7 +201,7 @@ mistake-agent/
 - Tauri GUI 正式化（Vue 3 + Vite，按 ui-ux-pro-max 设计系统）：聊天/错题本/会话历史/设置四页 + **OOBE 首次引导**（test_connection 连通性自检）；思维链默认折叠、流式打字机、工具进度、停止、消息树编辑与分支切换、Pyodide 验算执行端（本地 WASM）、Iconify 图标、Markdown+KaTeX+DOMPurify 防 XSS、附件（图片/PDF 持久展示）、错题本搜索/排序。
 - 设置页余额卡片（`check_balance` RPC）：DeepSeek `/user/balance` + SiliconFlow `/user/info` 真实查询，只读不落盘（ADR-0031）。
 - **Standalone**：kernel 内嵌 GUI 进程，mistake-agent 单二进制即可运行（sidecar 已彻底移除）。
-- 验收命令：`cd web && npm install && npm run build`；`cargo test`（71 项单元）；`cargo test --test live_api -- --ignored`（真实 API：hello 落盘+usage、三套样例、memory 往返）；`cargo run --bin mistake-agent`（GUI）。
+- 验收命令：`cd web && npm install && npm run build`；`cargo test`（73 项单元）；`cargo test --test live_api -- --ignored`（真实 API：hello 落盘+usage、三套样例、memory 往返）；`cargo run --bin mistake-agent`（GUI）。
 
 ## 10. 里程碑
 
@@ -213,7 +213,7 @@ mistake-agent/
 | M3 | RPC + Tauri 壳 | ✅ 完成：GUI ↔ kernel 进程内 RPC 闭环（standalone） |
 | M4 | 五个插件 + compute::verify | ✅ 完成：6 用户插件 + 5 内核插件注册；场景一全链路 + Pyodide 验算桥接 |
 | M5 | 消息树 / 记忆路由 / 设置向导 / 审计日志 | ✅ 完成：编辑/切分支、memory 工具、设置页、审计补全 |
-| M6 | Windows 打包 + 测试 + 文档 | 🟡 除 Windows 打包外完成：54 单测 + 3 真实 API 链路 + 文档同步；setup.exe 待 Windows 环境 |
+| M6 | Windows 打包 + 测试 + 文档 | 🟡 除 Windows 打包外完成：73 单测 + 3 真实 API 链路 + 文档同步；setup.exe 待 Windows 环境 |
 
 ## 11. 分工建议（3-5 人）
 
@@ -226,6 +226,8 @@ mistake-agent/
 | E. 测试/打包（可兼任） | Windows 安装包、端到端样例、文档 | M6 |
 
 依赖关系：A+B 先行（M1-M2），D 可与 A 并行搭壳（M3 联调），C 依赖 M2 的 service 句柄，E 全程可跟进。
+
+插件开发手册：docs/plugin-dev/user.md（用户插件）与 docs/plugin-dev/kernel.md（内核插件）；参考模板 docs/plugin-dev/reference/（复制即开工，编译锚定测试保证与契约同步，ADR-0036）。
 
 ## 12. 命名规范
 

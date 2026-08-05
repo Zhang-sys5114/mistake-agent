@@ -12,6 +12,12 @@
 - **Python 验算**：`compute::verify` 在应用内 Pyodide（WASM 沙箱）执行。
 - **安全与鲁棒**：文件只经系统临时目录暂存、kernel 不读任意本地路径；守卫/摘要/回合对瞬时错误自动重试；审计默认全覆盖、日志脱敏。
 
+## 插件开发
+
+- 用户插件手册：[docs/plugin-dev/user.md](docs/plugin-dev/user.md)
+- 内核插件手册：[docs/plugin-dev/kernel.md](docs/plugin-dev/kernel.md)
+- 参考模板（复制即开工，构建期自动发现）：[docs/plugin-dev/reference/](docs/plugin-dev/reference/)
+
 ## 架构
 
 ```
