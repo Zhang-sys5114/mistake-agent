@@ -17,13 +17,13 @@
 
 | 场景 | 一句话 | 主要入口 |
 |---|---|---|
-| 1. 上传作业 / 自动批改 | 图片或 PDF 上传 → 视觉模型 OCR → 判分 → 错题自动归档 | `grading::*` |
+| 1. 上传作业 / 自动批改 | 图片或 PDF 上传 → 视觉模型理解图片（`vision::read`：作业转写 / 图片描述）→ 模型按内容与用户意图决定：讲解、描述或判分归档 | `vision::read` + `grading::*` |
 | 2. 薄弱点定位 / 分层练习 | 基于错题定位知识漏洞 → 基础补漏 → 变式 → 拔高 → 真题 | `practice::*` |
 | 3. 多周期复盘 | 按日 / 周 / 单元 / 月考 / 学期生成可视化报告 | `report::*` |
 | 4. 阶段性考核 | 按薄弱点自动组卷、限时作答、判分、掌握度判定 | `exam::*` |
 | 5. 长效追踪 | 知识点图谱、掌握度状态、7/14/30 天强制重测 | `tracking::*` |
 
-辅助能力：`compute::verify`（数学/物理验算，跑 Python 代码验证答案）、`memory::*`（跨会话记忆）。
+辅助能力：`vision::read`（图片理解：作业转写 / 内容描述）、`compute::verify`（数学/物理验算，跑 Python 代码验证答案）、`memory::*`（跨会话记忆）。
 
 ## 4. 总体架构：OS 式三层
 
@@ -71,7 +71,7 @@ CallerPolicy 过滤工具 schema → 流式解析（容灾）→ 调度守卫 + 
 ```
 v2 同一轮多个工具调用**串行执行**；并行列入后续（按依赖拓扑排序）。
 
-**显式 tool-calling（用户发起，不绕过 LLM）**：用户在输入框输入 `namespace::tool`（如 `practice::generate`），前端弹候选框、按 Tab 确认后进入待调用状态（工具徽章 + `<可选参数>` 占位）；发送时 RPC 携带 `force_tool {entry, hint}`，kernel 开回合并让模型**首轮强制调用该工具**（Responses API `tool_choice`，整回合 `thinking=none`），工具结果回填后由模型继续生成回复——所有内容输出都走聊天框 LLM 侧。工具清单/标题/分组/图标/参数说明/用法示例全部来自 `list_tools`（后端唯一事实源），前端不写死。
+**显式 tool-calling（用户发起，不绕过 LLM）**：用户在输入框输入 `namespace::tool`（如 `practice::generate`），前端弹候选框、按 Tab 确认后进入待调用状态（工具徽章 + `<可选参数>` 占位）；发送时 RPC 携带 `force_tool {entry, hint, display?}`（`display` = 前端原始展示文本，落盘为 user 消息的 `display_text`，重开会话后渲染仍友好；模型上下文仍用拼好的指令文本），kernel 开回合并让模型**首轮强制调用该工具**（Responses API `tool_choice`，整回合 `thinking=none`），工具结果回填后由模型继续生成回复——所有内容输出都走聊天框 LLM 侧。工具清单/标题/分组/图标/参数说明/用法示例全部来自 `list_tools`（后端唯一事实源），前端不写死（工具名 → 标题/图标的映射一律不允许在前端维护）。
 
 ### 会话与消息树
 - 会话调度由独立内核级模块（Session scheduler）承担：平台层按来源派生 SessionKey（v2 独立 App 即单键）；任务层由**主模型**决策（ADR-0030/0032）——**新消息到达先判断要不要切换上下文，再进入回合回答**；回合中可经 `session::switch` 工具主动切换；回合结束由 LlmTurnDecider 判断 continue / update_goal / start_new。判断依据是**会话目标（Goal）**（start_new 时主模型生成并写入会话元数据）。三动作：`continue`（目标不变）、`update_goal`（同会话内改写/细化 Goal，如"录入错题"→"讲解已录入的错题"）、`start_new`（仅当新目标明显无关且不依赖当前会话上下文）；偏向规则为**存疑即继续**，避免切换丢失上下文。切换时旧会话归档，新会话注入旧会话**梗概**与最近消息副本（豆包式无感切换），并暴露历史路由（session::history / session::read）供模型按需翻阅完整旧记录；带频率护栏（1 小时 5 次），决策失败默认 continue。
@@ -138,7 +138,7 @@ GUI → kernel：`send_user_message`、`trigger_command(entry, params)`、`edit_
 | 会话状态 | 无状态：不支持 `previous_response_id`/`conversation`/`store`，每回合发全量历史 |
 | 流式 | SSE 语义事件，`response.completed`/`incomplete`/`failed` 结束，无 `data: [DONE]` |
 | 思考模式 | 默认开启（`reasoning` 可调 effort）；thinking 下 `temperature`/`top_p` 无效 |
-| 工具 | `function` / `web_search`；function 名限 `^[a-zA-Z0-9_-]+$` → 内部 `namespace::tool` 经 wire name 映射（`::`→`_`） |
+| 工具 | `function` / `web_search`；function 名限 `^[a-zA-Z0-9_-]+$` → 内部 `namespace::tool` 经 wire name 映射（`::`→`__`） |
 | 并行工具调用 | 恒开启（参数被忽略）；v2 loop 仍串行执行（ADR-0010） |
 | 图片输入 | 不支持（占位替换）→ 视觉模型走 Chat Completions |
 | 来源 | [官方指南（英）](https://api-docs.deepseek.com/guides/responses_api/) / [（中）](https://api-docs.deepseek.com/zh-cn/guides/responses_api/)，2026-08-04 核对 |
@@ -196,7 +196,7 @@ mistake-agent/
 - 会话切换决策归主模型（ADR-0030/0032）：新消息先判断是否切换上下文、回合内 session::switch、回合末 LlmTurnDecider；消息树编辑/切分支（derive_branch/switch_branch）、上下文压缩（75% 阈值、最近 15 条保留）、InterruptBus 回合边界消费全部落地；审计记录点补齐（含 SessionSwitched/Memory*/SettingsChanged/Interrupt/MessageEdited/BranchSwitched）。
 - 聊天页上下文缓存命中率（ADR-0033）：get_cache_stats 按会话 + 全局聚合主模型回合 usage（Responses `cached_tokens` / Chat Completions `prompt_cache_*`）；真实链路实测命中率 97.3%（命中 4864 / 未命中 190 tokens）。
 - 会话切换防污染（ADR-0034）：session::switch 控制消息不落会话树、不随历史携带，切换后回答归新会话；真实链路实测后续回合不再反复切换。
-- 用户插件 6 个：hello、grading（场景一：上传→OCR→判分→错题归档，输出 subject/reference_answer）、practice、report、exam、tracking；内核插件 5 个（storage/memory/compute/model/session），`memory::*`、`compute::verify`、`session::switch` 由内核模块经 KernelPlugin 契约注册（ADR-0035）——五个场景工具均可从会话内触达。
+- 用户插件 7 个：hello、vision（看图理解：上传→读图→模型决定讲解/描述或判分归档）、grading（场景一：判分归档，输出 subject/reference_answer）、practice、report、exam、tracking；内核插件 5 个（storage/memory/compute/model/session），`memory::*`、`compute::verify`、`session::switch` 由内核模块经 KernelPlugin 契约注册（ADR-0035）——五个场景工具均可从会话内触达。
 - 场景一真实链路复验通过（2026-08-04）：图片/文本 PDF → Qwen3-VL OCR → deepseek-v4-flash（Responses API json_schema）判分 → 错题归档；assistant 消息落盘与 usage 解析已修复并有 live_api 断言。
 - Tauri GUI 正式化（Vue 3 + Vite，按 ui-ux-pro-max 设计系统）：聊天/错题本/会话历史/设置四页 + **OOBE 首次引导**（test_connection 连通性自检）；思维链默认折叠、流式打字机、工具进度、停止、消息树编辑与分支切换、Pyodide 验算执行端（本地 WASM）、Iconify 图标、Markdown+KaTeX+DOMPurify 防 XSS、附件（图片/PDF 持久展示）、错题本搜索/排序。
 - 设置页余额卡片（`check_balance` RPC）：DeepSeek `/user/balance` + SiliconFlow `/user/info` 真实查询，只读不落盘（ADR-0031）。
@@ -231,11 +231,11 @@ mistake-agent/
 
 ## 12. 命名规范
 
-- 入口点命名：`namespace::tool`——插件只写短名（`upload`），kernel 拼全名（`grading::upload`），撞名从机制上不可能；模型可见名经 wire name 映射（`::`→`_`，如 `grading::upload` → `grading_upload`），内部名、审计名与 `trigger_command` 不变（ADR-0020）。
+- 入口点命名：`namespace::tool`——插件只写短名（`upload`），kernel 拼全名（`grading::upload`），撞名从机制上不可能；模型可见名经 wire name 映射（`::`→`__`，如 `grading::upload` → `grading__upload`），内部名、审计名与 `trigger_command` 不变（ADR-0020）。
 - 三类入口点：**Tool**（LLM 调度）、**Command**（GUI/用户调度）、**Event**（kernel 生命周期调度）。
 - 内核服务：`ServiceId::{Storage, Memory, Compute, Model}`；内核插件经 `KernelPlugin` 两段式契约注册（info 声明 namespace/provides/入口点，register 绑定 handler，ADR-0035）。
 - 会话调度是独立内核级模块（kernel-session），**不占 ServiceId**；切换决策由主模型完成（LlmTurnDecider，失败降级 continue）。
-- 工具列表示例：`grading::upload / grading::list / practice::generate / report::weekly / exam::compose / tracking::checkin / compute::verify / memory::save / memory::show / memory::remove`；会话历史经 RPC `list_sessions / read_session` 提供（不注册为模型工具）。
+- 工具列表示例：`vision::read / grading::upload / grading::list / practice::generate / report::weekly / exam::compose / tracking::checkin / compute::verify / memory::save / memory::show / memory::remove`；会话历史经 RPC `list_sessions / read_session` 提供（不注册为模型工具）。
 
 ## 13. 术语表（浓缩）
 

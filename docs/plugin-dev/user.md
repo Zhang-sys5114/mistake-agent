@@ -69,7 +69,8 @@ Arc::new(|call_ctx: &ToolCallContext, params: Value| Box::pin(async move { ... }
 - **Tool**：模型可调 + 用户可调（`UserAndModel`），或仅用户可调（`UserOnly`，不出现在模型工具列表、调度层再拒一次——双墙）。
 - **Command**：恒为 `UserOnly`，GUI 经 `trigger_command` 触发；找不到 Command 时回退放行同名 Tool。
 - **Event**：kernel 生命周期回调，不对外暴露。
-- 模型看到的工具名是 wire name：`namespace::tool` → `namespace_tool`（`::` 变 `_`）。
+- 模型看到的工具名是 wire name：`namespace::tool` → `namespace__tool`（`::` 变 `__`，双下划线；插件内部的下划线不会与分隔符撞名）。
+- **前端展示元数据唯一事实源是 `list_tools`**：新增/修改工具后前端零改动，标题、分组、图标、描述、参数标签全部由后端 `Info` 下发；不要在前端维护工具名 → 标题/图标的映射（web/src/lib/messages.js 等渲染库也不例外），渲染时缺失元数据回退显示 entry 名即可。
 
 ## 6. 注册校验（启动时 fail-fast）
 
@@ -78,7 +79,7 @@ Arc::new(|call_ctx: &ToolCallContext, params: Value| Box::pin(async move { ... }
 - `NamespaceTaken`：namespace 或目录名撞车；
 - `CapabilityUnavailable`：`requires` 声明了不存在的服务；
 - `UndeclaredEntry`：register 里登记了 info 没声明的短名；
-- `WireNameCollision`：两个入口映射到同一个 wire name（如 `a::b_c` 与 `a_b::c`）。
+- `WireNameCollision`：两个入口映射到同一个 wire name（如 `a::b__c` 与 `a__b::c`）。
 
 ## 7. 参考
 

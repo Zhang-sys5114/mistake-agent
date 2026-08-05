@@ -50,6 +50,10 @@ _Avoid_: 积极性（口语）
 工具在 info 中声明的元数据条目：短名、描述、参数 schema；实际执行由 register 阶段绑定的 handler 完成。
 _Avoid_: 工具（指调用实例）
 
+**Tool catalog（工具目录）**:
+前端可见工具元数据（标题/分组/图标/描述/参数 schema）的唯一事实源，经 `list_tools` RPC 由 kernel 下发；前端不得自行维护工具名 → 展示信息映射。
+_Avoid_: 前端工具表、硬编码图标/标题
+
 **EntryPoint（入口点）**:
 用户插件向 kernel 登记的调用入口，共三类：Tool（LLM 调度）、Command（GUI/用户调度）、Event（kernel 生命周期调度）。
 _Avoid_: 回调（只指其中一类）、接口
@@ -83,7 +87,7 @@ _Avoid_: 迁移、续传
 _Avoid_: 事件（Event 指面向 GUI 的播报）
 
 **Wire name（模型可见名）**:
-内部规范名 namespace::tool 经 :: → _ 映射后发给模型的工具名（如 grading::upload → grading_upload），函数名受 OpenAI 系 API 的 ^[a-zA-Z0-9_-]+$ 约束；内部名、审计名与 trigger_command 不变。
+内部规范名 namespace::tool 经 :: → __（双下划线）映射后发给模型的工具名（如 grading::upload → grading__upload），函数名受 OpenAI 系 API 的 ^[a-zA-Z0-9_-]+$ 约束；内部名、审计名与 trigger_command 不变。
 _Avoid_: 全名（指内部 namespace::tool）
 
 **Session scheduler（会话调度）**:
