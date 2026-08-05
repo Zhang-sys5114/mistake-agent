@@ -105,7 +105,14 @@ pub(crate) fn stage_path_allowed(path: &Path) -> bool {
     let Some(name) = canonical.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
-    canonical.starts_with(std::env::temp_dir()) && name.starts_with("mistake-agent-")
+
+    let temp = std::env::temp_dir();
+    // 使用 canonicalize 统一比较
+    let Ok(temp_canonical) = dunce::canonicalize(&temp) else {
+        return false;
+    };
+
+    canonical.starts_with(&temp_canonical) && name.starts_with("mistake-agent-")
 }
 
 /// 图片理解：视觉模型按内容类型处理（作业转写 / 图片描述），不判分（用户明确要求）。
