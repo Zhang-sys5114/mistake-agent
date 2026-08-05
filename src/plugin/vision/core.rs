@@ -97,9 +97,13 @@ pub(crate) async fn read_content(
 }
 
 /// 安全白名单：只允许系统临时目录下 GUI 暂存的文件（mistake-agent- 前缀）。
-/// canonicalize 防止符号链接逃逸到任意路径。
+/// 文件与临时目录都用 dunce::canonicalize 统一规范化：
+/// Windows 上 std::fs::canonicalize 会返回带 `\\?\` verbatim 前缀的路径，
+/// 与未带前缀的临时目录路径比较时 starts_with 永远为 false（Prefix::VerbatimDisk
+/// ≠ Prefix::Disk）。dunce 规范化后再去掉 `\\?\`，两侧一致才能正确比较。
+/// canonicalize 同时防止符号链接逃逸到任意路径。
 pub(crate) fn stage_path_allowed(path: &Path) -> bool {
-    let Ok(canonical) = path.canonicalize() else {
+    let Ok(canonical) = dunce::canonicalize(path) else {
         return false;
     };
     let Some(name) = canonical.file_name().and_then(|n| n.to_str()) else {
@@ -107,7 +111,6 @@ pub(crate) fn stage_path_allowed(path: &Path) -> bool {
     };
 
     let temp = std::env::temp_dir();
-    // 使用 canonicalize 统一比较
     let Ok(temp_canonical) = dunce::canonicalize(&temp) else {
         return false;
     };
