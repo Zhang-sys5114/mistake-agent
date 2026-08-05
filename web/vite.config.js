@@ -1,11 +1,21 @@
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
-import { cpSync, existsSync, readFileSync } from "node:fs";
+import { cpSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
 const pyodideDir = join(root, "node_modules/pyodide");
+const REQUIRED_PYODIDE_PACKAGES = ["mpmath", "sympy", "numpy"];
+
+/** 离线 wheel 是否已预热（npm run fetch:pyodide 会缓存到 node_modules/pyodide/）。 */
+function pyodidePackagesReady() {
+  if (!existsSync(pyodideDir)) return false;
+  const files = readdirSync(pyodideDir);
+  return REQUIRED_PYODIDE_PACKAGES.every((p) =>
+    files.some((f) => f.startsWith(`${p}-`) && f.endsWith(".whl")),
+  );
+}
 
 const mime = {
   ".wasm": "application/wasm",
@@ -43,6 +53,13 @@ function pyodideAssets() {
         res.setHeader("Cache-Control", "no-cache");
         res.end(readFileSync(file));
       });
+    },
+    buildStart() {
+      if (!pyodidePackagesReady()) {
+        throw new Error(
+          "缺少 Pyodide 离线包（numpy/sympy/mpmath）：请先运行 npm run fetch:pyodide，再重新构建",
+        );
+      }
     },
     closeBundle() {
       cpSync(pyodideDir, join(root, "dist/pyodide"), { recursive: true });

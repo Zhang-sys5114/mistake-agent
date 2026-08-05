@@ -7,6 +7,9 @@ async function loadPyodideOnce() {
   if (!pyodidePromise) {
     pyodidePromise = import("pyodide").then(async (mod) => {
       const py = await mod.loadPyodide({ indexURL: "/pyodide/" });
+      // 符号计算（sympy）与数值计算（numpy）：wheel 已随 dist/pyodide 离线打包，
+      // loadPackage 本地优先，无网络也能加载（缺失时明确报错，见 fetch:pyodide）。
+      await py.loadPackage(["numpy", "sympy"]);
       return py;
     });
   }

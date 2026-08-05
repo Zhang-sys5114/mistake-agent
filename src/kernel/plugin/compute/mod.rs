@@ -137,7 +137,7 @@ impl KernelPlugin for ComputePlugin {
                 user_visible: false,
                 title: Some("数学验算（高级）".into()),
                 group: Some("学习".into()),
-                description: "运行 Python 代码验算数学/物理答案（本地 Pyodide 沙箱，无文件/网络）。用法：compute::verify <Python 代码>"
+                description: "在本地 Pyodide 沙箱（无文件、无网络）中运行 Python 代码并返回 stdout/stderr，用于数学/物理答案验算。内置 numpy（数值计算）与 sympy（符号计算：解方程/求导/积分/单位换算），代码须为完整可执行的 Python 语句，例如 print(17*19) 或 import sympy as sp; x=sp.symbols('x'); print(sp.solve(x**2-5*x+6, x))。"
                     .into(),
                 params: schemars::schema_for!(VerifyParams),
                 policy: CallerPolicy::UserAndModel,

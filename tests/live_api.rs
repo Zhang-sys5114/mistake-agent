@@ -9,7 +9,7 @@ use std::time::Duration;
 use mistake_agent::kernel::agent::dispatch::Caller;
 use mistake_agent::kernel::agent::rpc::{ForcedToolRequest, Kernel, Method, RpcRequest};
 use mistake_agent::kernel::agent::session::SessionKey;
-use mistake_agent::kernel::events::MemoryEventSink;
+use mistake_agent::kernel::events::{Event, MemoryEventSink};
 use mistake_agent::kernel::settings::Settings;
 use serde_json::json;
 
@@ -660,4 +660,82 @@ async fn switch_tool_call_not_polluting_next_context() {
         "session::switch 防污染真实链路通过：活动会话 {} 条消息，无切换控制消息，后续回合不再切换",
         msgs.len()
     );
+}
+
+/// compute::verify 全链路（kernel → GUI 桥 → 回执 → 模型续答）：
+/// 测试模拟 GUI 执行端——收到 Event::ComputeRequest 后经 Method::ComputeResult 回执，
+/// 与前端 Pyodide 自检（web/scripts/pyodide-check.mjs）互补覆盖整条验算链路。
+#[tokio::test]
+#[ignore]
+async fn compute_verify_roundtrip_real_api() {
+    if !real_api_ready() {
+        eprintln!("SKIP: 未配置真实 API key");
+        return;
+    }
+    let events = Arc::new(MemoryEventSink::default());
+    let kernel = Kernel::new(events.clone()).await.expect("kernel 启动失败");
+    let req = RpcRequest {
+        id: 1,
+        method: Method::SendUserMessage {
+            text: "请用 compute::verify 验算 17 × 19，然后把结果告诉我。".into(),
+            force_tool: Some(ForcedToolRequest {
+                entry: "compute::verify".into(),
+                hint: Some("17*19".into()),
+                display: None,
+            }),
+            file: vec![],
+            asset: vec![],
+        },
+    };
+    let frame = kernel.handle(req).await.expect("请求失败");
+    assert!(
+        serde_json::to_string(&frame)
+            .unwrap()
+            .contains("\"accepted\":true"),
+        "回合应被接受"
+    );
+
+    // 模拟 GUI 执行端：捕获 ComputeRequest 事件并经 RPC 回执固定 stdout。
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let mut delivered = false;
+    while tokio::time::Instant::now() < deadline {
+        let evs = events.take();
+        if let Some((id, code)) = evs.into_iter().find_map(|e| match e {
+            Event::ComputeRequest { id, code } => Some((id, code)),
+            _ => None,
+        }) {
+            assert!(!code.trim().is_empty(), "模型生成的验算代码不应为空");
+            kernel
+                .handle(RpcRequest {
+                    id: 900,
+                    method: Method::ComputeResult {
+                        id,
+                        stdout: "323".into(),
+                        stderr: String::new(),
+                        duration_ms: 5,
+                    },
+                })
+                .await
+                .expect("compute_result 回执失败");
+            delivered = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(delivered, "60s 内未收到 compute_request 事件");
+    assert!(
+        wait_idle(&kernel, Duration::from_secs(120)).await,
+        "回合 120s 内未结束"
+    );
+
+    // 回合内应真实发生过 compute::verify 工具调用且成功。
+    let evs = events.take();
+    assert!(
+        evs.iter().any(|e| matches!(
+            e,
+            Event::ToolEnd { entry, ok: true } if entry == "compute::verify"
+        )),
+        "应有 compute::verify 成功事件"
+    );
+    eprintln!("compute::verify 全链路通过：事件→回执→工具成功→模型续答");
 }

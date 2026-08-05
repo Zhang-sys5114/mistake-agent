@@ -61,10 +61,14 @@ Kernel（agent loop · 工具注册与调度 · 会话调度（主模型决策�
 ### 构建与运行
 
 ```bash
-cd web && npm install && npm run build && cd ..
+cd web && npm install && npm run fetch:pyodide && npm run build && cd ..
 cargo build --bins
 ./target/debug/mistake-agent
 ```
+
+> `npm run fetch:pyodide` 预热 numpy/sympy 离线包（构建期必需，产物随 dist/pyodide 打包，运行期不依赖 CDN）。
+>
+> 完整构建流程（含 Pyodide 离线包说明、常见问题）见 [docs/build.md](docs/build.md)。
 
 ### 开发命令
 
@@ -74,6 +78,7 @@ cargo test --test live_api -- --ignored     # 真实 API 集成测试（需已�
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 cd web && npm run build                     # 前端构建
+cd web && npm run check:pyodide             # Pyodide 真实执行自检（算术/符号计算/物理/numpy）
 cd web && node scripts/katex-check.mjs      # LaTeX 渲染链路自检
 ```
 
@@ -94,6 +99,7 @@ cd web && node scripts/katex-check.mjs      # LaTeX 渲染链路自检
 - [PROJECT.md](PROJECT.md) — 项目总览（唯一入门文档）
 - [CONTEXT.md](CONTEXT.md) — 术语表
 - [docs/api.md](docs/api.md) — GUI ↔ kernel RPC 协议与真实模型对接
+- [docs/build.md](docs/build.md) — 构建流程与 Pyodide 离线包步骤
 - [docs/adr/](docs/adr/) — 架构决策记录（37 条）
 - [docs/plan/so-lite-agent.md](docs/plan/so-lite-agent.md) — Agent core 剥离后续计划（ADR-0037，未落地）
 - [docs/prompts.md](docs/prompts.md) / [docs/testing.md](docs/testing.md) — Prompt 与测试记录

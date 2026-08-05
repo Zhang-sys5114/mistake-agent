@@ -201,12 +201,13 @@ mistake-agent/
 - 会话切换决策归主模型（ADR-0030/0032）：新消息先判断是否切换上下文、回合内 session::switch、回合末 LlmTurnDecider；消息树编辑/切分支（derive_branch/switch_branch）、上下文压缩（75% 阈值、最近 15 条保留）、InterruptBus 回合边界消费全部落地；审计记录点补齐（含 SessionSwitched/Memory*/SettingsChanged/Interrupt/MessageEdited/BranchSwitched）。
 - 聊天页上下文缓存命中率（ADR-0033）：get_cache_stats 按会话 + 全局聚合主模型回合 usage（Responses `cached_tokens` / Chat Completions `prompt_cache_*`）；真实链路实测命中率 97.3%（命中 4864 / 未命中 190 tokens）。
 - 会话切换防污染（ADR-0034）：session::switch 控制消息不落会话树、不随历史携带，切换后回答归新会话；真实链路实测后续回合不再反复切换。
+- Pyodide 验算执行端完整化：numpy/sympy（符号计算/物理单位）离线打包（`npm run fetch:pyodide` 预热，vite 构建校验存在性）；前端自检真实执行解方程/求导/积分/单位换算/运动学/numpy；live_api 覆盖 kernel→桥→回执→模型续答全链路。
 - 用户插件 7 个：hello、vision（看图理解：上传→读图→模型决定讲解/描述或判分归档）、grading（场景一：判分归档，输出 subject/reference_answer）、practice、report、exam、tracking；内核插件 5 个（storage/memory/compute/model/session），`memory::*`、`compute::verify`、`session::switch` 由内核模块经 KernelPlugin 契约注册（ADR-0035）——五个场景工具均可从会话内触达。
 - 场景一真实链路复验通过（2026-08-04）：图片/文本 PDF → Qwen3-VL OCR → deepseek-v4-flash（Responses API json_schema）判分 → 错题归档；assistant 消息落盘与 usage 解析已修复并有 live_api 断言。
 - Tauri GUI 正式化（Vue 3 + Vite，按 ui-ux-pro-max 设计系统）：聊天/错题本/会话历史/设置四页 + **OOBE 首次引导**（test_connection 连通性自检）；思维链默认折叠、流式打字机、工具进度、停止、消息树编辑与分支切换、Pyodide 验算执行端（本地 WASM）、Iconify 图标、Markdown+KaTeX+DOMPurify 防 XSS、附件（图片/PDF 持久展示）、错题本搜索/排序。
 - 设置页余额卡片（`check_balance` RPC）：DeepSeek `/user/balance` + SiliconFlow `/user/info` 真实查询，只读不落盘（ADR-0031）。
 - **Standalone**：kernel 内嵌 GUI 进程，mistake-agent 单二进制即可运行（sidecar 已彻底移除）。
-- 验收命令：`cd web && npm install && npm run build`；`cargo test`（80 项单元）；`cargo test --test live_api -- --ignored`（真实 API：hello 落盘+usage、三套样例、memory 往返、reasoning 回传回归 repro_reasoning）；`cargo run --bin mistake-agent`（GUI）。
+- 验收命令：`cd web && npm install && npm run fetch:pyodide && npm run build`；`cd web && npm run check:pyodide`；`cargo test`（80 项单元）；`cargo test --test live_api -- --ignored`（真实 API：hello 落盘+usage、三套样例、memory 往返、reasoning 回传回归 repro_reasoning、compute::verify 全链路）；`cargo run --bin mistake-agent`（GUI）。
 
 ## 10. 里程碑
 
