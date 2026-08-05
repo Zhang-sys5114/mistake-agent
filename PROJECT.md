@@ -45,7 +45,8 @@
 │  memory 记忆路由 · model 模型服务（双模型）           │
 ├─────────────────────────────────────────────────────┤
 │ 用户插件（业务，只见受限服务句柄）                    │
-│  grading · practice · report · exam · tracking       │
+│  vision · grading · practice · report               │
+│  exam · tracking                                    │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -166,6 +167,7 @@ GUI → kernel：`send_user_message`、`trigger_command(entry, params)`、`edit_
 ```
 mistake-agent/
 ├── CONTEXT.md / docs/adr/        ← 术语表与决策留痕（本项目历史）
+├── docs/plan/                    ← 后续计划（so-lite-agent 剥离，ADR-0037）
 ├── Cargo.toml                    ← 单 crate（edition = "2024"，唯一 bin：mistake-agent GUI）
 ├── src/
 │   ├── lib.rs                    ← 库出口（kernel 公开面 + plugin 注册聚合）
@@ -182,7 +184,7 @@ mistake-agent/
 │   │   ├── registry.rs  contract.rs  context.rs
 │   │   └── events.rs  audit.rs  logger.rs  message.rs  prompt.rs  settings.rs
 │   └── plugin.rs                 ← 用户插件入口（mod plugin;）
-│       └── plugin/               ← 用户插件（hello/ grading/ practice/ report/ exam/ tracking/）
+│       └── plugin/               ← 用户插件（hello/ vision/ grading/ practice/ report/ exam/ tracking/）
 ├── web/                          ← GUI 前端资源（Tauri 加载）
 └── assets/
 ```
@@ -191,8 +193,11 @@ mistake-agent/
 
 ## 9. 当前状态
 
-- **M1–M6 主体已完成（除 Windows 打包）**，设计文档 35 条 ADR + 术语表（CONTEXT.md）。
+- **M1–M6 主体已完成（除 Windows 打包）**，设计文档 37 条 ADR（0001–0037）+ 术语表（CONTEXT.md）。
 - kernel：注册表/两段式契约（用户插件 UserPlugin + 内核插件 KernelPlugin，ADR-0035）/dispatch/loop/RPC/session 调度全链路；四服务全部生产实现——storage（文件持久化：会话 JSONL/错题 JSON/审计 JSONL 轮转）、memory（文件持久化 + MemoryHandle 事件/审计）、model（Responses API + Chat Completions，LiveSettingsModelService 热更新）、compute（BridgeCompute → GUI Pyodide）。
+- 构建期插件自动发现（ADR-0036）：插件目录 `mod.rs` 即插件描述、`disabled` 标记即禁用（不编译不注册）；插件开发手册 + 参考模板（docs/plugin-dev/，复制即开工，include! 编译锚定测试保证与契约同步）。
+- **后续计划（ADR-0037）**：Agent core 剥离为独立 crate `so-lite-agent`（参考 Pi 分层，开箱即用；内核/用户插件由使用方编写）——当前只计划不落地，详见 [docs/plan/so-lite-agent.md](plan/so-lite-agent.md)。
+- DeepSeek thinking 回传修复：并行工具调用回放按调用复制 reasoning item（实测 DeepSeek 要求每个 function_call 前都有 reasoning），仍被拒时兜底剥离 reasoning + `effort=none` 重试；真实 API 复验通过。
 - 会话切换决策归主模型（ADR-0030/0032）：新消息先判断是否切换上下文、回合内 session::switch、回合末 LlmTurnDecider；消息树编辑/切分支（derive_branch/switch_branch）、上下文压缩（75% 阈值、最近 15 条保留）、InterruptBus 回合边界消费全部落地；审计记录点补齐（含 SessionSwitched/Memory*/SettingsChanged/Interrupt/MessageEdited/BranchSwitched）。
 - 聊天页上下文缓存命中率（ADR-0033）：get_cache_stats 按会话 + 全局聚合主模型回合 usage（Responses `cached_tokens` / Chat Completions `prompt_cache_*`）；真实链路实测命中率 97.3%（命中 4864 / 未命中 190 tokens）。
 - 会话切换防污染（ADR-0034）：session::switch 控制消息不落会话树、不随历史携带，切换后回答归新会话；真实链路实测后续回合不再反复切换。
@@ -201,7 +206,7 @@ mistake-agent/
 - Tauri GUI 正式化（Vue 3 + Vite，按 ui-ux-pro-max 设计系统）：聊天/错题本/会话历史/设置四页 + **OOBE 首次引导**（test_connection 连通性自检）；思维链默认折叠、流式打字机、工具进度、停止、消息树编辑与分支切换、Pyodide 验算执行端（本地 WASM）、Iconify 图标、Markdown+KaTeX+DOMPurify 防 XSS、附件（图片/PDF 持久展示）、错题本搜索/排序。
 - 设置页余额卡片（`check_balance` RPC）：DeepSeek `/user/balance` + SiliconFlow `/user/info` 真实查询，只读不落盘（ADR-0031）。
 - **Standalone**：kernel 内嵌 GUI 进程，mistake-agent 单二进制即可运行（sidecar 已彻底移除）。
-- 验收命令：`cd web && npm install && npm run build`；`cargo test`（73 项单元）；`cargo test --test live_api -- --ignored`（真实 API：hello 落盘+usage、三套样例、memory 往返）；`cargo run --bin mistake-agent`（GUI）。
+- 验收命令：`cd web && npm install && npm run build`；`cargo test`（80 项单元）；`cargo test --test live_api -- --ignored`（真实 API：hello 落盘+usage、三套样例、memory 往返、reasoning 回传回归 repro_reasoning）；`cargo run --bin mistake-agent`（GUI）。
 
 ## 10. 里程碑
 
@@ -211,9 +216,11 @@ mistake-agent/
 | M1.5 | kernel 的 session 模块 | ✅ 完成：SessionKey、生命周期、交接摘要（LlmSummarizer） |
 | M2 | services：storage / model / memory | ✅ 完成：会话/审计文件持久化、双模型可调用（热更新）、记忆目录可读写 |
 | M3 | RPC + Tauri 壳 | ✅ 完成：GUI ↔ kernel 进程内 RPC 闭环（standalone） |
-| M4 | 五个插件 + compute::verify | ✅ 完成：6 用户插件 + 5 内核插件注册；场景一全链路 + Pyodide 验算桥接 |
+| M4 | 五个插件 + compute::verify | ✅ 完成：7 用户插件 + 5 内核插件注册；场景一全链路 + Pyodide 验算桥接 |
 | M5 | 消息树 / 记忆路由 / 设置向导 / 审计日志 | ✅ 完成：编辑/切分支、memory 工具、设置页、审计补全 |
-| M6 | Windows 打包 + 测试 + 文档 | 🟡 除 Windows 打包外完成：73 单测 + 3 真实 API 链路 + 文档同步；setup.exe 待 Windows 环境 |
+| M6 | Windows 打包 + 测试 + 文档 | 🟡 除 Windows 打包外完成：80 单测 + 真实 API 链路 + 文档同步；setup.exe 待 Windows 环境 |
+
+后续计划：**M7 = Agent core 剥离为 `so-lite-agent` crate**（ADR-0037，未落地）——参考 Pi 分层，开箱即用，内核/用户插件由使用方编写；实施顺序见 [docs/plan/so-lite-agent.md](plan/so-lite-agent.md)。
 
 ## 11. 分工建议（3-5 人）
 
