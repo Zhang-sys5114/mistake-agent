@@ -1,20 +1,21 @@
-//! grading 核心实现：上传 handler（OCR → 判分 → 归档）、路径白名单、进度播报。
+//! grading 核心实现：上传 handler（图片理解 → 判分 → 归档）、进度播报。
+//! 图片理解（读图/PDF）复用 vision 插件（crate::plugin::vision::read_content）。
 
-use base64::Engine;
 use serde_json::{Value, json};
-use std::path::Path;
 
 use crate::kernel::agent::dispatch::ToolCallContext;
 use crate::kernel::contract::ToolError;
 use crate::kernel::events::Event;
-use crate::kernel::message::{Attachment, Message, MessageKind};
+use crate::kernel::message::Message;
 use crate::kernel::plugin::services::{
     AbortSignal, Mistake, MistakeId, ModelHandle, ModelKind, ModelRequest, ResponseFormat,
     StorageHandle,
 };
-use crate::kernel::prompt::{grading_system_prompt, ocr_prompt};
+use crate::kernel::prompt::grading_system_prompt;
+use crate::plugin::vision::{map_model_error, read_content};
 
 use super::params::{GradedItem, UploadParams};
+
 pub(crate) async fn upload_handler(
     ctx: &ToolCallContext,
     params: Value,
@@ -24,48 +25,12 @@ pub(crate) async fn upload_handler(
     let p: UploadParams =
         serde_json::from_value(params).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     let path = std::path::Path::new(&p.file);
-    if !path.exists() {
-        return Err(ToolError::handler(format!("文件不存在：{}", p.file)));
-    }
-    if !stage_path_allowed(path) {
-        return Err(ToolError::handler(
-            "出于安全考虑，只接受通过「作业」按钮选择的文件（已暂存到系统临时目录）。请重新选择文件。",
-        ));
-    }
-    let bytes = std::fs::read(path).map_err(|e| ToolError::handler(format!("读取失败：{e}")))?;
-    // 暂存文件内容已读入内存，立即清理系统临时副本。
+    // 先读图（vision::read_content：图片理解/PDF 抽文），不删文件；读完确认内容后判分，
+    // 再清理暂存副本。
+    let content = read_content(&model, path, &ctx.events, "grading::upload").await?;
     let _ = std::fs::remove_file(path);
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or_default()
-        .to_lowercase();
 
-    emit_progress(ctx, "正在提取作业内容…");
-    let content = match ext.as_str() {
-        "png" | "jpg" | "jpeg" | "webp" | "bmp" => {
-            let mime = match ext.as_str() {
-                "png" => "image/png",
-                "jpg" | "jpeg" => "image/jpeg",
-                "webp" => "image/webp",
-                _ => "image/bmp",
-            };
-            ocr_image(&model, mime, &bytes, ctx).await?
-        }
-        "pdf" => extract_pdf_text(&bytes).await?,
-        other => {
-            return Err(ToolError::handler(format!(
-                "不支持的文件类型：{other}（支持 png/jpg/jpeg/webp/bmp/pdf）"
-            )));
-        }
-    };
-    if content.trim().is_empty() {
-        return Err(ToolError::handler(
-            "未能识别到作业内容（扫描版 PDF 请拍照上传图片）",
-        ));
-    }
-
-    emit_progress(ctx, "正在逐题判分…");
+    emit_progress(ctx, "grading::upload", "正在逐题判分…");
     let grading_text = grade_content(&model, &content, ctx).await?;
     let items: Vec<GradedItem> = parse_grading_json(&grading_text)?;
 
@@ -107,7 +72,7 @@ pub(crate) async fn upload_handler(
         }
     }
 
-    emit_progress(ctx, "批改完成");
+    emit_progress(ctx, "grading::upload", "批改完成");
     Ok(json!({
         "total": items.len(),
         "correct_count": items.len() - wrong_count,
@@ -117,65 +82,14 @@ pub(crate) async fn upload_handler(
     }))
 }
 
-/// 安全白名单：只允许系统临时目录下 GUI 暂存的文件（mistake-agent- 前缀）。
-/// canonicalize 防止符号链接逃逸到任意路径。
-pub(crate) fn stage_path_allowed(path: &Path) -> bool {
-    let Ok(canonical) = path.canonicalize() else {
-        return false;
-    };
-    let Some(name) = canonical.file_name().and_then(|n| n.to_str()) else {
-        return false;
-    };
-    canonical.starts_with(std::env::temp_dir()) && name.starts_with("mistake-agent-")
-}
-
-/// OCR：视觉模型只做内容提取，不判分（用户明确要求）。
-async fn ocr_image(
-    model: &ModelHandle,
-    mime: &str,
-    bytes: &[u8],
-    ctx: &ToolCallContext,
-) -> Result<String, ToolError> {
-    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-    let attachments = vec![Attachment {
-        mime: mime.into(),
-        data_base64: b64,
-    }];
-    let mut msg = Message::user(ocr_prompt());
-    if let MessageKind::User { attachments: a, .. } = &mut msg.kind {
-        *a = attachments;
-    }
-    let request = ModelRequest::chat(ModelKind::Vision, vec![msg]);
-    let response = model
-        .complete(&request, &AbortSignal::new())
-        .await
-        .map_err(map_model_error)?;
-    ctx.events.emit(Event::ToolProgress {
-        entry: "grading::upload".into(),
-        message: format!("OCR 完成（{} 字符）", response.text.chars().count()),
-        icon: Some("mdi:upload".into()),
-    });
-    Ok(response.text)
-}
-
-async fn extract_pdf_text(bytes: &[u8]) -> Result<String, ToolError> {
-    match pdf_extract::extract_text_from_mem(bytes) {
-        Ok(text) if !text.trim().is_empty() => Ok(text),
-        Ok(_) => Err(ToolError::handler(
-            "PDF 没有可提取的文字（可能是扫描版），请拍照上传图片",
-        )),
-        Err(e) => Err(ToolError::handler(format!("PDF 解析失败：{e}"))),
-    }
-}
-
-/// 判分：主模型按 OCR 内容逐题批改，输出 JSON 数组。
+/// 判分：主模型按图片理解内容逐题批改，输出 JSON 数组。
 async fn grade_content(
     model: &ModelHandle,
-    ocr: &str,
+    content: &str,
     ctx: &ToolCallContext,
 ) -> Result<String, ToolError> {
     let system = Message::system(grading_system_prompt());
-    let user = Message::user(format!("作业 OCR 内容：\n{ocr}\n请逐题批改。"));
+    let user = Message::user(format!("作业 OCR 内容：\n{content}\n请逐题批改。"));
     let mut request = ModelRequest::chat(ModelKind::Main, vec![system, user]);
     // 内联扁平数组 schema：避免 $defs/$ref（DeepSeek json_schema 端不解析引用）。
     let item_schema = serde_json::to_value(schemars::schema_for!(GradedItem)).unwrap_or_default();
@@ -229,19 +143,10 @@ fn parse_grading_json(text: &str) -> Result<Vec<GradedItem>, ToolError> {
     )))
 }
 
-fn map_model_error(e: crate::kernel::plugin::services::ModelError) -> ToolError {
-    match e {
-        crate::kernel::plugin::services::ModelError::Timeout => ToolError::timeout(),
-        crate::kernel::plugin::services::ModelError::Cancelled => ToolError::aborted(),
-        other if other.is_systemic() => ToolError::model_unavailable(other.to_string()),
-        other => ToolError::handler(other.to_string()),
-    }
-}
-
-fn emit_progress(ctx: &ToolCallContext, message: &str) {
+fn emit_progress(ctx: &ToolCallContext, entry: &str, message: &str) {
     ctx.events.emit(Event::ToolProgress {
-        entry: "grading::upload".into(),
+        entry: entry.into(),
         message: message.into(),
-        icon: Some("mdi:upload".into()),
+        icon: Some("mdi:image-search".into()),
     });
 }

@@ -1,8 +1,8 @@
-//! grading 插件（任务三·场景一）：上传作业 → OCR 提取 → 判分 → 错题归档。
+//! grading 插件（任务三·场景一）：上传作业 → 读图（vision::read）→ 判分 → 错题归档。
 //!
 //! 插件信息：namespace = grading，requires = [Storage, Model]
-//! tools = [upload（上传批改）, list（错题本）]
-//! 实现拆分（Linux 内核风格）：`params.rs` 参数与结果 schema / `core.rs` OCR·判分·归档 handler
+//! tools = [upload（判分归档）, list（错题本）]；看图（vision::read）独立成 vision 插件。
+//! 实现拆分（Linux 内核风格）：`params.rs` 参数与结果 schema / `core.rs` 判分·归档 handler
 
 use serde_json::{Value, json};
 
@@ -23,6 +23,8 @@ impl UserPlugin for GradingPlugin {
     fn info() -> Info {
         Info {
             namespace: "grading".into(),
+            // 默认懒加载：工具列表（model_tools）读 info 声明，第一轮即可见；
+            // 模型 wire 调用命中未加载插件时由 resolve_wire 触发懒加载（ADR-0003）。
             requires: vec![
                 crate::kernel::plugin::services::ServiceId::Storage,
                 crate::kernel::plugin::services::ServiceId::Model,
@@ -112,35 +114,11 @@ pub fn descriptor() -> PluginDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     use crate::kernel::plugin::services::{
         Mistake, MistakeFilter, MistakeId, MistakePatch, MistakeStore, StorageError, StorageHandle,
     };
-    use crate::plugin::grading::core::stage_path_allowed;
     use crate::plugin::grading::params::GradedItem;
-
-    #[test]
-    fn stage_path_allowed_accepts_only_temp_staged_files() {
-        let temp = std::env::temp_dir();
-        let ok = temp.join(format!("mistake-agent-{}.png", uuid::Uuid::new_v4()));
-        let no_prefix = temp.join(format!("other-{}.png", uuid::Uuid::new_v4()));
-        std::fs::write(&ok, b"x").unwrap();
-        std::fs::write(&no_prefix, b"x").unwrap();
-        assert!(stage_path_allowed(&ok), "暂存文件应被允许");
-        assert!(
-            !stage_path_allowed(&no_prefix),
-            "非 mistake-agent- 前缀应拒绝"
-        );
-        assert!(
-            !stage_path_allowed(Path::new("/etc/passwd")),
-            "系统路径应拒绝"
-        );
-        let escape = std::env::temp_dir().join("..");
-        assert!(!stage_path_allowed(&escape), "越界路径应拒绝");
-        let _ = std::fs::remove_file(&ok);
-        let _ = std::fs::remove_file(&no_prefix);
-    }
     use std::sync::Arc;
 
     /// 内存假错题本：插件单测不落盘、不调真实 API。
