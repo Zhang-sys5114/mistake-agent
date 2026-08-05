@@ -95,10 +95,8 @@ impl FileMemoryService {
     }
 
     pub fn open_default() -> Result<Self, MemoryError> {
-        let root = Settings::data_root().join("memory");
-        std::fs::create_dir_all(&root)
-            .map_err(|e| MemoryError::Io(format!("创建记忆目录失败：{e}")))?;
-        Ok(Self::new(root))
+        // memory/ 目录已由 bootstrap::init_data_root（Kernel::new 引导）创建。
+        Ok(Self::new(Settings::data_root().join("memory")))
     }
 
     fn entry_file(&self, path: &MemoryPath) -> PathBuf {
