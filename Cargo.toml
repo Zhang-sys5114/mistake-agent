@@ -16,6 +16,7 @@ path = "src/main.rs"
 async-trait = "0.1.91"
 base64 = "0.23.0"
 chrono = { version = "0.4.45", features = ["serde"] }
+dunce = "1.0.5"
 flexi_logger = "0.31.9"
 futures-core = "0.3.33"
 futures-util = "0.3.33"
