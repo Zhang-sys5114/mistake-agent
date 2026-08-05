@@ -4,7 +4,9 @@ import { Icon } from "@iconify/vue";
 import MessageBubble from "./MessageBubble.vue";
 import AttachmentViewer from "./AttachmentViewer.vue";
 import { runPython } from "../lib/pyodide";
-import { renderPath, toolIcon } from "../lib/messages";
+import { attachmentUrl } from "../lib/attachments";
+import { renderPath } from "../lib/messages";
+import { loadToolCatalog, toolIcon, toolList } from "../lib/tools";
 
 const props = defineProps({
   kernel: { type: Object, required: true },
@@ -24,6 +26,7 @@ const tools = ref([]); // 用户可见工具（list_tools，供输入候选）
 const suggestions = ref([]);
 const activeSuggestion = ref(-1);
 const armedTool = ref(null); // Tab 确认的待调用工具 { entry, title, icon }
+const pendingAttachments = ref([]); // 选完未发送的附件列表（可多张/混合 PDF）
 const cacheStats = ref(null); // 上下文缓存命中统计（get_cache_stats）
 const inputEl = ref(null);
 
@@ -34,21 +37,24 @@ let reasoningIndex = -1;
 let pendingSendId = null;
 
 const canSend = computed(
-  () => props.ready && !busy.value && (inputText.value.trim() || armedTool.value),
+  () =>
+    props.ready &&
+    !busy.value &&
+    (inputText.value.trim() || armedTool.value || pendingAttachments.value.length),
 );
 
 const TOOL_NAME_RE = /^([a-z][a-z0-9_]*::[a-z][a-z0-9_]*)/i;
 const GROUP_ORDER = ["批改", "学习", "记忆", "其它", "调试"];
 
 const quickActions = [
-  { id: "upload", label: "上传作业批改", desc: "图片或 PDF，自动判分并归档错题", icon: "mdi:upload", action: "upload" },
+  { id: "upload", label: "上传图片/PDF", desc: "看图提问、讲解或批改归档", icon: "mdi:upload", action: "upload" },
   { id: "mistakes", label: "查看错题本", desc: "按学科与知识点回顾错因", icon: "mdi:format-list-bulleted", action: "navigate" },
   { id: "settings", label: "配置模型", desc: "设置主模型与视觉模型密钥", icon: "mdi:cog-outline", action: "navigate" },
 ];
 
 function onQuickAction(a) {
   if (a.action === "upload") {
-    pickHomework(true);
+    pickHomework();
   } else {
     emit("navigate", a.id);
   }
@@ -77,19 +83,15 @@ function computeSuggestions() {
 /** 加载用户可见工具（候选数据全部来自后端 list_tools）。 */
 async function loadTools() {
   if (!props.ready) return;
-  try {
-    const r = await props.kernel.listTools();
-    tools.value = (r.tools || []).sort((a, b) => {
-      const ga = GROUP_ORDER.indexOf(a.group || "其它");
-      const gb = GROUP_ORDER.indexOf(b.group || "其它");
-      return (
-        (ga === -1 ? 99 : ga) - (gb === -1 ? 99 : gb) ||
-        (a.title || a.entry).localeCompare(b.title || b.entry, "zh")
-      );
-    });
-  } catch {
-    tools.value = [];
-  }
+  await loadToolCatalog(props.kernel);
+  tools.value = toolList().sort((a, b) => {
+    const ga = GROUP_ORDER.indexOf(a.group || "其它");
+    const gb = GROUP_ORDER.indexOf(b.group || "其它");
+    return (
+      (ga === -1 ? 99 : ga) - (gb === -1 ? 99 : gb) ||
+      (a.title || a.entry).localeCompare(b.title || b.entry, "zh")
+    );
+  });
 }
 
 /** 聊天上下文缓存命中率（后端统计主模型回合调用，按会话 + 全局）。 */
@@ -149,7 +151,7 @@ function armTool(tool) {
   armedTool.value = {
     entry,
     title: tool.title || tool.entry,
-    icon: tool.icon || toolIcon(tool.entry),
+    icon: toolIcon(tool.entry),
   };
   suggestions.value = [];
 }
@@ -374,25 +376,39 @@ function handleFrame(frame) {
 async function sendMessage() {
   const text = inputText.value.trim();
   if (busy.value) return;
-  if (!text && !armedTool.value) return;
+  if (!text && !armedTool.value && !pendingAttachments.value.length) return;
+  const attachments = pendingAttachments.value.map((a) => ({
+    path: a.asset_path,
+    name: a.name,
+  }));
+  const extra = pendingAttachments.value.length
+    ? {
+        file: pendingAttachments.value.map((a) => a.temp_path),
+        asset: attachments,
+      }
+    : {};
   if (armedTool.value) {
     const tool = armedTool.value;
     armedTool.value = null;
+    pendingAttachments.value = [];
     const raw = inputText.value;
     inputText.value = "";
     const m = raw.match(TOOL_NAME_RE);
     const hint = (m ? raw.slice(m[0].length) : raw).trim();
+    const display = tool.title + (hint ? `：${hint}` : "");
     addBubble({
       type: "user",
-      text: tool.title + (hint ? `：${hint}` : ""),
+      text: display,
       toolIcon: tool.icon,
+      attachments,
     });
     busy.value = true;
     setStatus(true, "正在调用工具");
     try {
       pendingSendId = await props.kernel.sendLine("send_user_message", {
         text: hint,
-        force_tool: { entry: tool.entry, hint },
+        force_tool: { entry: tool.entry, hint, display },
+        ...extra,
       });
     } catch (err) {
       addBubble({ type: "error", text: `发送失败：${err}` });
@@ -401,12 +417,13 @@ async function sendMessage() {
     }
     return;
   }
+  pendingAttachments.value = [];
   inputText.value = "";
-  addBubble({ type: "user", text });
+  addBubble({ type: "user", text: text || "我上传了图片/PDF", attachments });
   busy.value = true;
   setStatus(true, "正在回答");
   try {
-    pendingSendId = await props.kernel.sendLine("send_user_message", { text });
+    pendingSendId = await props.kernel.sendLine("send_user_message", { text, ...extra });
   } catch (err) {
     addBubble({ type: "error", text: `发送失败：${err}` });
     busy.value = false;
@@ -418,35 +435,30 @@ async function abortTurn() {
   await props.kernel.sendLine("abort");
 }
 
-async function pickHomework(forced = false) {
+async function pickHomework() {
   const picked = await props.kernel.pickHomeworkFile();
   if (!picked) return;
-  if (forced) {
-    addBubble({
-      type: "user",
-      text: "请批改这份作业",
-      attachment: { path: picked.asset_path, name: picked.name },
-    });
-    busy.value = true;
-    setStatus(true, "正在调用工具");
-    try {
-      pendingSendId = await props.kernel.sendLine("send_user_message", {
-        text: picked.temp_path,
-        force_tool: {
-          entry: "grading::upload",
-          hint: picked.temp_path,
-          asset: { path: picked.asset_path, name: picked.name },
-        },
-      });
-    } catch (err) {
-      addBubble({ type: "error", text: `发送失败：${err}` });
-      busy.value = false;
-      setStatus(false, "异常");
-    }
-    return;
-  }
-  inputText.value = `请批改这份作业：${picked.temp_path}`;
-  await sendMessage();
+  // 选完不立即发送：附件挂起在输入区上方，可继续添加（多张/混合 PDF），发送时一起带上。
+  const item = {
+    temp_path: picked.temp_path,
+    asset_path: picked.asset_path,
+    name: picked.name,
+    preview: null,
+  };
+  pendingAttachments.value.push(item);
+  attachmentUrl(picked.asset_path, picked.name)
+    .then((p) => {
+      if (pendingAttachments.value.some((a) => a.asset_path === picked.asset_path)) {
+        item.preview = p;
+      }
+    })
+    .catch(() => {});
+  inputEl.value?.focus();
+  setStatus(false, "已添加附件，可继续选择或直接输入内容后发送");
+}
+
+function removePendingAttachment(index) {
+  pendingAttachments.value.splice(index, 1);
 }
 
 const viewer = ref(null);
@@ -635,6 +647,31 @@ onUnmounted(() => unsubscribe?.());
           </div>
         </Transition>
 
+        <div v-if="pendingAttachments.length" class="pending-attach-bar">
+          <div
+            v-for="(a, i) in pendingAttachments"
+            :key="a.asset_path"
+            class="pending-attach"
+          >
+            <img
+              v-if="a.preview?.kind === 'image'"
+              class="pending-attach-thumb"
+              :src="a.preview.url"
+              alt="待发送附件"
+            />
+            <Icon v-else-if="a.preview?.kind === 'pdf'" icon="mdi:file-pdf-box" width="22" />
+            <Icon v-else icon="mdi:file-outline" width="22" />
+            <span class="pending-attach-name">{{ a.name }}</span>
+            <button
+              class="armed-tool-x"
+              aria-label="移除附件"
+              title="移除附件"
+              @click="removePendingAttachment(i)"
+            >
+              <Icon icon="mdi:close" width="14" />
+            </button>
+          </div>
+        </div>
         <div class="input-shell" :class="{ armed: armedTool }">
           <span v-if="armedTool" class="armed-tool">
             <Icon :icon="armedTool.icon" width="16" />
@@ -663,7 +700,7 @@ onUnmounted(() => unsubscribe?.());
             class="param-hint"
             aria-hidden="true"
           >&lt;可选参数&gt;</span>
-          <button class="btn ghost" id="pickBtn" aria-label="选择作业文件" title="选择作业文件" @click="pickHomework(true)">
+          <button class="btn ghost" id="pickBtn" aria-label="选择图片/PDF" title="选择图片/PDF" @click="pickHomework()">
             <Icon icon="mdi:paperclip" width="18" />
           </button>
           <button class="btn primary" id="sendBtn" :disabled="!canSend" @click="sendMessage">

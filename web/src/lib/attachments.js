@@ -6,11 +6,11 @@ import { invoke } from "@tauri-apps/api/core";
 
 const cache = new Map();
 
-function mimeFor(name) {
-  if (/\.png$/i.test(name)) return "image/png";
-  if (/\.jpe?g$/i.test(name)) return "image/jpeg";
-  if (/\.webp$/i.test(name)) return "image/webp";
-  if (/\.bmp$/i.test(name)) return "image/bmp";
+function mimeFor(name, path) {
+  if (/\.png$/i.test(name) || /\.png$/i.test(path)) return "image/png";
+  if (/\.jpe?g$/i.test(name) || /\.jpe?g$/i.test(path)) return "image/jpeg";
+  if (/\.webp$/i.test(name) || /\.webp$/i.test(path)) return "image/webp";
+  if (/\.bmp$/i.test(name) || /\.bmp$/i.test(path)) return "image/bmp";
   return "application/octet-stream";
 }
 
@@ -19,11 +19,11 @@ export async function attachmentUrl(path, name = "") {
   if (cache.has(key)) return cache.get(key);
   const promise = (async () => {
     const b64 = await invoke("read_upload", { path });
-    const isPdf = /\.pdf$/i.test(name || path);
+    const isPdf = /\.pdf$/i.test(name) || /\.pdf$/i.test(path);
     if (!isPdf) {
       return {
         kind: "image",
-        url: `data:${mimeFor(name || path)};base64,${b64}`,
+        url: `data:${mimeFor(name, path)};base64,${b64}`,
       };
     }
     const bin = atob(b64);

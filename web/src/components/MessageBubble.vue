@@ -1,8 +1,6 @@
 <script setup>
-import { ref, watch } from "vue";
 import { Icon } from "@iconify/vue";
 import { renderMarkdown } from "../lib/markdown";
-import { attachmentUrl } from "../lib/attachments";
 
 defineProps({
   bubble: { type: Object, required: true },
@@ -11,26 +9,11 @@ defineProps({
 
 const emit = defineEmits(["edit", "switch-branch", "copy", "open-attachment"]);
 
-const attachmentData = ref(null);
-const attachmentLoading = ref(false);
-const attachmentError = ref("");
-
-async function loadAttachment() {
-  const a = props.bubble?.attachment;
-  attachmentData.value = null;
-  attachmentError.value = "";
-  attachmentLoading.value = !!a;
-  if (!a) return;
-  try {
-    attachmentData.value = await attachmentUrl(a.path, a.name);
-  } catch (e) {
-    attachmentError.value = String(e?.message || e);
-  } finally {
-    attachmentLoading.value = false;
-  }
+function attachmentIcon(att) {
+  if (/\.pdf$/i.test(att.name || att.path)) return "mdi:file-pdf-box";
+  if (/\.(png|jpe?g|webp|bmp)$/i.test(att.name || att.path)) return "mdi:image";
+  return "mdi:file-outline";
 }
-
-watch(() => props.bubble?.attachment, loadAttachment, { immediate: true });
 </script>
 
 <template>
@@ -82,35 +65,19 @@ watch(() => props.bubble?.attachment, loadAttachment, { immediate: true });
       <template v-else>
         <Icon v-if="bubble.toolIcon" :icon="bubble.toolIcon" width="16" class="user-tool-icon" />
         <span>{{ bubble.text }}</span>
-        <button
-          v-if="bubble.attachment"
-          class="attachment"
-          :aria-label="`查看附件 ${bubble.attachment.name}`"
-          @click="
-            attachmentError
-              ? loadAttachment()
-              : emit('open-attachment', bubble.attachment)
-          "
-        >
-          <template v-if="attachmentLoading">
-            <Icon icon="mdi:loading" width="18" class="spin" />
-            <span class="attachment-name">正在加载…</span>
-          </template>
-          <template v-else-if="attachmentError">
-            <Icon icon="mdi:file-alert-outline" width="18" />
-            <span class="attachment-name">附件加载失败，点击重试</span>
-          </template>
-          <img
-            v-else-if="attachmentData?.kind === 'image'"
-            class="attachment-thumb"
-            :src="attachmentData.url"
-            alt="作业图片"
-          />
-          <template v-else-if="attachmentData?.kind === 'pdf'">
-            <Icon icon="mdi:file-pdf-box" width="26" />
-            <span class="attachment-name">{{ bubble.attachment.name }}</span>
-          </template>
-        </button>
+        <div v-if="bubble.attachments?.length" class="bubble-attachments">
+          <button
+            v-for="att in bubble.attachments"
+            :key="att.path"
+            class="attachment-chip"
+            :aria-label="`查看附件 ${att.name}`"
+            :title="att.name"
+            @click="emit('open-attachment', att)"
+          >
+            <Icon :icon="attachmentIcon(att)" width="16" />
+            <span class="attachment-chip-name">{{ att.name }}</span>
+          </button>
+        </div>
       </template>
     </div>
 

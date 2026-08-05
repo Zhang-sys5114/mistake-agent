@@ -1,30 +1,25 @@
 // 会话消息树 → 前端气泡（聊天页与会话历史详情共用同一渲染）。
 
-const TOOL_ICONS = {
-  "demo::hello": "mdi:hand-wave",
-  "grading::upload": "mdi:upload",
-  "grading::list": "mdi:format-list-bulleted",
-  "memory::save": "mdi:content-save",
-  "memory::show": "mdi:book-open-variant",
-  "memory::remove": "mdi:delete",
-  "compute::verify": "mdi:calculator-variant",
-  "practice::generate": "mdi:pen",
-  "report::weekly": "mdi:chart-bar",
-  "exam::compose": "mdi:file-document-edit-outline",
-  "tracking::checkin": "mdi:clipboard-check-outline",
-};
+import { toolIcon, toolTitle } from "./tools";
 
-export function toolIcon(entry) {
-  return TOOL_ICONS[entry] ?? "mdi:toolbox-outline";
-}
+// 附件名截到（ 或 ( 为止：历史消息里 kernel 曾在名字后接「（…）」注记，
+// 不截断会把注记吞进附件名。
+const ATTACH_RE = /\n附件：(\S+)\|([^|\n（(]+)/g;
+// 系统临时暂存路径（mistake-agent- 前缀）：展示时一律隐藏，不把路径暴露给学生。
+const TMP_PATH_RE = /\/tmp\/mistake-agent-[^\s|（(]+/g;
+// 老消息（无 display_text）：从「请调用工具 X 处理：Y」还原为「标题：Y」。
+const FORCED_RE = /^请调用工具 (\S+) 处理[:：]?\s*(.*)$/s;
 
-const ATTACH_RE = /\n附件：(\S+)\|([^|\n]+)/;
-
-/** 从消息文本解析持久化附件标记（kernel 落盘的「附件：路径|名称」）。 */
-export function parseAttachment(text) {
-  const m = String(text || "").match(ATTACH_RE);
-  if (!m) return null;
-  return { path: m[1], name: m[2] };
+/** 从消息文本解析全部持久化附件标记（kernel 落盘的「附件：路径|名称」，可能多条）。 */
+export function parseAttachments(text) {
+  const out = [];
+  const re = ATTACH_RE;
+  re.lastIndex = 0;
+  let m;
+  while ((m = re.exec(String(text || "")))) {
+    out.push({ path: m[1], name: m[2] });
+  }
+  return out;
 }
 
 /** 会话消息树 → 前端气泡；同一父节点的兄弟互为分支。 */
@@ -49,13 +44,28 @@ export function renderPath(messages) {
       };
       const kind = m.kind || {};
       if (kind.kind === "user") {
-        const text = kind.text || "";
-        const attachment = parseAttachment(text);
+        const raw = kind.text || "";
+        const attachments = parseAttachments(raw);
+        let shown = (kind.display_text || raw)
+          .replace(ATTACH_RE, "")
+          .replace(TMP_PATH_RE, "")
+          .trim();
+        if (!kind.display_text) {
+          const forced = shown.match(FORCED_RE);
+          if (forced) {
+            const title = toolTitle(forced[1]);
+            const rest = forced[2].replace(TMP_PATH_RE, "").trim();
+            shown = rest ? `${title}：${rest}` : title;
+          }
+        }
+        const text = attachments.length
+          ? shown.replace(ATTACH_RE, "").trim()
+          : shown;
         return {
           ...base,
           type: "user",
-          text: attachment ? text.replace(ATTACH_RE, "").trim() : text,
-          attachment,
+          text,
+          attachments,
         };
       }
       if (kind.kind === "assistant") {

@@ -1186,6 +1186,40 @@ textarea {
   font-weight: 600;
 }
 
+.pending-attach {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  max-width: 100%;
+  padding: 4px 6px 4px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.12);
+  color: inherit;
+  font-size: 13px;
+}
+
+.pending-attach-thumb {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+}
+
+.pending-attach-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pending-attach-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 2px 8px;
+}
+
 .armed-tool-x {
   display: inline-flex;
   align-items: center;
@@ -1217,35 +1251,32 @@ textarea {
   opacity: 0.85;
 }
 
-.attachment {
+.bubble-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.attachment-chip {
   display: flex;
   align-items: center;
   gap: 8px;
-  width: fit-content;
   max-width: 100%;
-  margin-top: 8px;
-  padding: 6px 10px 6px 6px;
+  padding: 4px 10px;
   border: 1px solid rgba(255, 255, 255, 0.35);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-pill);
   background: rgba(255, 255, 255, 0.12);
   color: inherit;
   text-align: left;
   transition: background 0.18s ease;
 }
 
-.attachment:hover {
+.attachment-chip:hover {
   background: rgba(255, 255, 255, 0.22);
 }
 
-.attachment-thumb {
-  display: block;
-  max-width: 220px;
-  max-height: 120px;
-  border-radius: var(--radius-sm);
-  object-fit: cover;
-}
-
-.attachment-name {
+.attachment-chip-name {
   font-size: 13px;
   font-weight: 500;
   overflow: hidden;

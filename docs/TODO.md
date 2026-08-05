@@ -11,3 +11,7 @@
 - 初始化归 kernel 负责（建议新增内核引导逻辑或 RPC，前端不直接写文件系统），与 `set_settings` 保存一同在 OOBE 完成路径触发
 
 参考：PROJECT.md §6 数据与配置；[src/kernel/settings.rs](../src/kernel/settings.rs) `data_root()`。
+
+## 前端工具元数据去硬编码（已完成）
+
+[web/src/lib/tools.js](../web/src/lib/tools.js) 建立工具目录模块：启动时经 `list_tools` 拉取一次并缓存 `entry → {title, icon, group}`，`toolIcon` / `toolTitle` / `toolList` 都从它取；`messages.js` 的 `TOOL_ICONS` / `TOOL_TITLES` 已删除，渲染与 `FORCED_RE` 还原统一走目录（缺失回退 entry 名）。ChatPage 与 SessionsPage 共用该模块，前端不再维护工具名 → 展示信息映射。

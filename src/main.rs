@@ -89,11 +89,14 @@ struct PickResult {
 /// 1) 系统临时目录（mistake-agent- 前缀，kernel 白名单，处理后即删）；
 /// 2) 数据根目录 uploads/（持久化，前端图片/PDF 展示用）。
 #[tauri::command]
-fn pick_homework_file() -> Result<Option<PickResult>, String> {
-    let picked = rfd::FileDialog::new()
+async fn pick_homework_file() -> Result<Option<PickResult>, String> {
+    // 异步文件对话框：阻塞式 pick_file() 在 Linux 上需要主线程/走 portal，
+    // 放在命令线程会挂起导致界面卡死；AsyncFileDialog 在后台线程弹窗（rfd 0.17）。
+    let picked = rfd::AsyncFileDialog::new()
         .add_filter("作业文件", &["png", "jpg", "jpeg", "webp", "bmp", "pdf"])
-        .pick_file();
-    picked.map(|p| stage_files(&p)).transpose()
+        .pick_file()
+        .await;
+    picked.map(|p| stage_files(p.path())).transpose()
 }
 
 /// 复制到系统临时目录，文件名带 mistake-agent- 前缀（kernel 白名单依据）。

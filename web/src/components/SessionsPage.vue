@@ -3,6 +3,7 @@ import { onMounted, ref } from "vue";
 import { Icon } from "@iconify/vue";
 import MessageBubble from "./MessageBubble.vue";
 import { renderPath } from "../lib/messages";
+import { loadToolCatalog } from "../lib/tools";
 
 const props = defineProps({ kernel: { type: Object, required: true } });
 
@@ -33,7 +34,11 @@ async function openSession(key) {
   loading.value = true;
   error.value = "";
   try {
-    const r = await props.kernel.call("read_session", { key }, 10000);
+    // 工具目录与会话详情并行拉取：历史消息里的工具标题/图标来自 list_tools。
+    const [r] = await Promise.all([
+      props.kernel.call("read_session", { key }, 10000),
+      loadToolCatalog(props.kernel),
+    ]);
     detail.value = r;
   } catch (e) {
     error.value = `读取会话失败：${e.message}`;
