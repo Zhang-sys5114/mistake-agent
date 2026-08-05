@@ -30,7 +30,7 @@
 
 | method | 参数 | 状态 | 说明 |
 |---|---|---|---|
-| `send_user_message` | `text: string`, `force_tool?: {entry, hint?}` | ✅ M1 | 开新回合；`force_tool` = 显式工具调用：强制 LLM 首轮调用指定工具（tool_choice + 全程 thinking=none），输出仍由 LLM 生成 |
+| `send_user_message` | `text: string`, `force_tool?: {entry, hint?, display?}`, `file?: string[]`, `asset?: {path,name}[]` | ✅ M1 | 开新回合；`force_tool` = 显式工具调用：强制 LLM 首轮调用指定工具（tool_choice + 全程 thinking=none），输出仍由 LLM 生成；`display` = 前端原始展示文本，落盘为 user 消息的 `display_text`（模型上下文仍用拼好的指令 `text`）；`file` = 暂存路径列表（模型读图/判分作 file 参数，可多文件），`asset` = 持久副本列表（落进消息文本供前端展示附件，路径不出现在展示文本） |
 | `trigger_command` | `entry: string`, `params: object` | ✅ M1 | 唯一命令通道，校验 EntryPoint + CallerPolicy |
 | `abort` | — | ✅ M1 | 停止当前回合（SIGTERM → 宽限 → SIGKILL） |
 | `get_state` | — | ✅ M1 | 返回 `{status: idle\|busy, session_key}` |
@@ -89,17 +89,19 @@ pub trait UserPlugin {
 - 启动时 fail-fast 校验：namespace 唯一、全名跨 kind 唯一、wire name 全局唯一、requires 可满足、CallerPolicy 合法。
 - lazy 插件首次命中任一入口时才执行 `register`；`EntryRegistrar` 只允许登记 info 声明过的短名。
 - `list_tools` 只返回 `user_visible = true` 的入口点；`model_tools` 不受影响（模型仍可调用不可见工具）。
+- **前端展示元数据唯一事实源是 `list_tools`**：标题/分组/图标/描述/参数 schema 全部由后端下发，前端不得硬编码工具名 → 标题/图标映射（web/src 里不允许维护工具表；不可见工具缺失元数据时回退显示 entry 名即可）。
 
 ### 3.2 命名：内部全名 vs wire name
 
 - 内部全名：`namespace::tool`（如 `grading::upload`），用于注册表、审计、`trigger_command`。
-- 模型可见名（wire name）：`::` → `_`（`grading_upload`），因为 Responses API 要求函数名匹配 `^[a-zA-Z0-9_-]+$`。注册时校验 wire name 全局唯一保证一一对应，模型回包经 dispatch 映射回全名（src/kernel/contract.rs `full_to_wire`，dispatch.rs `resolve_wire`）。
+- 模型可见名（wire name）：`::` → `__`（`grading__upload`），因为 Responses API 要求函数名匹配 `^[a-zA-Z0-9_-]+$`。注册时校验 wire name 全局唯一保证一一对应，模型回包经 dispatch 映射回全名（src/kernel/contract.rs `full_to_wire`，src/kernel/agent/dispatch.rs `resolve_wire`）。
 
 ### 3.3 当前入口点
 
 | 全名 | 类型 | 策略 | 说明 |
 |---|---|---|---|
 | `demo::hello` | tool | user_and_model | 链路自检 |
+| `vision::read` | tool | user_and_model | `{file: 路径}` 图片理解：作业/试卷转写文字，角色/照片等描述内容；不判分不归档；上传后模型先调它理解内容，再根据内容与用户意图决定下一步（判分走 grading::upload） |
 | `grading::upload` | tool | user_and_model | 场景一：`{file: 路径}` 图片(png/jpg/jpeg/webp/bmp)或文本型 PDF |
 | `grading::list` | tool | user_and_model | `{subject?, knowledge_point?}` 列出错题本 |
 | `memory::save` | tool | user_and_model | `{filename?, content?}` 保存记忆条目（可选参数；content 缺省时模型应总结当前会话要点填入） |
@@ -136,7 +138,9 @@ pub trait UserPlugin {
 - 思考模式默认开启：`reasoning.effort` 可传 `none`（判分用 none 提速）；thinking 下 temperature/top_p 无效。
 - 工具：function 名约束 `^[a-zA-Z0-9_-]+$`（wire name）；`parallel_tool_calls` 恒开启（参数被忽略），loop 串行执行。
 - 强制工具调用：`tool_choice` 支持 `auto` / `required` / `{type:"function", name}`；**thinking 模式不支持 tool_choice**，强制调用时整回合 `reasoning.effort = "none"`（否则下一轮 API 要求回传 reasoning_text 会协议报错）。
-- **thinking 模式 reasoning 回传**：普通回合（thinking 开启）只要发生工具调用，下一轮请求必须把上一轮的推理 item 按 `{"type":"reasoning","id":...}` 回传；loop 以 `MessageKind::Reasoning` 保存（含 id），`messages_to_responses_input` 原样回传。Chat Completions 兼容端忽略推理消息。
+- **thinking 模式 reasoning 回传**：普通回合（thinking 开启）只要发生工具调用，下一轮请求必须把上一轮的推理 item **连同推理文本**回传（`{"type":"reasoning","id":...,"content":[{"type":"reasoning_text","text":...}]}`，另附 `summary` 兜底）；DeepSeek 只消费明文 `content`（并入相邻 assistant 消息），`summary`/`encrypted_content` 不消费。loop 以 `MessageKind::Reasoning` 保存（含 id+text），`messages_to_responses_input` 原样回传。
+- **并行调用的 reasoning 复制**：DeepSeek 回放校验要求 thinking 开启时**每个 `function_call` 前都紧跟一条 reasoning item**；模型一次输出可带一个 reasoning + 多个并行调用，回放时 `messages_to_responses_input` 会按调用复制该 reasoning（同 id 同文本，实测必要）。Chat Completions 兼容端忽略推理消息。
+- **reasoning 回传兜底**：若请求仍被拒（`reasoning_text must be passed back`），`ResponsesModelService` 自动重试一次：剥离全部 reasoning item + `reasoning.effort=none`（关闭 thinking）。宁可丢思考连续性也不让回合失败；不做 LLM 改写，因为校验要求原样回传。
 - 传输兜底：客户端强制 IPv4 本地地址（无 IPv6 环境稳定连通）。
 
 ### 5.2 视觉模型：SiliconFlow Chat Completions（仅 OCR，不判分）

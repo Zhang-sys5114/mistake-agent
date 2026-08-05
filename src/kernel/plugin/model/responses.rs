@@ -11,6 +11,58 @@ use crate::kernel::plugin::services::{
 
 use super::*;
 
+/// 请求被拒时的输入摘要（调试用）：逐项列出类型与关键字段，reasoning 标注文本长度。
+fn summarize_input(input: &Value) -> String {
+    let items = input.as_array().map(|a| a.len()).unwrap_or(0);
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(arr) = input.as_array() {
+        for item in arr {
+            match item["type"].as_str() {
+                Some("message") => {
+                    let role = item["role"].as_str().unwrap_or("?");
+                    let text = item["content"][0]["text"]
+                        .as_str()
+                        .unwrap_or_default();
+                    parts.push(format!(
+                        "msg({role},len={},head={:?})",
+                        text.len(),
+                        text.chars().take(20).collect::<String>()
+                    ));
+                }
+                Some("reasoning") => {
+                    let id = item["id"].as_str().unwrap_or("?");
+                    let clen = item["content"][0]["text"]
+                        .as_str()
+                        .map(|s| s.len())
+                        .unwrap_or(0);
+                    let slen = item["summary"][0]["text"]
+                        .as_str()
+                        .map(|s| s.len())
+                        .unwrap_or(0);
+                    parts.push(format!(
+                        "reasoning(id={id},content_len={clen},summary_len={slen})"
+                    ));
+                }
+                Some("function_call") => {
+                    parts.push(format!(
+                        "call(name={},call_id={})",
+                        item["name"].as_str().unwrap_or("?"),
+                        item["call_id"].as_str().unwrap_or("?")
+                    ));
+                }
+                Some("function_call_output") => {
+                    parts.push(format!(
+                        "output(call_id={})",
+                        item["call_id"].as_str().unwrap_or("?")
+                    ));
+                }
+                other => parts.push(format!("item({other:?})")),
+            }
+        }
+    }
+    format!("input_items={items} [{}]", parts.join(" "))
+}
+
 pub(crate) struct SseEvent {
     pub(crate) name: String,
     pub(crate) data: String,
@@ -106,6 +158,38 @@ impl ResponsesModelService {
         }
         Ok(body)
     }
+
+    /// 兜底请求体：剥离全部 reasoning + thinking 关闭。
+    /// DeepSeek 校验失败（reasoning_text 未回传）时重试一次，宁可丢思考连续性也不让回合死掉。
+    fn build_body_no_reasoning(&self, request: &ModelRequest) -> Result<Value, ModelError> {
+        let mut body = json!({
+            "model": self.model,
+            "input": messages_to_responses_input_no_reasoning(&request.messages)?,
+            "stream": true,
+            "reasoning": {"effort": "none"},
+        });
+        if let Some(tools) = &request.tools {
+            body["tools"] = json!(tools.iter().map(tool_to_function).collect::<Vec<_>>());
+        }
+        if let Some(fmt) = &request.response_format {
+            body["text"] = json!({"format": text_format(fmt)});
+        }
+        Ok(body)
+    }
+
+    async fn post(&self, url: &str, body: &Value) -> Result<reqwest::Response, ModelError> {
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            self.client
+                .post(url)
+                .bearer_auth(&self.api_key)
+                .json(body)
+                .send(),
+        )
+        .await
+        .map_err(|_| ModelError::Timeout)?
+        .map_err(|e| ModelError::Transport(reqwest_chain(&e)))
+    }
 }
 
 #[async_trait::async_trait]
@@ -117,25 +201,45 @@ impl ModelService for ResponsesModelService {
     ) -> Result<ModelStream, ModelError> {
         let body = self.build_body(request)?;
         let url = responses_endpoint(&self.api_url);
-        let response = match tokio::time::timeout(
-            Duration::from_secs(60),
-            self.client
-                .post(&url)
-                .bearer_auth(&self.api_key)
-                .json(&body)
-                .send(),
-        )
-        .await
-        {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => return Err(ModelError::Transport(reqwest_chain(&e))),
-            Err(_) => return Err(ModelError::Timeout),
-        };
+        let mut response = self.post(&url, &body).await?;
 
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            return Err(map_status_error(status, &text));
+            log::warn!(
+                "主模型请求被拒（{status}）：{} tools={}",
+                summarize_input(&body["input"]),
+                body["tools"]
+                    .as_array()
+                    .map(|a| a.len())
+                    .unwrap_or(0),
+            );
+            let err = map_status_error(status, &text);
+            // DeepSeek 回放校验（thinking 开启 + 工具调用）失败时，兜底重试一次：
+            // 剥离 reasoning + reasoning.effort=none（实测可过）。不做 LLM 改写——
+            // 校验要求 reasoning_content 原样回传，改写只会更糟。
+            if let ModelError::Protocol(msg) = &err
+                && msg.contains("reasoning_text")
+            {
+                log::warn!("reasoning 回放被拒，兜底重试：剥离 reasoning + reasoning.effort=none");
+                let fallback = self.build_body_no_reasoning(request)?;
+                response = self.post(&url, &fallback).await?;
+                if !response.status().is_success() {
+                    let status2 = response.status();
+                    let text2 = response.text().await.unwrap_or_default();
+                    log::warn!(
+                        "兜底重试仍被拒（{status2}）：{} tools={}",
+                        summarize_input(&fallback["input"]),
+                        fallback["tools"]
+                            .as_array()
+                            .map(|a| a.len())
+                            .unwrap_or(0),
+                    );
+                    return Err(map_status_error(status2, &text2));
+                }
+            } else {
+                return Err(err);
+            }
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<ModelChunk, ModelError>>(128);

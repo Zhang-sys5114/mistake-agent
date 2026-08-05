@@ -304,19 +304,39 @@ impl AgentLoop {
                             && let MessageKind::Reasoning { text, .. } = &mut r.kind
                         {
                             text.push_str(&delta);
+                        } else {
+                            // 防御：delta 先于 output_item.added(reasoning) 到达时，
+                            // 先占位累积，避免推理文本丢失导致下一轮回传校验失败。
+                            pending_reasoning = Some(Message {
+                                id: MessageId::new(),
+                                parent_id: None,
+                                kind: MessageKind::Reasoning {
+                                    id: MessageId::new().to_string(),
+                                    text: delta.clone(),
+                                },
+                                created_at: chrono::Utc::now(),
+                            });
                         }
                         self.events.emit(Event::ReasoningDelta { delta });
                     }
                     Ok(ModelChunk::ReasoningItemStart { id }) => {
-                        pending_reasoning = Some(Message {
-                            id: MessageId::new(),
-                            parent_id: None,
-                            kind: MessageKind::Reasoning {
-                                id,
-                                text: String::new(),
-                            },
-                            created_at: chrono::Utc::now(),
-                        });
+                        if let Some(mut r) = pending_reasoning.take()
+                            && let MessageKind::Reasoning { id: rid, .. } = &mut r.kind
+                        {
+                            // delta 先到达时保留已累积文本，只补上真实 item id。
+                            *rid = id;
+                            pending_reasoning = Some(r);
+                        } else {
+                            pending_reasoning = Some(Message {
+                                id: MessageId::new(),
+                                parent_id: None,
+                                kind: MessageKind::Reasoning {
+                                    id,
+                                    text: String::new(),
+                                },
+                                created_at: chrono::Utc::now(),
+                            });
+                        }
                     }
                     Ok(ModelChunk::ToolCallStart {
                         index,

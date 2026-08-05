@@ -14,13 +14,13 @@ async fn dump_chunks() {
     let settings = Settings::load().expect("settings");
     let svc = build_main_service(&settings);
     let tools = vec![ToolSchema {
-        name: "demo_hello".into(),
+        name: "demo__hello".into(),
         description: "打个招呼".into(),
         input_schema: serde_json::json!({"type": "object", "properties": {}}),
     }];
     let req = ModelRequest {
         model: ModelKind::Main,
-        messages: vec![Message::user("必须调用 demo_hello 工具，然后简短说明结果")],
+        messages: vec![Message::user("必须调用 demo__hello 工具，然后简短说明结果")],
         tools: Some(tools.clone()),
         reasoning_effort: None,
         response_format: None,
@@ -29,11 +29,13 @@ async fn dump_chunks() {
     let mut stream = svc.stream(&req, &AbortSignal::new()).await.expect("stream");
     let mut usage = None;
     let mut reasoning_id: Option<String> = None;
+    let mut reasoning_text = String::new();
     while let Some(chunk) = stream.next().await {
         match chunk.expect("chunk ok") {
             ModelChunk::TextDelta(d) => eprintln!("TEXT {d:?}"),
             ModelChunk::ReasoningDelta(d) => {
-                eprintln!("REASON {:?}", d.chars().take(20).collect::<String>())
+                eprintln!("REASON {:?}", d.chars().take(20).collect::<String>());
+                reasoning_text.push_str(&d);
             }
             ModelChunk::ReasoningItemStart { id } => {
                 eprintln!("REASON_START {id}");
@@ -51,13 +53,14 @@ async fn dump_chunks() {
     }
     eprintln!("FINAL usage: {usage:?}");
     eprintln!("REASONING_ID: {reasoning_id:?}");
+    eprintln!("REASONING_TEXT_LEN: {}", reasoning_text.len());
 
     // 第二轮：把 reasoning（按 id）与工具调用回传给 API，验证 thinking 回传是否被接受。
     let rid = reasoning_id.expect("应有 reasoning id");
     let mut reasoning = Message::system("占位");
     reasoning.kind = mistake_agent::kernel::message::MessageKind::Reasoning {
         id: rid,
-        text: "用户要求调用工具".into(),
+        text: reasoning_text.clone(),
     };
     let call = Message::tool_call(
         "demo::hello",

@@ -88,35 +88,75 @@ pub(crate) fn tool_to_function(t: &ToolSchema) -> Value {
 /// 内部 Message 树 → Responses API input items。
 /// ToolCall 一条消息展开为 function_call + function_call_output（call_id = 消息 id）。
 pub(crate) fn messages_to_responses_input(messages: &[Message]) -> Result<Vec<Value>, ModelError> {
+    messages_to_responses_input_impl(messages, true)
+}
+
+/// 兜底（reasoning_text 回传校验失败时）：剥离全部 reasoning item，
+/// 请求方同时把 thinking 关掉（reasoning.effort=none），调用不再要求回传。
+pub(crate) fn messages_to_responses_input_no_reasoning(
+    messages: &[Message],
+) -> Result<Vec<Value>, ModelError> {
+    messages_to_responses_input_impl(messages, false)
+}
+
+fn messages_to_responses_input_impl(
+    messages: &[Message],
+    include_reasoning: bool,
+) -> Result<Vec<Value>, ModelError> {
     let mut items = Vec::new();
+    // DeepSeek 回放校验：thinking 开启时，输入里每个 function_call 前都必须紧跟 reasoning item。
+    // 模型一次输出可带一个 reasoning + 多个并行调用，回放时按调用复制该 reasoning（实测必要）。
+    let mut pending_reasoning: Option<(String, String)> = None;
+    let mut calls_since_reasoning = 0usize;
     for msg in messages {
         match &msg.kind {
-            MessageKind::User { text, .. } => items.push(json!({
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": text}],
-            })),
+            MessageKind::User { text, .. } => {
+                pending_reasoning = None;
+                calls_since_reasoning = 0;
+                items.push(json!({
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}],
+                }));
+            }
             MessageKind::Assistant { text } => items.push(json!({
                 "type": "message",
                 "role": "assistant",
                 "content": [{"type": "output_text", "text": text}],
             })),
-            MessageKind::System { text } => items.push(json!({
-                "type": "message",
-                "role": "system",
-                "content": [{"type": "input_text", "text": text}],
-            })),
-            // thinking 模式要求把推理 item 按 id 回传，否则下一轮协议报错。
-            MessageKind::Reasoning { id, .. } => items.push(json!({
-                "type": "reasoning",
-                "id": id,
-            })),
+            MessageKind::System { text } => {
+                pending_reasoning = None;
+                calls_since_reasoning = 0;
+                items.push(json!({
+                    "type": "message",
+                    "role": "system",
+                    "content": [{"type": "input_text", "text": text}],
+                }));
+            }
+            // thinking 模式要求把推理 item 按 id 回传，且必须带上推理文本：
+            // DeepSeek 只消费明文 content（并入相邻 assistant 消息），不消费 summary；
+            // 但输出侧 reasoning_content 又落在 summary 里，所以两者都带，保证校验通过。
+            MessageKind::Reasoning { id, text } => {
+                pending_reasoning = Some((id.clone(), text.clone()));
+                calls_since_reasoning = 0;
+                if include_reasoning {
+                    items.push(reasoning_item(id, text));
+                }
+            }
             MessageKind::ToolCall {
                 entry,
                 params,
                 result,
                 call_id,
             } => {
+                // 并行调用：第二个及之后的 function_call 前补一份同轮 reasoning（DeepSeek 实测要求）。
+                if include_reasoning
+                    && let Some((rid, rtext)) = &pending_reasoning
+                    && calls_since_reasoning > 0
+                {
+                    items.push(reasoning_item(rid, rtext));
+                }
+                calls_since_reasoning += 1;
                 let call_id = if call_id.is_empty() {
                     msg.id.to_string()
                 } else {
@@ -147,12 +187,25 @@ pub(crate) fn messages_to_responses_input(messages: &[Message]) -> Result<Vec<Va
     Ok(items)
 }
 
+fn reasoning_item(id: &str, text: &str) -> Value {
+    json!({
+        "type": "reasoning",
+        "id": id,
+        "summary": [{"type": "summary_text", "text": text}],
+        "content": [{"type": "reasoning_text", "text": text}],
+    })
+}
+
 /// 内部 Message 树 → Chat Completions messages（视觉模型支持 image_url base64）。
 pub(crate) fn messages_to_cc(messages: &[Message]) -> Vec<Value> {
     let mut out = Vec::new();
     for msg in messages {
         match &msg.kind {
-            MessageKind::User { text, attachments } => {
+            MessageKind::User {
+                text,
+                attachments,
+                ..
+            } => {
                 let mut content: Vec<Value> = Vec::new();
                 for att in attachments {
                     content.push(json!({
@@ -237,6 +290,99 @@ pub(crate) fn reqwest_chain(e: &reqwest::Error) -> String {
         src = s.source();
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reasoning_item_replays_text_with_id() {
+        let mut msg = Message::system("占位");
+        msg.kind = MessageKind::Reasoning {
+            id: "rs_1".into(),
+            text: "先计算再调用工具".into(),
+        };
+        let items = messages_to_responses_input(&[msg]).unwrap();
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item["type"], "reasoning");
+        assert_eq!(item["id"], "rs_1");
+        // DeepSeek 只消费明文 content，校验按 reasoning_text 查重放；
+        // summary 兜底（DeepSeek 输出侧 reasoning_content 落在 summary）。
+        assert_eq!(item["content"][0]["type"], "reasoning_text");
+        assert_eq!(item["content"][0]["text"], "先计算再调用工具");
+        assert_eq!(item["summary"][0]["type"], "summary_text");
+        assert_eq!(item["summary"][0]["text"], "先计算再调用工具");
+    }
+
+    #[test]
+    fn parallel_calls_repeat_reasoning_per_call() {
+        let mut reasoning = Message::system("占位");
+        reasoning.kind = MessageKind::Reasoning {
+            id: "rs_1".into(),
+            text: "并行读三张图".into(),
+        };
+        let call = |i: u32, cid: &str| {
+            Message::tool_call_with_id(
+                "vision::read",
+                json!({"file": format!("/tmp/p{i}.png")}),
+                Ok(json!({"ok": true})),
+                cid.into(),
+            )
+        };
+        let messages = vec![
+            Message::user("都看看"),
+            reasoning,
+            call(1, "call_00"),
+            call(2, "call_01"),
+            call(3, "call_02"),
+        ];
+        let items = messages_to_responses_input(&messages).unwrap();
+        let kinds: Vec<&str> = items.iter().map(|i| i["type"].as_str().unwrap()).collect();
+        // 期望：reasoning、call、output、reasoning、call、output、reasoning、call、output
+        assert_eq!(
+            kinds,
+            vec![
+                "message",
+                "reasoning",
+                "function_call",
+                "function_call_output",
+                "reasoning",
+                "function_call",
+                "function_call_output",
+                "reasoning",
+                "function_call",
+                "function_call_output",
+            ]
+        );
+        // 复制出来的 reasoning 与原件同 id 同文本。
+        assert_eq!(items[4]["id"], "rs_1");
+        assert_eq!(items[4]["content"][0]["text"], "并行读三张图");
+        assert_eq!(items[7]["id"], "rs_1");
+    }
+
+    #[test]
+    fn no_reasoning_variant_strips_reasoning_items() {
+        let mut reasoning = Message::system("占位");
+        reasoning.kind = MessageKind::Reasoning {
+            id: "rs_1".into(),
+            text: "并行读图".into(),
+        };
+        let call = Message::tool_call_with_id(
+            "vision::read",
+            json!({"file": "/tmp/p1.png"}),
+            Ok(json!({"ok": true})),
+            "call_00".into(),
+        );
+        let messages = vec![Message::user("都看看"), reasoning, call];
+        let items = messages_to_responses_input_no_reasoning(&messages).unwrap();
+        let kinds: Vec<&str> = items.iter().map(|i| i["type"].as_str().unwrap()).collect();
+        assert_eq!(
+            kinds,
+            vec!["message", "function_call", "function_call_output"]
+        );
+    }
 }
 
 // ---------- DeepSeek Responses API 适配器 ----------

@@ -55,7 +55,7 @@
 | 7 | tokio stdout 写管道丢失 | 环境差异 | 已修：帧写入改同步 stdout（协议通道，绝不含日志） |
 | 8 | 会话 JSONL 只有 user 消息、审计 tokens 全 None | SSE 事件映射未命中 usage（usage 在 `response.usage` 顶层） | 已修：completed/incomplete 事件解析 response.usage；live_api 加落盘+usage 断言 |
 | 9 | Method::ComputeResult 的 id 与 RPC 顶层 id 撞名 | serde flatten 字段冲突 | 已修：rename `compute_id`，前端按 compute_id 回执 |
-| 10 | 工具调用回合报"reasoning_text must be passed back" | thinking 模式第二轮未回传推理 item | 已修：loop 保存推理消息（含 id），`messages_to_responses_input` 按 `{"type":"reasoning","id"}` 回传；真实 API 复验通过 |
+| 10 | 工具调用回合报"reasoning_text must be passed back" | 三层原因：①只回传 id 丢文本；②**并行调用时一个 reasoning 只覆盖第一个 function_call**（实测 DeepSeek 要求每个调用前都有 reasoning）；③流式 delta 先于 item start 时文本丢失 | 已修：loop 累积 id+text 并防御 delta 乱序；`messages_to_responses_input` 回传文本并**按调用复制 reasoning**；再被拒时兜底剥离 reasoning + `effort=none` 重试；真实 API 复验通过 |
 | 11 | 会话切换频率超限时丢消息/归档错乱 | 归档后才检查切换频率 | 已修：频率检查前置，超限降级 continue（消息不丢） |
 | 12 | 回合失败后界面/状态未恢复 | 失败时未发 turn_end | 已修：失败发 `turn_end(failed)` + error，前端恢复可聊天 |
 | 13 | DeepSeek 503 导致守卫/摘要/回合失败 | 无重试 | 已修：守卫/摘要对瞬时错误重试 2 次（线性退避），主回合流重试 1 次；系统性错误（无余额/模型下架）不重试直接降级；单测模拟 503→成功通过 |
