@@ -24,14 +24,14 @@
 Tauri GUI（Vue 3，进程内 Kernel，standalone 单二进制）
         │  RPC（Tauri Channel/命令桥接，JSON Lines 协议）
         ▼
-Kernel（agent loop · 工具注册与调度 · 会话调度 · 守卫模型 · 审计）
+Kernel（agent loop · 工具注册与调度 · 会话调度（主模型决策）· 审计）
         ├─ 内核插件：storage · memory · compute · model · session（KernelPlugin 两段式契约，ADR-0035）
-        └─ 用户插件：grading · practice · report · exam · tracking
+        └─ 用户插件：vision · grading · practice · report · exam · tracking
 ```
 
 - 主模型：DeepSeek `deepseek-v4-flash`（Responses API，thinking + 工具调用）
-- 视觉模型：SiliconFlow `Qwen/Qwen3-VL-32B-Instruct`（OCR，只提取不判分）
-- 会话调度：守卫模型在回合边界做 continue / update_goal / start_new 决策，失败一律"存疑即继续"
+- 视觉模型：SiliconFlow `Qwen/Qwen3-VL-32B-Instruct`（图片理解：作业转写、其它图片描述内容，不判分）
+- 会话调度：主模型在回合边界做 continue / update_goal / start_new 决策（ADR-0030/0032），失败一律"存疑即继续"
 
 ## 快速开始
 
@@ -94,7 +94,8 @@ cd web && node scripts/katex-check.mjs      # LaTeX 渲染链路自检
 - [PROJECT.md](PROJECT.md) — 项目总览（唯一入门文档）
 - [CONTEXT.md](CONTEXT.md) — 术语表
 - [docs/api.md](docs/api.md) — GUI ↔ kernel RPC 协议与真实模型对接
-- [docs/adr/](docs/adr/) — 架构决策记录（29 条）
+- [docs/adr/](docs/adr/) — 架构决策记录（37 条）
+- [docs/plan/so-lite-agent.md](docs/plan/so-lite-agent.md) — Agent core 剥离后续计划（ADR-0037，未落地）
 - [docs/prompts.md](docs/prompts.md) / [docs/testing.md](docs/testing.md) — Prompt 与测试记录
 
 ## 许可证

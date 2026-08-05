@@ -12,6 +12,7 @@ Mistake Agent v2：面向中学生的本地错题管理 + 辅助学习 Agent（W
 |---|---|---|
 | 刚加入项目 | PROJECT.md 全文 + CONTEXT.md | 全貌、术语；不懂的词去 CONTEXT.md 查 |
 | 改设计 / 做架构决策 | docs/adr/ 全部 + CONTEXT.md | 决策留痕；新决策要新增 ADR 并更新术语 |
+| 看后续计划 / so-lite-agent 剥离 | docs/plan/so-lite-agent.md + docs/adr/0037 | 计划未落地，单 crate 红线仍有效 |
 | 改内核机制（loop/调度/注册表） | PROJECT.md §4-§5 + docs/adr/0003~0010 | 两段式契约、CallerPolicy、护栏、容灾 |
 | 改会话 / 消息树 | PROJECT.md §5 会话 + docs/adr/0006、0007 | 双层调度、守卫模型、Goal、历史路由 |
 | 改内核插件（services） | PROJECT.md §4-§5 + docs/adr/0001、0014、0015、0016 | 服务句柄、ModelHandle、配置独占、compute 桥接 |
@@ -34,7 +35,7 @@ cargo fmt --check
 
 ## 架构红线（改代码时逐条遵守）
 
-- 单 crate：`src/kernel/`（内核）与 `src/plugin/`（用户插件）分区，**不新增 crate 拆分**
+- 单 crate：`src/kernel/`（内核）与 `src/plugin/`（用户插件）分区，**不新增 crate 拆分**（ADR-0037 计划剥离 so-lite-agent crate，落地前此红线仍有效）
 - 能力边界：内核实现用 `pub(crate)` 隐藏；用户插件只经公开 API 面交互；不引入全局可变状态绕过句柄
 - CallerPolicy：`UserAndModel` 工具必须配同名用户入口；`UserOnly` 不得进入模型工具列表
 - 入口点命名 `namespace::tool`：插件只写短名，kernel 拼全名，撞名由注册表拒绝
