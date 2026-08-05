@@ -18,6 +18,10 @@ _Avoid_: 内核级插件（口语）、系统服务
 内核插件的注册机制，与用户插件 `UserPlugin` 同形：`info()` 声明 namespace、`provides`（提供的 ServiceId）与工具/命令/事件，`register(ctx)` 绑定 handler；与用户插件共用同一张注册表校验（namespace/wire 唯一、CallerPolicy、懒/急加载），注册上下文 `KernelContext` 注入全量服务句柄。
 _Avoid_: 直连注册（ADR-0021 旧表述）
 
+**Disabled plugin（禁用插件）**:
+插件目录根部存在 `disabled` 标记文件、不参与构建与注册的插件；移除标记即恢复（ADR-0036）。
+_Avoid_: 卸载、下架（暗示运行时卸载，编译期内置无此语义）
+
 **User plugin（用户插件）**:
 通过内核注册工具、命令与事件回调提供业务能力的插件，如批改、练习、复盘；其回调由 kernel 主动调用，但不直接接触敏感资源。
 _Avoid_: 业务插件（过早限定业务范围）、用户态插件（口语）

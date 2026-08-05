@@ -2,25 +2,21 @@
 //! 入口 mod.rs 承载插件 info（与用户插件组织方式一致，Linux 内核组织风格）。
 //!
 //! - `services`：内核插件公共契约（ServiceId / 服务 trait / 受控句柄）；
-//! - `storage` / `memory` / `compute` / `model` / `session`：各内核插件，
-//!   经 `KernelPlugin` 两段式契约注册（ADR-0035），与用户插件同表校验。
+//! - 各内核插件目录经 `KernelPlugin` 两段式契约注册（ADR-0035），与用户插件同表校验；
+//! - 插件清单由 build.rs 自动发现（ADR-0036），新增插件无需改本文件。
+//!   规则见 docs/plugin-dev/kernel.md；参考模板见 docs/plugin-dev/reference/kernel-plugin/。
 
-pub mod compute;
-pub mod memory;
-pub mod model;
 pub mod services;
-pub mod session;
-pub mod storage;
 
-use crate::kernel::registry::KernelDescriptor;
+include!(concat!(env!("OUT_DIR"), "/builtin_kernel_plugins.rs"));
 
-/// 编译期内置内核插件清单（ADR-0035：与用户插件同机制注册、同一张表校验）。
-pub fn builtin_kernel_plugins() -> Vec<KernelDescriptor> {
-    vec![
-        storage::descriptor(),
-        memory::descriptor(),
-        compute::descriptor(),
-        model::descriptor(),
-        session::descriptor(),
-    ]
+#[cfg(test)]
+mod tests {
+    // 编译锚定：参考模板必须始终与真实契约一致（不注册，仅编译检查）。
+    include!("../../../docs/plugin-dev/reference/kernel-plugin/mod.rs");
+
+    #[test]
+    fn kernel_plugin_reference_typechecks() {
+        let _ = descriptor();
+    }
 }

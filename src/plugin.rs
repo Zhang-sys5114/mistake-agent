@@ -1,23 +1,16 @@
-//! 用户插件聚合入口：返回编译期内置的用户插件描述符列表。
-//! 内核插件（storage/memory/compute/model/session）见 `crate::kernel::plugin::builtin_kernel_plugins`（ADR-0035）。
+//! 用户插件聚合入口（ADR-0036）：清单由 build.rs 扫描 `src/plugin/*/mod.rs` 生成，
+//! 插件开发者只需新建目录 + 写 mod.rs（实现 UserPlugin + descriptor），无需改本文件。
+//! 规则见 docs/plugin-dev/user.md；参考模板见 docs/plugin-dev/reference/user-plugin/。
 
-use crate::kernel::registry::PluginDescriptor;
+include!(concat!(env!("OUT_DIR"), "/builtin_user_plugins.rs"));
 
-pub mod exam;
-pub mod grading;
-pub mod hello;
-pub mod practice;
-pub mod report;
-pub mod tracking;
+#[cfg(test)]
+mod tests {
+    // 编译锚定：参考模板必须始终与真实契约一致（不注册，仅编译检查）。
+    include!("../docs/plugin-dev/reference/user-plugin/mod.rs");
 
-/// 编译期内置插件清单（ADR-0002：不做动态加载）。
-pub fn builtin_plugins() -> Vec<PluginDescriptor> {
-    vec![
-        hello::descriptor(),
-        grading::descriptor(),
-        practice::descriptor(),
-        report::descriptor(),
-        exam::descriptor(),
-        tracking::descriptor(),
-    ]
+    #[test]
+    fn user_plugin_reference_typechecks() {
+        let _ = descriptor();
+    }
 }
