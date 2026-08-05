@@ -1,5 +1,9 @@
 # TODO
 
+## Agent core 剥离为 so-lite-agent（计划，未落地）
+
+把通用 Agent 运行时（loop/工具注册/会话/模型 Provider 抽象/通用 RPC）剥离为独立 crate `so-lite-agent`，开箱即用（`cargo add` 即可开发新 Agent），内核/用户插件由使用方编写。完整计划见 [docs/plan/so-lite-agent.md](plan/so-lite-agent.md)，决策见 [ADR-0037](adr/0037-so-lite-agent-crate-extraction.md)。当前只做计划，不落地。
+
 ## OOBE 初始化数据根目录（未完成）
 
 现状：OOBE 首次向导只调用 `set_settings` 保存模型配置（[web/src/components/OobePage.vue](../web/src/components/OobePage.vue)）；数据根目录 `~/Documents/.mistake-agent/` 下的目录与文件由各模块首次使用时懒创建（storage、memory、logger、uploads），`AGENTS.md`（教学规则）目前没有任何初始化逻辑。
