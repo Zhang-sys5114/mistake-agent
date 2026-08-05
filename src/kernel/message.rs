@@ -39,6 +39,10 @@ pub struct Attachment {
 pub enum MessageKind {
     User {
         text: String,
+        /// 前端展示文本（force_tool 场景：原始输入 / 工具标题+参数），重开会话后仍友好；
+        /// 缺省时前端回退渲染 `text`。模型上下文始终使用 `text`（拼好的指令）。
+        #[serde(default)]
+        display_text: Option<String>,
         #[serde(default)]
         attachments: Vec<Attachment>,
     },
@@ -82,11 +86,16 @@ impl Message {
     }
 
     pub fn user(text: impl Into<String>) -> Self {
+        Self::user_with_display(text, None)
+    }
+
+    pub fn user_with_display(text: impl Into<String>, display_text: Option<String>) -> Self {
         Self {
             id: MessageId::new(),
             parent_id: None,
             kind: MessageKind::User {
                 text: text.into(),
+                display_text,
                 attachments: Vec::new(),
             },
             created_at: chrono::Utc::now(),

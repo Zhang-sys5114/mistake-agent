@@ -592,6 +592,16 @@ impl SessionScheduler {
     /// 顺序：空闲超时（系统级）→ 主模型决策 start_new / update_goal / continue
     /// → 追加用户消息并进入回合；决策失败默认 continue（存疑即继续）。
     pub async fn on_new_message(&self, text: &str) -> Result<TurnContext, SchedulerError> {
+        self.on_new_message_with_display(text, None).await
+    }
+
+    /// 带前端展示文本的新消息（force_tool 场景）：落盘的 user 消息同时携带
+    /// display_text（渲染用）与 text（模型指令），二者分离（ADR-0007 修订）。
+    pub async fn on_new_message_with_display(
+        &self,
+        text: &str,
+        display_text: Option<&str>,
+    ) -> Result<TurnContext, SchedulerError> {
         let now = self.clock.now();
         let metas = self.store.list_sessions().await?;
         let active = metas
@@ -609,7 +619,7 @@ impl SessionScheduler {
                     now,
                 )
                 .await?;
-            return self.append_user(&to, text).await;
+            return self.append_user(&to, text, display_text).await;
         };
 
         let idle = now - meta.last_activity_at
@@ -622,7 +632,7 @@ impl SessionScheduler {
             let (from, to) = self.switch_session(Some(&meta), goal.clone(), now).await?;
             self.record_switch(now);
             self.bus.send(Interrupt::SessionSwitched { from, to, goal });
-            return self.append_user(&to, text).await;
+            return self.append_user(&to, text, display_text).await;
         }
 
         // 先判断（主模型）：这条新消息要不要切换上下文。
@@ -654,26 +664,26 @@ impl SessionScheduler {
             GuardDecision::StartNew(goal) => {
                 if goal.text.trim().is_empty() {
                     log::warn!("新消息决策返回空目标，降级继续当前会话");
-                    return self.continue_in(&meta, text, now).await;
+                    return self.continue_in(&meta, text, display_text, now).await;
                 }
                 if !self.switch_allowed(now) {
                     log::warn!("切换过于频繁，新消息 start_new 降级忽略");
-                    return self.continue_in(&meta, text, now).await;
+                    return self.continue_in(&meta, text, display_text, now).await;
                 }
                 // 先切换上下文（归档旧会话 + 梗概 + 历史副本），再把新消息放进新会话回答。
                 let (from, to) = self.switch_session(Some(&meta), goal.clone(), now).await?;
                 self.record_switch(now);
                 self.bus.send(Interrupt::SessionSwitched { from, to, goal });
-                self.append_user(&to, text).await
+                self.append_user(&to, text, display_text).await
             }
             GuardDecision::UpdateGoal(goal) => {
                 if !goal.text.trim().is_empty() {
                     self.store.set_goal(&meta.key, &goal).await?;
                     self.bus.send(Interrupt::GoalUpdated { goal });
                 }
-                self.continue_in(&meta, text, now).await
+                self.continue_in(&meta, text, display_text, now).await
             }
-            GuardDecision::Continue => self.continue_in(&meta, text, now).await,
+            GuardDecision::Continue => self.continue_in(&meta, text, display_text, now).await,
         }
     }
 
@@ -682,10 +692,11 @@ impl SessionScheduler {
         &self,
         meta: &SessionMeta,
         text: &str,
+        display_text: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<TurnContext, SchedulerError> {
         self.store.set_last_activity(&meta.key, now).await?;
-        let mut user_msg = Message::user(text);
+        let mut user_msg = Message::user_with_display(text, display_text.map(str::to_string));
         let path = self.store.read_path(&meta.key).await?;
         user_msg.parent_id = path.last().map(|m| m.id);
         self.store.append_message(&meta.key, &user_msg).await?;
@@ -703,8 +714,9 @@ impl SessionScheduler {
         &self,
         key: &SessionKey,
         text: &str,
+        display_text: Option<&str>,
     ) -> Result<TurnContext, SchedulerError> {
-        let mut user_msg = Message::user(text);
+        let mut user_msg = Message::user_with_display(text, display_text.map(str::to_string));
         let path = self.store.read_path(key).await?;
         user_msg.parent_id = path.last().map(|m| m.id);
         self.store.append_message(key, &user_msg).await?;
@@ -919,6 +931,7 @@ fn carry_history(path: &[Message], keep: usize) -> Vec<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::message::MessageKind;
     use crate::kernel::plugin::services::{
         ModelChunk, ModelError, ModelResponse, ModelStream, TokenUsage,
     };
@@ -995,6 +1008,34 @@ mod tests {
             bus.clone(),
         );
         (scheduler, clock, store, bus)
+    }
+
+    #[tokio::test]
+    async fn display_text_persisted_on_forced_tool_message() {
+        // force_tool 场景：text（模型指令）与 display_text（前端展示）分离落盘。
+        let (scheduler, _, store, _) = setup();
+        let ctx = scheduler
+            .on_new_message_with_display(
+                "请调用工具 memory::show 处理：数学/向量组的线性相关性",
+                Some("翻看记忆：数学/向量组的线性相关性"),
+            )
+            .await
+            .unwrap();
+        let msgs = store.read_path(&ctx.session_key).await.unwrap();
+        let user = msgs
+            .iter()
+            .find_map(|m| match &m.kind {
+                MessageKind::User {
+                    text, display_text, ..
+                } => Some((text.clone(), display_text.clone())),
+                _ => None,
+            })
+            .expect("应有 user 消息");
+        assert_eq!(
+            user.0,
+            "请调用工具 memory::show 处理：数学/向量组的线性相关性"
+        );
+        assert_eq!(user.1.as_deref(), Some("翻看记忆：数学/向量组的线性相关性"));
     }
 
     /// 确定性 continue 守卫：测试“新消息默认继续当前会话”时替代关键词版 StubGuard。

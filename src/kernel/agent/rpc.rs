@@ -37,6 +37,12 @@ pub enum Method {
         /// 显式工具调用：强制 LLM 首轮调用指定工具（不绕过 LLM）。
         #[serde(default)]
         force_tool: Option<ForcedToolRequest>,
+        /// 暂存文件路径列表（mistake-agent- 前缀临时路径）：模型读图/判分时作为 file 参数。
+        #[serde(default)]
+        file: Vec<String>,
+        /// 持久附件列表（数据根目录 uploads/ 副本）：落进消息文本供前端展示。
+        #[serde(default)]
+        asset: Vec<AttachmentInfo>,
     },
     TriggerCommand {
         entry: String,
@@ -129,9 +135,10 @@ pub struct ForcedToolRequest {
     pub entry: String,
     #[serde(default)]
     pub hint: Option<String>,
-    /// 持久化附件（数据根目录 uploads/ 副本，仅供前端展示；模型参数仍用 hint 的暂存路径）。
+    /// 前端原始展示文本（如「翻看记忆：数学/向量组…」）；缺省时 kernel 按 title＋hint 兜底，
+    /// 落盘到 user 消息的 display_text，重开会话后渲染仍友好。
     #[serde(default)]
-    pub asset: Option<AttachmentInfo>,
+    pub display: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -342,7 +349,12 @@ impl Kernel {
     /// 处理一个请求；返回需要写回 GUI 的响应帧（事件经 EventSink 另发）。
     pub async fn handle(&self, request: RpcRequest) -> Result<Option<RpcFrame>, RpcError> {
         match request.method {
-            Method::SendUserMessage { text, force_tool } => {
+            Method::SendUserMessage {
+                text,
+                force_tool,
+                file,
+                asset,
+            } => {
                 {
                     let state = self.state.lock().await;
                     if state.turn.is_some() {
@@ -353,7 +365,8 @@ impl Kernel {
                     }
                 }
                 // 显式工具调用：构造"强制调用"用户消息并让 loop 首轮带 tool_choice。
-                let mut user_text = text;
+                let mut user_text = text.clone();
+                let mut display_text: Option<String> = None;
                 let mut forced_wire: Option<String> = None;
                 if let Some(ft) = force_tool {
                     let entry = self
@@ -372,19 +385,37 @@ impl Kernel {
                     } else {
                         format!("请调用工具 {} 处理：{}", ft.entry, hint)
                     };
-                    if let Some(asset) = &ft.asset {
-                        user_text.push_str(&format!(
-                            "\n附件：{}|{}（该路径仅用于界面展示，file 参数必须使用前面的暂存路径）",
-                            asset.path, asset.name
-                        ));
-                    }
+                    // 展示文本：优先用前端原始展示（display），否则按 title＋hint 兜底。
+                    display_text =
+                        ft.display
+                            .clone()
+                            .filter(|s| !s.trim().is_empty())
+                            .or_else(|| {
+                                self.registry.entry_title(&ft.entry).map(|title| {
+                                    if hint.is_empty() {
+                                        title
+                                    } else {
+                                        format!("{title}：{hint}")
+                                    }
+                                })
+                            });
                     forced_wire = Some(full_to_wire(&ft.entry));
+                }
+                // 附件信息追加进模型指令（展示文本保持用户原文，不暴露路径）：
+                // 暂存文件路径供模型作 file 参数，持久副本标记供前端展示附件。
+                for f in &file {
+                    user_text.push_str(&format!("\n暂存文件：{f}"));
+                    display_text.get_or_insert_with(|| text.clone());
+                }
+                for a in &asset {
+                    user_text.push_str(&format!("\n附件：{}|{}", a.path, a.name));
+                    display_text.get_or_insert_with(|| text.clone());
                 }
                 // 会话调度（守卫/摘要可能调用 LLM 数十秒）在锁外执行，
                 // 避免阻塞 abort/get_state 等请求。
                 let ctx = self
                     .scheduler
-                    .on_new_message(&user_text)
+                    .on_new_message_with_display(&user_text, display_text.as_deref())
                     .await
                     .map_err(|e| RpcError::new("scheduler_error", e.to_string()))?;
                 let signal = AbortSignal::new();

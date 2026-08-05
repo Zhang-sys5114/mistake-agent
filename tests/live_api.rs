@@ -63,6 +63,8 @@ async fn hello_turn_real_api() {
         method: Method::SendUserMessage {
             text: "你好，请打个招呼".into(),
             force_tool: None,
+            file: vec![],
+            asset: vec![],
         },
     };
     let frame = kernel.handle(req).await.expect("请求失败");
@@ -250,8 +252,10 @@ async fn forced_tool_call_real_api() {
             force_tool: Some(ForcedToolRequest {
                 entry: "practice::generate".into(),
                 hint: Some("绝对值".into()),
-                asset: None,
+                display: None,
             }),
+            file: vec![],
+            asset: vec![],
         },
     };
     let frame = kernel.handle(req).await.expect("请求失败");
@@ -302,6 +306,8 @@ async fn latex_output_real_api() {
         method: Method::SendUserMessage {
             text: "请解释勾股定理，公式必须用 LaTeX 的 $...$ 标记输出。".into(),
             force_tool: None,
+            file: vec![],
+            asset: vec![],
         },
     };
     let frame = kernel.handle(req).await.expect("请求失败");
@@ -476,6 +482,8 @@ async fn pre_turn_context_decision_real_api() {
         method: Method::SendUserMessage {
             text: text.to_string(),
             force_tool: None,
+            file: vec![],
+            asset: vec![],
         },
     };
     kernel
@@ -538,6 +546,8 @@ async fn switch_tool_call_not_polluting_next_context() {
         method: Method::SendUserMessage {
             text: text.to_string(),
             force_tool,
+            file: vec![],
+            asset: vec![],
         },
     };
     let rpc = |id: u64, method: Method| RpcRequest { id, method };
@@ -575,7 +585,7 @@ async fn switch_tool_call_not_polluting_next_context() {
             Some(ForcedToolRequest {
                 entry: "session::switch".into(),
                 hint: Some("批改英语作业".into()),
-                asset: None,
+                display: None,
             }),
         ))
         .await

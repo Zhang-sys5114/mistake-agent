@@ -254,6 +254,7 @@ mod tests {
             parent_id: None,
             kind: MessageKind::User {
                 text: "你好".into(),
+                display_text: None,
                 attachments: vec![],
             },
             created_at: chrono::Utc::now(),
