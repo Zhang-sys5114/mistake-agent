@@ -16,6 +16,7 @@ const busy = ref(false);
 const status = ref("准备中");
 const view = ref("chat");
 const oobeOpen = ref(false);
+const sidebarOpen = ref(true);
 
 const navItems = [
   { id: "chat", label: "聊天", icon: "mdi:chat-processing-outline" },
@@ -38,6 +39,10 @@ function onStatus(s) {
 
 function navigate(viewId) {
   view.value = viewId;
+}
+
+function toggleSidebar() {
+  sidebarOpen.value = !sidebarOpen.value;
 }
 
 onMounted(async () => {
@@ -64,12 +69,12 @@ onMounted(async () => {
   <div class="app">
     <OobePage v-if="oobeOpen" :kernel="kernel" @done="oobeOpen = false" />
 
-    <aside class="sidebar">
+    <aside class="sidebar" :class="{ collapsed: !sidebarOpen }">
       <div class="brand">
         <span class="brand-mark">
           <Icon icon="mdi:book-education-outline" width="24" />
         </span>
-        <span>
+        <span class="brand-text">
           <span class="brand-name">错题 Agent</span>
           <span class="brand-sub">本地智能错题助手</span>
         </span>
@@ -90,7 +95,7 @@ onMounted(async () => {
       </nav>
       <div class="sidebar-foot">
         <div class="status-pill" :class="{ busy, ready: ready && !busy }">
-          <span class="dot"></span>{{ status }}
+          <span class="dot"></span><span class="status-text">{{ status }}</span>
         </div>
         <p class="privacy-note">数据与密钥只保存在本机</p>
       </div>
