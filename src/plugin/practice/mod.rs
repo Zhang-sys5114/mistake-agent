@@ -1,18 +1,21 @@
-//! practice 插件：分层变式练习（场景二入口，本期提供确定性模板 + diagram_spec）。
+//! practice 插件：分层变式练习（场景二入口：薄弱点定位 + 分层变式练习）。
 //!
-//! 插件信息：namespace = practice，requires = []
-//! tools = [generate（变式练习）]
-//! 实现拆分（Linux 内核风格）：`templates.rs` 模板库（题目/答案/图纸同源）
+//! 插件信息：namespace = practice，requires = [Storage, Model]
+//! tools = [generate（变式练习）, gaps（薄弱点定位）]
+//! 实现拆分（Linux 内核风格）：`templates.rs` 模板库（题目/答案/图纸同源）；`gaps.rs` 薄弱点聚合
 
 use serde_json::{Value, json};
 
 use crate::kernel::agent::dispatch::ToolCallContext;
 use crate::kernel::context::PluginContext;
 use crate::kernel::contract::{CallerPolicy, Info, PluginError, ToolDef, ToolError};
+use crate::kernel::plugin::services::ServiceId;
 use crate::kernel::registry::{PluginDescriptor, UserPlugin};
 
+mod gaps;
 mod templates;
 
+use gaps::{GapsParams, gaps_handler};
 use templates::GenerateParams;
 pub use templates::{Difficulty, PracticeItem, SUPPORTED_POINTS, build_item};
 
@@ -22,7 +25,7 @@ impl UserPlugin for PracticePlugin {
     fn info() -> Info {
         Info {
             namespace: "practice".into(),
-            requires: vec![],
+            requires: vec![ServiceId::Storage, ServiceId::Model],
             tools: vec![ToolDef {
                 name: "generate".into(),
                 user_visible: true,
@@ -34,16 +37,45 @@ impl UserPlugin for PracticePlugin {
                 policy: CallerPolicy::UserAndModel,
                 timeout: None,
                 icon: Some("mdi:creation".into()),
+            },
+            ToolDef {
+                name: "gaps".into(),
+                user_visible: true,
+                title: Some("薄弱点定位".into()),
+                group: Some("学习".into()),
+                description: "基于错题本聚合近 N 天薄弱知识点（按错误次数排序，含建议起点难度），用于定位知识漏洞后出题。用法：practice::gaps [学科] [天数] [数量]".into(),
+                params: schemars::schema_for!(GapsParams),
+                policy: CallerPolicy::UserAndModel,
+                timeout: None,
+                icon: Some("mdi:target".into()),
             }],
             ..Default::default()
         }
     }
 
     fn register(ctx: PluginContext<'_>) -> Result<(), PluginError> {
+        let storage = ctx
+            .handles
+            .storage()
+            .cloned()
+            .ok_or_else(|| PluginError::Internal("缺少 Storage 句柄".into()))?;
+        // Model 句柄为 P1「智能出题 / 即时批改」预留：契约已声明，此处先校验存在性。
+        ctx.handles
+            .model()
+            .cloned()
+            .ok_or_else(|| PluginError::Internal("缺少 Model 句柄".into()))?;
+
         ctx.registrar.tool(
             "generate",
             std::sync::Arc::new(|_call_ctx: &ToolCallContext, params: Value| {
                 Box::pin(async move { generate_handler(params).await })
+            }),
+        )?;
+        ctx.registrar.tool(
+            "gaps",
+            std::sync::Arc::new(move |_call_ctx: &ToolCallContext, params: Value| {
+                let storage = storage.clone();
+                Box::pin(async move { gaps_handler(storage, params).await })
             }),
         )
     }
