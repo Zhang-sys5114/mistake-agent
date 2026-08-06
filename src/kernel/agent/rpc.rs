@@ -802,8 +802,10 @@ impl Kernel {
                     .send(Interrupt::SettingsChanged);
                 self.auditor.record(AuditRecord::SettingsChanged);
                 // OOBE 完成路径兜底：目录与 AGENTS.md 初始化（幂等，Kernel::new 已做过一次）。
-                crate::kernel::bootstrap::init_data_root(&crate::kernel::settings::Settings::data_root())
-                    .map_err(|e| RpcError::new("bootstrap_failed", e))?;
+                crate::kernel::bootstrap::init_data_root(
+                    &crate::kernel::settings::Settings::data_root(),
+                )
+                .map_err(|e| RpcError::new("bootstrap_failed", e))?;
                 Ok(Some(RpcFrame::Response {
                     id: request.id,
                     result: Some(view),

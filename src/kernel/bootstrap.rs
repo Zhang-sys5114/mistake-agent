@@ -6,14 +6,7 @@
 use std::path::Path;
 
 /// 数据根目录下的固定子目录（与 ADR-0011 布局一致）。
-const SUBDIRS: [&str; 6] = [
-    "sessions",
-    "mistakes",
-    "memory",
-    "audit",
-    "logs",
-    "uploads",
-];
+const SUBDIRS: [&str; 6] = ["sessions", "mistakes", "memory", "audit", "logs", "uploads"];
 
 /// 默认教学规则模板：占位内容，家长/老师可编辑；仅首次创建时写入。
 const AGENTS_MD_TEMPLATE: &str = r#"# 教学规则（AGENTS.md）
@@ -70,7 +63,11 @@ mod tests {
         }
         let agents = root.join("AGENTS.md");
         assert!(agents.is_file());
-        assert!(std::fs::read_to_string(&agents).unwrap().contains("教学规则"));
+        assert!(
+            std::fs::read_to_string(&agents)
+                .unwrap()
+                .contains("教学规则")
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

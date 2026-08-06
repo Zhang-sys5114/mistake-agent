@@ -27,7 +27,6 @@ impl FileStorage {
     pub fn open(root: &Path) -> Result<Self, StorageError> {
         let sessions_dir = root.join("sessions");
         let mistakes_dir = root.join("mistakes");
-        let audit_dir = root.join("audit");
         // 子目录已由 bootstrap::init_data_root（Kernel::new 引导）创建，此处不再懒创建。
 
         let inner = Arc::new(Mutex::new(Inner::default()));
