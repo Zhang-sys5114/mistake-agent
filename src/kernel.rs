@@ -9,6 +9,7 @@
 
 pub mod agent;
 pub mod audit;
+pub mod bootstrap;
 pub mod context;
 pub mod contract;
 pub mod events;

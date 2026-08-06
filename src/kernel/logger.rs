@@ -86,7 +86,7 @@ fn init_once(level: Level, dir: &Path) -> Result<(), String> {
         Cleanup, Criterion, Duplicate, FileSpec, Logger as FlLogger, Naming, WriteMode,
     };
 
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    // logs/ 目录已由 bootstrap::init_data_root（Kernel::new 引导）创建，此处假定已存在。
     let handle = FlLogger::try_with_str(level.spec())
         .map_err(|e| e.to_string())?
         .log_to_file(FileSpec::default().directory(dir))

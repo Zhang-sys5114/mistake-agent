@@ -214,6 +214,8 @@ impl Kernel {
     pub async fn new(events: Arc<dyn EventSink>) -> Result<Arc<Self>, String> {
         let settings = Arc::new(std::sync::RwLock::new(Settings::load()?));
         let data_root = Settings::data_root();
+        // 数据根目录一次性初始化（子目录 + AGENTS.md 模板，幂等）。
+        crate::kernel::bootstrap::init_data_root(&data_root)?;
         Logger::init(
             settings.read().expect("settings poisoned").log_level,
             &data_root.join("logs"),
@@ -799,6 +801,11 @@ impl Kernel {
                     .interrupt_bus()
                     .send(Interrupt::SettingsChanged);
                 self.auditor.record(AuditRecord::SettingsChanged);
+                // OOBE 完成路径兜底：目录与 AGENTS.md 初始化（幂等，Kernel::new 已做过一次）。
+                crate::kernel::bootstrap::init_data_root(
+                    &crate::kernel::settings::Settings::data_root(),
+                )
+                .map_err(|e| RpcError::new("bootstrap_failed", e))?;
                 Ok(Some(RpcFrame::Response {
                     id: request.id,
                     result: Some(view),
