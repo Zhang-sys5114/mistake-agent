@@ -61,6 +61,6 @@
 
 ## 5. 落地状态（2026-08-04）
 
-`practice::generate` 已按本文档实现（practice 插件 + 3 个内置模板 + diagram_spec 输出，与前端 geometry.js 渲染器同源协议）：三角形全等（几何图）、绝对值（代数）、一般现在时三单（填空）。当前为确定性模板生成（不依赖 LLM），分层难度 basic/variant/advanced 通过参数槽控制；`practice::gaps` 已实现薄弱点定位（聚合错题本近 N 天错题、按错误次数排序、给出建议起点难度 basic/variant/advanced），供「定位漏洞 → 出题」链路使用。
+`practice::generate` 已按本文档实现（practice 插件 + 3 个内置模板 + diagram_spec 输出，与前端 geometry.js 渲染器同源协议）：三角形全等（几何图）、绝对值（代数）、一般现在时三单（填空）。当前为确定性模板生成（不依赖 LLM），分层难度 basic/variant/advanced 通过参数槽控制；`practice::gaps` 已实现薄弱点定位（聚合错题本近 N 天错题、按错误次数排序、给出建议起点难度 basic/variant/advanced），供「定位漏洞 → 出题」链路使用；`practice::check` 已实现练习答案即时批改（参考答案可对拍直接判分，否则主模型判分，答错自动回写错题本），为防重复刷题积累数据。
 
 **未落地（后续）**：compute::verify 对 diagram_spec 的可解性对拍管线（模板参数自洽校验）、模板库扩充、高考真题池、图与解析并排 UI。
