@@ -22,8 +22,13 @@ export function parseAttachments(text) {
   return out;
 }
 
-/** 会话消息树 → 前端气泡；同一父节点的兄弟互为分支。 */
-export function renderPath(messages) {
+/**
+ * 会话消息树 → 前端气泡；同一父节点的兄弟互为分支。
+ * opts.history=true（会话历史页）保留 system 消息完整原文；
+ * 聊天合并流（默认）中，会话切换摘要只显示一次「会话已切换」：
+ * 旧会话的交接摘要不渲染，新会话的上一会话梗概显示精简文案。
+ */
+export function renderPath(messages, opts = {}) {
   const byParent = new Map();
   for (const m of messages || []) {
     const key = m.parent_id ? String(m.parent_id) : "__root__";
@@ -72,7 +77,22 @@ export function renderPath(messages) {
         return { ...base, type: "assistant", text: kind.text || "" };
       }
       if (kind.kind === "system") {
-        return { ...base, type: "system", text: kind.text || "" };
+        const raw = kind.text || "";
+        if (opts.history) {
+          // 历史页保留完整交接记录，不隐藏。
+          return { ...base, type: "system", text: raw };
+        }
+        // 聊天合并流：旧会话交接摘要不渲染（新数据 display_text 为空，旧数据按前缀识别）。
+        if (kind.display_text === "" || /^交接摘要[:：]/.test(raw)) return null;
+        // 上一会话梗概：聊天流显示为「会话已切换」（新数据取 display_text，旧数据按前缀兜底）。
+        if (kind.display_text || /^上一会话梗概[:：]/.test(raw)) {
+          return { ...base, type: "system", text: kind.display_text || "会话已切换" };
+        }
+        return {
+          ...base,
+          type: "system",
+          text: raw,
+        };
       }
       if (kind.kind === "reasoning") {
         return { ...base, type: "reasoning", text: kind.text || "" };

@@ -598,7 +598,7 @@ fn message_chars(msg: &Message) -> usize {
     match &msg.kind {
         MessageKind::User { text, .. }
         | MessageKind::Assistant { text }
-        | MessageKind::System { text } => text.len(),
+        | MessageKind::System { text, .. } => text.len(),
         MessageKind::Reasoning { text, .. } => text.len(),
         MessageKind::ToolCall { entry, params, .. } => {
             entry.len() + serde_json::to_string(params).unwrap_or_default().len()
@@ -717,7 +717,7 @@ mod tests {
         assert!(
             matches!(
                 outcome.messages[0].kind,
-                MessageKind::System { ref text } if text.contains("上下文压缩摘要")
+                MessageKind::System { ref text, .. } if text.contains("上下文压缩摘要")
             ),
             "摘要应作为 system 消息写入"
         );

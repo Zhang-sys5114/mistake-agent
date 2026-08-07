@@ -296,7 +296,7 @@ fn message_text(msg: &Message) -> String {
     match &msg.kind {
         MessageKind::User { text, .. } => format!("用户：{text}"),
         MessageKind::Assistant { text } => format!("助手：{text}"),
-        MessageKind::System { text } => format!("系统：{text}"),
+        MessageKind::System { text, .. } => format!("系统：{text}"),
         MessageKind::Reasoning { text, .. } => format!("推理：{text}"),
         MessageKind::ToolCall {
             entry,
@@ -800,7 +800,12 @@ impl SessionScheduler {
                 let all = self.store.read_all(&meta.key).await?;
                 let active = self.store.read_path(&meta.key).await?;
                 let summary = self.summarizer.summarize(&all, meta.goal.as_ref()).await;
-                let mut handoff = Message::system(format!("交接摘要：{summary}"));
+                // 旧会话的交接摘要：聊天合并流里不渲染（display_text 为空），
+                // 完整记录保留在 text 中供历史页展示与模型上下文使用。
+                let mut handoff = Message::system_with_display(
+                    format!("交接摘要：{summary}"),
+                    Some(String::new()),
+                );
                 handoff.parent_id = all.last().map(|m| m.id);
                 self.store.append_message(&meta.key, &handoff).await?;
                 self.store.archive(&meta.key).await?;
@@ -808,7 +813,11 @@ impl SessionScheduler {
                 self.create_session(to, goal.clone(), now).await?;
                 // 无感知切换：新会话注入「梗概 + 旧会话最近消息副本」，
                 // 模型上下文与消息树都保留连续历史（跨上上个会话由链式复制累积）。
-                let handoff = Message::system(format!("上一会话梗概：{summary}"));
+                // 新会话的上一会话梗概：聊天流里显示为「会话已切换」。
+                let handoff = Message::system_with_display(
+                    format!("上一会话梗概：{summary}"),
+                    Some("会话已切换".to_string()),
+                );
                 self.store.append_message(&to, &handoff).await?;
                 let copied = carry_history(&active, self.history_carryover);
                 for (i, mut m) in copied.into_iter().enumerate() {
@@ -1115,6 +1124,24 @@ mod tests {
             .find(|m| m.status == SessionStatus::Archived)
             .expect("旧会话应归档");
         assert_eq!(archived.key, first.session_key);
+        // 旧会话尾部写「交接摘要」：display_text 为空 = 聊天合并流不渲染，
+        // 完整记录保留在 text 中供历史页展示。
+        // 交接摘要在旧会话完整消息树里（read_all；read_path 只到 active 链尾，不含它）。
+        let old_msgs = store.read_all(&archived.key).await.unwrap();
+        assert!(
+            old_msgs.iter().any(|m| {
+                matches!(
+                    m.kind,
+                    crate::kernel::message::MessageKind::System {
+                        ref text,
+                        ref display_text,
+                        ..
+                    } if text.contains("交接摘要")
+                        && display_text.as_deref() == Some("")
+                )
+            }),
+            "旧会话应写交接摘要（display_text 为空=聊天不渲染）"
+        );
         let active = metas
             .iter()
             .find(|m| m.status == SessionStatus::Active)
@@ -1133,11 +1160,15 @@ mod tests {
             msgs.iter().any(|m| {
                 matches!(
                     m.kind,
-                    crate::kernel::message::MessageKind::System { ref text }
-                        if text.contains("上一会话梗概")
+                    crate::kernel::message::MessageKind::System {
+                        ref text,
+                        ref display_text,
+                        ..
+                    } if text.contains("上一会话梗概")
+                        && display_text.as_deref() == Some("会话已切换")
                 )
             }),
-            "新会话应注入旧会话梗概"
+            "新会话应注入旧会话梗概（display_text=会话已切换）"
         );
         let interrupts = bus.take_all();
         assert!(

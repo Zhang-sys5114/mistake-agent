@@ -94,7 +94,7 @@ onMounted(loadSessions);
       <div class="session-detail">
         <TransitionGroup name="msg" tag="div" class="bubbles">
           <MessageBubble
-            v-for="b in renderPath(detail.messages)"
+            v-for="b in renderPath(detail.messages, { history: true })"
             :key="b.messageId"
             :bubble="b"
             :streaming="false"
