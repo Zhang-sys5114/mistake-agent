@@ -223,6 +223,14 @@ mistake-agent/
 
 后续计划：**M7 = Agent core 剥离为 `so-lite-agent` crate**（ADR-0037，未落地）——参考 Pi 分层，开箱即用，内核/用户插件由使用方编写；实施顺序见 [docs/plan/so-lite-agent.md](plan/so-lite-agent.md)。
 
+产品路线图（规划中，未排期）：
+
+| 阶段 | 内容 | 关键点 |
+|---|---|---|
+| 近期（桌面输入增强） | 剪贴板粘贴截图（Ctrl+V）；摄像头拍题 | 走现有附件暂存管线（vision__read → 判分归档）；WebView2 摄像头权限 |
+| 中期（Android 手机/平板） | Tauri v2 Android target：移动壳 + 触控/窄屏响应式 + 相册/摄像头/剪贴板输入 + Pyodide 移动端验证 | 移动存储路径与权限模型、离线包体积、性能；Windows 装 Android SDK 即可构建，不依赖 macOS |
+| 长期（iOS / iPadOS） | Android 落地后追加 iOS/iPadOS target | 本机无 macOS：构建/签名/发布走云 macOS（GitHub Actions macOS runner——公开仓库免费额度，优先；备选 Codemagic / MacStadium）、Apple 权限模型 |
+
 ## 11. 分工建议（3-5 人）
 
 | 角色 | 负责 | 对应里程碑 |
