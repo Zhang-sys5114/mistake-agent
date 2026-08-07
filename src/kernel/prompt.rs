@@ -1,6 +1,7 @@
 //! Prompt 库（任务书交付物之一，集中维护，改动见 docs/prompts.md）。
 
 /// Agent 系统提示：每个主模型请求注入（不落消息树）。
+#[allow(unused_mut)] // release 构建不含 debug 段，mut 仅在 debug_assertions 下使用
 pub fn agent_system_prompt() -> String {
     let mut prompt = r#"你是「错题 Agent」，一名面向中学生的本地智能学习助手。你的工作是通过工具完成作业批改与错题管理，回答要耐心、清楚，用中学生能听懂的语言。
 
