@@ -15,7 +15,7 @@
 |---|---|
 | registry | namespace 撞名、wire 撞名、requires 不可满足、懒注册 |
 | dispatch | 注册链路、命令回退同名工具 |
-| session | 首消息建会话、空闲超时开新会话、守卫决策（stub+LLM 解析失败保底）、分支派生/切分支、压缩摘要、InterruptBus |
+| session | 首消息建会话、空闲超时/start_new/session::switch 树内分叉（摘要节点+新子树）、守卫决策（stub+LLM 解析失败保底）、消息级分支派生/切分支、上下文裁剪（scope_session_context）、压缩摘要、InterruptBus |
 | storage | 错题 CRUD、会话追加/归档、active_path/derive_branch/splice_compaction |
 | memory | 文件 CRUD、目录浏览、子树删除、路径校验（绝对/../空段） |
 | model | SSE 解析、usage 解析（response.usage 顶层）、ToolCall 展开 |
@@ -61,7 +61,7 @@
 | 12 | 回合失败后界面/状态未恢复 | 失败时未发 turn_end | 已修：失败发 `turn_end(failed)` + error，前端恢复可聊天 |
 | 13 | DeepSeek 503 导致守卫/摘要/回合失败 | 无重试 | 已修：守卫/摘要对瞬时错误重试 2 次（线性退避），主回合流重试 1 次；系统性错误（无余额/模型下架）不重试直接降级；单测模拟 503→成功通过 |
 | 14 | 工具调用回合报"reasoning_text must be passed back"（批改失败） | **真实根因是 call_id 不匹配**：loop 丢弃首轮 function_call 的真实 call_id，第二轮回填用随机 uuid；DeepSeek 对错误 call_id 的报错信息误导为 reasoning | 已修：ToolCall 消息保存真实 call_id（tool_call_with_id），回传时优先使用；保留 reasoning 回传（无害）；真实批改多轮验证通过 |
-| 15 | 会话切换后上下文/历史断裂 | 切换只注入摘要，模型记不住之前对话 | 已修：无感知切换——新会话注入梗概 + 旧会话最近 20 条消息副本（parent 链连续），会话历史页可见连续记录 |
+| 15 | 会话切换后上下文/历史断裂 | 切换只注入摘要，模型记不住之前对话 | 已修：切换 = 树内分叉——当前节点下挂「摘要节点 + 新会话子树」，摘要作为上下文边界，旧分支保留为兄弟版本（GUI < / > 可切回） |
 
 ## 4. 成本观察（真实调用）
 

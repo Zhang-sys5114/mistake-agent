@@ -172,8 +172,8 @@ pub trait UserPlugin {
 ## 7. 会话与消息树（ADR-0006/0007）
 
 - `SessionKey` = UUID；守卫模型（生产实现 = 主模型 + guard_prompt 独立调用）在"新消息到达"时决策 continue/update_goal/start_new；**start_new 只在有新消息时触发**，回合结束只允许 continue/update_goal；守卫失败/不确定时默认 continue（存疑即继续）。
-- 交接摘要（handoff）：生产实现 = 主模型 + summarize_prompt 生成，旧会话归档时注入摘要，新会话注入旧会话梗概；摘要与完整历史分别经 `session::read` / `session::history` 可查。
-- 空闲超时 12h：超时后新消息直接开新会话（旧会话归档 + 交接摘要注入）。
+- 会话分叉摘要：`start_new` / 空闲超时 / `session::switch` 均树内分叉——当前消息节点下挂「上一会话梗概」摘要节点（生产实现 = 主模型 + summarize_prompt 生成），新用户消息随后，旧分支保留为兄弟版本；摘要节点是模型上下文边界（scope_session_context 从摘要起算）。完整历史经 `session::history` 可查。
+- 空闲超时 12h：超时后新消息在同一棵树内分叉出新会话子树（摘要节点开头）。
 - 消息气泡：一个输出 item = 一个气泡，**完成即落盘**（含 assistant 回复与工具调用）；中断只丢半截，已完整气泡保留。
 - 消息树：`edit_message` 从被编辑消息的父节点派生新消息并更新 active_path（旧分支完整保留）；仅 user 消息可编辑（改完重发，自动重新回答），assistant 等模型消息不可编辑；`switch_branch` 切换 active_path；`read_path` 只读活跃路径，旁支不进入 LLM 上下文。
 - `InterruptBus`（内部中断，ADR-0023）：环境变更信号队列（会话切换/目标更新/设置变更/记忆变更/压缩），RPC 回合任务在消息进入后与回合收尾后各消费一次，转成 GUI 事件并写审计。
