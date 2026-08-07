@@ -531,9 +531,8 @@ impl AgentLoop {
             usage: usage_opt(&turn_usage),
             session_key: current_session,
         };
-        self.events.emit(Event::TurnEnd {
-            stop_reason: outcome.stop_reason.clone(),
-        });
+        // TurnEnd 事件不在 loop 内发：由 RPC 层在消息落盘 + active_path 更新后发出
+        // （否则前端收到 turn_end 立刻回读会话时，活跃路径还是旧的，新消息会从链上消失）。
         self.auditor.record(AuditRecord::TurnEnded {
             stop_reason: format!("{:?}", outcome.stop_reason),
             tool_calls,

@@ -11,7 +11,7 @@ use crate::kernel::agent::dispatch::Dispatch;
 use crate::kernel::agent::loop_mod::{AgentLoop, TurnInput, TurnOutcome};
 use crate::kernel::agent::session::{
     Interrupt, InterruptBus, LlmSummarizer, LlmTurnDecider, SessionKey, SessionScheduler,
-    SessionStatus, SessionSwitch, SystemClock,
+    SessionStatus, SessionSwitch, SystemClock, scope_session_context,
 };
 use crate::kernel::audit::{AuditRecord, Auditor};
 use crate::kernel::contract::{CallerPolicy, full_to_wire};
@@ -358,6 +358,18 @@ impl Kernel {
     ) -> Result<(), RpcError> {
         let signal = AbortSignal::new();
         let tools = self.registry.model_tools();
+        // 会话上下文边界：从最近的「上一会话梗概」起算，旧会话内容不进模型上下文。
+        let messages = scope_session_context(&messages);
+        // 注入当前会话 ID：分叉会话 = 摘要节点（会话边界）的消息 UUID；根会话 = 链首消息 UUID。
+        // 模型据此确认是否真的切换到了新会话（分叉后 ID 变化，会话内保持不变）。
+        let session_id = messages
+            .first()
+            .map(|m| m.id.to_string())
+            .unwrap_or_else(|| key.to_string());
+        let mut scoped_messages = Vec::with_capacity(messages.len() + 1);
+        scoped_messages.push(Message::system(format!("当前会话 ID：{session_id}")));
+        scoped_messages.extend(messages);
+        let messages = scoped_messages;
         let loop_engine = self.loop_engine.clone();
         let scheduler = self.scheduler.clone();
         let store = self.store.clone();
@@ -445,6 +457,10 @@ impl Kernel {
                             message: format!("回合收尾失败：{e}"),
                         });
                     }
+                    // 消息已落盘、活跃路径已推进：此刻通知前端刷新，链式渲染不会丢新消息。
+                    events.emit(Event::TurnEnd {
+                        stop_reason: outcome.stop_reason.clone(),
+                    });
                     if let Some(usage) = &outcome.usage {
                         cache.record_main(&persist_key, usage);
                         // 实时推送：前端收到事件即更新，无需再查一次（可能读到旧值）。
