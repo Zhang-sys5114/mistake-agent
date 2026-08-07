@@ -1,8 +1,13 @@
 <script setup>
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { Icon } from "@iconify/vue";
 import MessageBubble from "./MessageBubble.vue";
-import { renderPath } from "../lib/messages";
+import {
+  buildSessionView,
+  getActiveChain,
+  navigateBranch,
+  renderPath,
+} from "../lib/messages";
 import { loadToolCatalog } from "../lib/tools";
 
 const props = defineProps({ kernel: { type: Object, required: true } });
@@ -11,6 +16,26 @@ const loading = ref(false);
 const error = ref("");
 const sessions = ref([]);
 const detail = ref(null); // { meta, messages }
+const sessionView = ref(null); // buildSessionView（含逐节点版本指针）
+
+const chainBubbles = computed(() =>
+  sessionView.value ? renderPath(sessionView.value, { history: true }) : [],
+);
+
+/** < / > 切换版本：本地改版本指针；活跃会话同步服务端（继续发送从所选版本走）。 */
+function switchBranch(bubble, dir = 1) {
+  if (!sessionView.value) return;
+  navigateBranch(sessionView.value, bubble.messageId, dir);
+  if (detail.value?.meta?.status === "active") {
+    const chain = getActiveChain(sessionView.value);
+    const end = chain.length ? String(chain[chain.length - 1].id) : null;
+    if (end) {
+      props.kernel
+        .call("switch_branch", { message_id: end })
+        .catch(() => {});
+    }
+  }
+}
 
 async function loadSessions() {
   loading.value = true;
@@ -40,6 +65,10 @@ async function openSession(key) {
       loadToolCatalog(props.kernel),
     ]);
     detail.value = r;
+    sessionView.value = buildSessionView(
+      r.messages,
+      r.meta?.active_path || null,
+    );
   } catch (e) {
     error.value = `读取会话失败：${e.message}`;
   } finally {
@@ -94,10 +123,11 @@ onMounted(loadSessions);
       <div class="session-detail">
         <TransitionGroup name="msg" tag="div" class="bubbles">
           <MessageBubble
-            v-for="b in renderPath(detail.messages, { history: true })"
+            v-for="b in chainBubbles"
             :key="b.messageId"
             :bubble="b"
             :streaming="false"
+            @switch-branch="switchBranch"
           />
         </TransitionGroup>
       </div>

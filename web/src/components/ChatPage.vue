@@ -5,7 +5,12 @@ import MessageBubble from "./MessageBubble.vue";
 import AttachmentViewer from "./AttachmentViewer.vue";
 import { runPython } from "../lib/pyodide";
 import { attachmentUrl } from "../lib/attachments";
-import { renderPath } from "../lib/messages";
+import {
+  buildSessionView,
+  getActiveChain,
+  navigateBranch,
+  renderPath,
+} from "../lib/messages";
 import { loadToolCatalog, toolIcon, toolList } from "../lib/tools";
 
 const props = defineProps({
@@ -20,7 +25,8 @@ const toolStatus = ref(null); // { entry, message, icon }
 const bubbles = ref([]);
 const editingId = ref(null);
 const currentStreamId = ref(null);
-const branchPointers = ref({});
+const sessionViews = ref({}); // sessionKey -> buildSessionView（含逐节点版本指针）
+const activeSessionKey = ref(null);
 const tools = ref([]); // 用户可见工具（list_tools，供输入候选）
 const suggestions = ref([]);
 const activeSuggestion = ref(-1);
@@ -264,31 +270,46 @@ function finalize() {
   currentStreamId.value = null;
 }
 
-/** 全量历史：所有会话的消息按时间合并成一条大树（副本按消息 id 去重）。 */
+/** 用缓存的会话视图重建合并气泡流（聊天页：各会话只渲染活跃链，副本按 id 去重）。 */
+function renderMergedBubbles() {
+  const seen = new Set();
+  const all = [];
+  for (const [key, view] of Object.entries(sessionViews.value)) {
+    for (const b of renderPath(view, { sessionKey: key })) {
+      const id = String(b.messageId);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      all.push(b);
+    }
+  }
+  all.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  if (all.length) {
+    bubbles.value = all;
+    scrollBottom();
+  }
+}
+
+/** 全量历史：每个会话建消息树视图（DeepSeek 式逐节点版本指针），只渲染活跃链。 */
 async function refreshAllHistory() {
   try {
     const list = await props.kernel.call("list_sessions", {}, 8000);
     const arr = list.sessions || [];
-    const seen = new Set();
-    const all = [];
+    const views = {};
+    activeSessionKey.value =
+      arr.find((s) => s.status === "active")?.key || null;
     for (const s of arr) {
       try {
         const detail = await props.kernel.call("read_session", { key: s.key }, 8000);
-        for (const m of detail.messages || []) {
-          const id = String(m.id);
-          if (seen.has(id)) continue;
-          seen.add(id);
-          all.push(m);
-        }
+        views[s.key] = buildSessionView(
+          detail.messages,
+          detail.meta?.active_path || null,
+        );
       } catch {
         // 单个会话读取失败不阻断整体历史。
       }
     }
-    all.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-    if (all.length) {
-      bubbles.value = renderPath(all);
-      scrollBottom();
-    }
+    sessionViews.value = views;
+    renderMergedBubbles();
   } catch (e) {
     // list_sessions/read_session 尚未接通时，聊天仍可用，只是没有分支/编辑入口。
     if (e.code !== "not_implemented") console.warn("会话回读失败：", e);
@@ -484,9 +505,9 @@ async function saveEdit(text) {
   busy.value = true;
   setStatus(true, "正在重新回答");
   try {
-    const r = await props.kernel.call("edit_message", { message_id: id, text });
-    if (r.messages) bubbles.value = renderPath(r.messages);
-    scrollBottom();
+    await props.kernel.call("edit_message", { message_id: id, text });
+    // 从服务端重读：编辑后的版本就地替换，其余对话保持不塌缩。
+    await refreshAllHistory();
   } catch (e) {
     busy.value = false;
     setStatus(false, "就绪");
@@ -494,19 +515,21 @@ async function saveEdit(text) {
   }
 }
 
-async function switchBranch(bubble) {
-  const ids = bubble.siblingIds || [];
-  if (!ids.length) return;
-  const key = bubble.parentId || "__root__";
-  const idx = (branchPointers.value[key] ?? 0) % ids.length;
-  const target = ids[idx];
-  branchPointers.value = { ...branchPointers.value, [key]: (idx + 1) % ids.length };
-  try {
-    const r = await props.kernel.call("switch_branch", { message_id: target });
-    if (r.messages) bubbles.value = renderPath(r.messages);
-    scrollBottom();
-  } catch (e) {
-    addBubble({ type: "error", text: `分支切换失败：${e.message}` });
+/** < / > 切换版本（DeepSeek 式）：本地改版本指针即时渲染；活跃会话同步服务端。 */
+function switchBranch(bubble, dir = 1) {
+  const view = bubble.sessionKey ? sessionViews.value[bubble.sessionKey] : null;
+  if (!view) return;
+  navigateBranch(view, bubble.messageId, dir);
+  renderMergedBubbles();
+  // 活跃会话：把新链末端同步给服务端，后续发送从所选版本继续。
+  if (bubble.sessionKey === activeSessionKey.value) {
+    const chain = getActiveChain(view);
+    const end = chain.length ? String(chain[chain.length - 1].id) : null;
+    if (end) {
+      props.kernel
+        .call("switch_branch", { message_id: end })
+        .catch(() => {});
+    }
   }
 }
 
@@ -538,6 +561,7 @@ onUnmounted(() => unsubscribe?.());
   <div class="chat-page">
     <div class="chat-topbar">
       <button
+        v-if="false"
         class="cache-chip"
         :title="cacheTitle"
         aria-label="聊天上下文缓存命中率"

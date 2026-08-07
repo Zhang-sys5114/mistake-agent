@@ -135,15 +135,27 @@ function attachmentIcon(att) {
       >
         <Icon icon="mdi:pencil-outline" />
       </button>
-      <button
-        v-if="bubble.siblingIds && bubble.siblingIds.length"
-        class="icon-btn"
-        aria-label="切换分支"
-        title="查看其它分支"
-        @click="emit('switch-branch', bubble)"
-      >
-        <Icon icon="mdi:source-branch" />
-      </button>
+      <span v-if="bubble.versionCount > 1" class="version-nav">
+        <button
+          class="icon-btn"
+          aria-label="上一个版本"
+          title="查看上一个版本"
+          @click="emit('switch-branch', bubble, -1)"
+        >
+          <Icon icon="mdi:chevron-left" />
+        </button>
+        <span class="version-count" aria-hidden="true">
+          {{ bubble.versionIndex + 1 }}/{{ bubble.versionCount }}
+        </span>
+        <button
+          class="icon-btn"
+          aria-label="下一个版本"
+          title="查看下一个版本"
+          @click="emit('switch-branch', bubble, 1)"
+        >
+          <Icon icon="mdi:chevron-right" />
+        </button>
+      </span>
       <button
         v-if="bubble.type === 'assistant'"
         class="icon-btn"
