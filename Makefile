@@ -80,6 +80,8 @@ ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 BIN          := target/release/mistake-agent$(EXE_EXT)
 BUNDLE_DIR   := target/release/bundle
 FRONTEND_DST := web/dist
+# 前端源码清单（git ls-files 跨平台；含未跟踪的新文件，避免新增文件不触发重建）
+FRONTEND_SRC := $(shell git ls-files web/src web/index.html web/vite.config.js) $(shell git ls-files --others --exclude-standard web/src)
 
 # Pyodide 离线 wheel 标记（任一文件存在即视为已下载）
 PYODIDE_WHEEL := web/node_modules/pyodide/numpy-2.4.3-cp314-cp314-pyemscripten_2026_0_wasm32.whl
@@ -133,7 +135,7 @@ $(PYODIDE_WHEEL):
 
 build-frontend: $(FRONTEND_DST) ## 构建前端（vite build）
 
-$(FRONTEND_DST): web/node_modules/.package-lock.json $(PYODIDE_WHEEL) web/src web/index.html web/vite.config.js
+$(FRONTEND_DST): web/node_modules/.package-lock.json $(PYODIDE_WHEEL) $(FRONTEND_SRC)
 	@echo "[build] vite build"
 	@cd web && npm run build
 
