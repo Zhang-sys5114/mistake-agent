@@ -1,6 +1,5 @@
 <script setup>
 import { Icon } from "@iconify/vue";
-import { renderMarkdown } from "../lib/markdown";
 
 defineProps({
   bubble: { type: Object, required: true },
@@ -32,7 +31,11 @@ function attachmentIcon(att) {
       :class="[bubble.type, { streaming }]"
       :data-message-id="bubble.messageId"
     >
-      <div v-if="bubble.type === 'assistant'" class="md-body" v-html="renderMarkdown(bubble.text)"></div>
+      <div
+        v-if="bubble.type === 'assistant'"
+        class="md-body"
+        v-html-smiles="bubble.text"
+      ></div>
       <div v-else-if="bubble.type === 'system'" class="md-body system-note">{{ bubble.text }}</div>
       <div v-else-if="bubble.type === 'tool'" class="tool-card">
         <div class="tool-card-head">

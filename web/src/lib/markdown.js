@@ -6,6 +6,8 @@ import { marked } from "marked";
 import DOMPurify from "dompurify";
 import katex from "katex";
 import "katex/dist/katex.min.css";
+// mhchem 扩展：注册 \ce{} / \pu{} 等化学宏（化学式、方程式、同位素、单位）。
+import "katex/dist/contrib/mhchem.mjs";
 import markedKatex from "marked-katex-extension";
 
 marked.use(

@@ -2518,6 +2518,27 @@ textarea {
   overflow-y: hidden;
 }
 
+.md-body .smiles-canvas {
+  margin: 8px 0;
+  display: flex;
+  justify-content: center;
+  padding: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+}
+
+.md-body .smiles-canvas svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.md-body .smiles-canvas.smiles-error {
+  display: block;
+  color: var(--color-text);
+  font-size: 13px;
+}
+
 /* ---------- 10. 响应式 ---------- */
 
 /* Tablet: 768-1024px — sidebar stays icon-only, cards adjust */

@@ -11,10 +11,15 @@ pub fn agent_system_prompt() -> String {
 - 工具名以工具列表为准（wire 名用双下划线，如 vision__read），不要按 :: 格式拼接或猜测工具名。
 - 不要引导用户输入、粘贴或猜测图片/PDF 的文件路径；文件路径只由应用界面生成，学生不需要也看不到路径。
 - 工具调用失败时区分处理：可换参数重试的，改参数再试一次；系统性错误（模型不可用、余额不足等）直接告知用户，不要反复重试同一调用。
+- 数学、物理等涉及计算的题目，请查找有无验算工具（一般是compute__verify），不要纯手推，必须先验算再推理。
 
 表达规范：
 - 用中文回答。
-- 数学、物理、化学等富文本内容必须用 LaTeX 标记，以便前端增强渲染：行内公式用 $...$（如 $x^2$、$\\frac{a}{b}$、$\\sqrt{2}$），独立公式用 $$...$$；化学式用 \\mathrm{}（如 $\\mathrm{H_2O}$），向量/矩阵用 \\vec{}、\\begin{pmatrix}...\\end{pmatrix}；公式不要用图片或 Unicode 伪符号代替。
+- 数学、物理、化学等富文本内容必须用 LaTeX 标记，以便前端增强渲染：行内公式用 $...$（如 $x^2$、$\frac{a}{b}$、$\sqrt{2}$），独立公式用 $$...$$；化学式用 \ce{}（如 $\ce{H2O}$、$\ce{CO2 + H2O -> H2CO3}$，前端已启用 mhchem 宏包），不要用 \chemfig 等结构式宏包（前端无法渲染）；需要展示分子结构式（键线式，如苯环、官能团结构）时，用 SMILES 记法输出 ```smiles 代码块，代码块内只放一行 SMILES（如
+```smiles
+C1=CC=CC=C1
+```
+表示苯）；向量/矩阵用 \vec{}、\begin{pmatrix}...\end{pmatrix}；公式不要用图片或 Unicode 伪符号代替。
 - 不向学生展示你的思考过程（reasoning 内容）。
 - 涉及心理、健康等敏感话题时，提醒学生向老师或家长求助。
 
@@ -37,9 +42,10 @@ pub fn grading_system_prompt() -> &'static str {
      每项字段：number（题号）、question（题目）、student_answer（学生作答）、subject（学科，数学/英语/物理/化学/生物/语文等，无法判断填\"未分类\"）、\
      reference_answer（该题参考答案，可为 null）、correct（是否答对）、score（得分）、total（满分）、\
      knowledge_point（知识点）、analysis（错因分析）。\
-     题目与作答中的公式一律用 LaTeX 标记保留：行内 $...$（如 $x^2$、$\\frac{1}{2}$），化学式用 $\\mathrm{H_2O}$；\
+    题目与作答中的公式一律用 LaTeX 标记保留：行内 $...$（如 $x^2$、$\\frac{1}{2}$），化学式用 $\\ce{H2O}$（mhchem 宏包，勿用 \\chemfig 等结构式宏包）；参考答案中需要展示结构式时用 ```smiles 代码块给出 SMILES（如 ```smiles\nC1=CC=CC=C1\n``` 表示苯环），代码块内只放一行 SMILES；\
      不要在 question/reference_answer/analysis 里用图片或 Unicode 伪符号代替公式。\
      对词形/时态/词性填空，以语法正确性为准判分：时态一致、主谓一致、词性转换正确即判对（如 The sun is bright → sunny 应判对）。\
+     如果是数学、物理等涉及计算的题目，请查找有无验算工具（一般是compute__verify），不要纯手推，必须先验算再推理。\
      即使只有一题，也必须用数组包裹（如 [{...}]），不要输出对象。"
 }
 

@@ -170,3 +170,7 @@ _Avoid_: 项目目录、工作区
 **Learning task（学习任务）**:
 学生在一次会话中要完成的学习单元（批改一次作业、一轮复习等），与会话一一对应。
 _Avoid_: 任务（Task，易与工具任务混淆）
+
+**Chemistry rendering（化学渲染）**:
+前端 Markdown 中化学内容的渲染方式：KaTeX + 官方 mhchem 扩展（`\ce{}` / `\pu{}`）支持化学式、方程式、同位素与单位；结构式（键线式）由模型以 SMILES 代码块（```smiles）输出，前端 smiles-drawer 绘制 SVG；不支持 chemfig/TikZ 类结构式宏包（KaTeX 无 TikZ 引擎，需完整 LaTeX 才可编译）。
+_Avoid_: 直接把 chemfig 当 KaTeX 宏包引入（会静默渲染失败）、让模型输出结构式图片或 Unicode 伪图形

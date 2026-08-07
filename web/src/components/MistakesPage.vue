@@ -1,7 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Icon } from "@iconify/vue";
-import { renderMarkdown } from "../lib/markdown";
 
 const props = defineProps({ kernel: { type: Object, required: true } });
 
@@ -309,7 +308,7 @@ onMounted(load);
         </div>
 
         <!-- 题干 2 行截断 -->
-        <div class="mistake-question-clamp md-body" v-html="renderMarkdown(m.question)"></div>
+        <div class="mistake-question-clamp md-body" v-html-smiles="m.question"></div>
 
         <!-- 作答对比压缩为一行 -->
         <div class="answer-strip">
@@ -356,7 +355,7 @@ onMounted(load);
               <h3 class="drawer-section-title">
                 <Icon icon="mdi:help-circle-outline" width="18" />题目
               </h3>
-              <div class="drawer-question md-body" v-html="renderMarkdown(drawerItem.question)"></div>
+              <div class="drawer-question md-body" v-html-smiles="drawerItem.question"></div>
             </section>
 
             <!-- 你的作答 / 参考答案 红绿对照 -->
@@ -369,13 +368,13 @@ onMounted(load);
                   <div class="answer-block-label">
                     <Icon icon="mdi:pencil-outline" width="16" />你的作答
                   </div>
-                  <div class="answer-block-text md-body" v-html="renderMarkdown(drawerItem.student_answer)"></div>
+                  <div class="answer-block-text md-body" v-html-smiles="drawerItem.student_answer"></div>
                 </div>
                 <div v-if="drawerItem.reference_answer" class="answer-block reference">
                   <div class="answer-block-label">
                     <Icon icon="mdi:check-decagram-outline" width="16" />参考答案
                   </div>
-                  <div class="answer-block-text md-body" v-html="renderMarkdown(drawerItem.reference_answer)"></div>
+                  <div class="answer-block-text md-body" v-html-smiles="drawerItem.reference_answer"></div>
                 </div>
               </div>
             </section>
@@ -385,7 +384,7 @@ onMounted(load);
               <h3 class="drawer-section-title">
                 <Icon icon="mdi:lightbulb-on-outline" width="18" />错因分析
               </h3>
-              <div class="drawer-analysis md-body" v-html="renderMarkdown(drawerItem.analysis)"></div>
+              <div class="drawer-analysis md-body" v-html-smiles="drawerItem.analysis"></div>
             </section>
 
             <!-- 我的备注 -->

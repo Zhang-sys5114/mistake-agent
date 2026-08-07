@@ -23,7 +23,14 @@
 - 不引导用户输入图片/PDF 路径：作业文件由界面「选择作业文件」按钮上传并自动暂存，模型只用消息里给出的暂存路径。
 - 失败处理分级（可重试一次 / 系统性错误直接告知）。
 - 表达规范（数学记号、不展示 reasoning、敏感话题引导求助）。
-- **LaTeX 增强渲染**：数学/物理/化学等富文本一律用 `$...$` / `$$...$$` 标记（`\frac`、`\sqrt`、`\mathrm`、`\vec`、`pmatrix`），前端 KaTeX 渲染。
+- **LaTeX 增强渲染**：数学/物理/化学等富文本一律用 `$...$` / `$$...$$` 标记（`\frac`、`\sqrt`、`\vec`、`pmatrix`），化学式用 `\ce{}`（mhchem 宏包，如 `$\ce{H2O}$`），前端 KaTeX 渲染；**禁用 `\chemfig` 等 TikZ 结构式宏包**（KaTeX 无法渲染）。
+- **结构式渲染（SMILES）**：需要展示分子结构式（键线式）时，输出语言标记为 `smiles` 的 fenced code block，块内只放一行合法 SMILES，例如（表示苯环）：
+
+  ````smiles
+  C1=CC=CC=C1
+  ````
+
+  前端用 smiles-drawer 绘制为 SVG。
 - 本地运行环境说明。
 
 ### 2. 图片理解提示（vision_prompt）
@@ -53,6 +60,8 @@ new_text 为 null = 回合结束判断目标是否完成。存疑即 continue，
 
 | 日期 | 变更 | 原因/结果 |
 |---|---|---|
+| 2026-08-07 | 结构式改为 SMILES 代码块约定（```smiles），前端 smiles-drawer 绘制 | 模型输出 SMILES 比 chemfig 更可靠；前端离线轻量渲染结构式 |
+| 2026-08-07 | 化学式从 `\mathrm{}` 改为 `\ce{}`，明确禁用 `\chemfig` | 前端启用 KaTeX mhchem 扩展；chemfig 基于 TikZ，KaTeX 不支持 |
 | 2026-08-05 | 视觉提示从"只 OCR"升级为"图片理解"（作业转写 / 图片描述） | 用户明确：图片理解模型不止 OCR，还能描述角色/照片等内容给主模型 |
 | 2026-08-04 | OCR 提示从"识别+解题"改为"只提取" | 用户明确：视觉模型不回答问题，只提取内容（实测已通） |
 | 2026-08-04 | 判分从 json_object 改为 json_schema 内联数组 | json_object 曾返回单对象；DeepSeek 端不解析 $defs/$ref，内联扁平 schema 后服务端强制数组（实测已通） |
