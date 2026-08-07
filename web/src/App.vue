@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, provide, ref } from "vue";
+import { onBeforeUnmount, onMounted, provide, ref } from "vue";
 import { Icon } from "@iconify/vue";
 import { useKernel } from "./composables/useKernel";
 import ChatPage from "./components/ChatPage.vue";
@@ -16,7 +16,7 @@ const busy = ref(false);
 const status = ref("准备中");
 const view = ref("chat");
 const oobeOpen = ref(false);
-const sidebarOpen = ref(true);
+const sidebarLocked = ref(false);
 
 const navItems = [
   { id: "chat", label: "聊天", icon: "mdi:chat-processing-outline" },
@@ -41,11 +41,84 @@ function navigate(viewId) {
   view.value = viewId;
 }
 
-function toggleSidebar() {
-  sidebarOpen.value = !sidebarOpen.value;
+function toggleSidebarLock() {
+  sidebarLocked.value = !sidebarLocked.value;
+}
+
+/* ---- Ripple effect ---- */
+let rippleCanvas = null;
+let rippleCtx = null;
+let ripples = [];
+let rippleRaf = null;
+
+function initRipple() {
+  rippleCanvas = document.getElementById("ripple-canvas");
+  if (!rippleCanvas) return;
+  rippleCtx = rippleCanvas.getContext("2d");
+  resizeRipple();
+  window.addEventListener("resize", resizeRipple);
+  document.addEventListener("click", onRippleClick);
+  rippleRaf = requestAnimationFrame(animateRipples);
+}
+
+function resizeRipple() {
+  if (!rippleCanvas) return;
+  rippleCanvas.width = window.innerWidth;
+  rippleCanvas.height = window.innerHeight;
+}
+
+function onRippleClick(e) {
+  const x = e.clientX;
+  const y = e.clientY;
+  // spawn 6 rings
+  for (let i = 0; i < 6; i++) {
+    ripples.push({
+      x,
+      y,
+      radius: 2,
+      maxRadius: 30 + i * 14,
+      opacity: 0.5,
+      startTime: performance.now() + i * 40,
+      speed: 0.6 + i * 0.08,
+    });
+  }
+}
+
+function animateRipples(now) {
+  if (!rippleCtx || !rippleCanvas) {
+    rippleRaf = requestAnimationFrame(animateRipples);
+    return;
+  }
+  rippleCtx.clearRect(0, 0, rippleCanvas.width, rippleCanvas.height);
+
+  ripples = ripples.filter((r) => {
+    if (now < r.startTime) return true;
+    const elapsed = now - r.startTime;
+    const progress = elapsed / 800; // 0.8s lifetime
+    if (progress >= 1) return false;
+
+    r.radius += r.speed;
+    r.opacity = 0.5 * (1 - progress);
+
+    rippleCtx.beginPath();
+    rippleCtx.arc(r.x, r.y, r.radius, 0, Math.PI * 2);
+    rippleCtx.strokeStyle = `rgba(37,99,235,${r.opacity.toFixed(3)})`;
+    rippleCtx.lineWidth = 1.5;
+    rippleCtx.stroke();
+    return true;
+  });
+
+  rippleRaf = requestAnimationFrame(animateRipples);
+}
+
+function destroyRipple() {
+  if (rippleRaf) cancelAnimationFrame(rippleRaf);
+  window.removeEventListener("resize", resizeRipple);
+  document.removeEventListener("click", onRippleClick);
 }
 
 onMounted(async () => {
+  initRipple();
   try {
     await kernel.start();
     ready.value = true;
@@ -63,21 +136,33 @@ onMounted(async () => {
     console.error("内核启动失败：", e);
   }
 });
+
+onBeforeUnmount(() => {
+  destroyRipple();
+});
 </script>
 
 <template>
   <div class="app">
     <OobePage v-if="oobeOpen" :kernel="kernel" @done="oobeOpen = false" />
 
-    <aside class="sidebar" :class="{ collapsed: !sidebarOpen }">
+    <aside class="sidebar" :class="{ expanded: sidebarLocked }">
       <div class="brand">
         <span class="brand-mark">
-          <Icon icon="mdi:book-education-outline" width="24" />
+          <Icon icon="mdi:book-education-outline" width="22" />
         </span>
         <span class="brand-text">
           <span class="brand-name">错题 Agent</span>
           <span class="brand-sub">本地智能错题助手</span>
         </span>
+        <button
+          class="brand-lock"
+          :class="{ locked: sidebarLocked }"
+          :title="sidebarLocked ? '折叠侧栏' : '锁定侧栏'"
+          @click="toggleSidebarLock"
+        >
+          <Icon :icon="sidebarLocked ? 'mdi:pin' : 'mdi:pin-outline'" width="16" />
+        </button>
       </div>
       <nav class="nav" aria-label="主导航">
         <span class="nav-label">工作台</span>
@@ -87,6 +172,7 @@ onMounted(async () => {
           class="nav-item"
           :class="{ active: view === item.id }"
           :aria-current="view === item.id ? 'page' : undefined"
+          :title="item.label"
           @click="view = item.id"
         >
           <Icon :icon="item.icon" width="20" />

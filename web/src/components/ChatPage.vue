@@ -678,13 +678,13 @@ onUnmounted(() => unsubscribe?.());
                 :key="t.entry"
                 class="tool-overflow-item"
                 :class="{ active: armedTool?.entry === t.entry }"
+                :title="t.title + '：' + t.description"
                 @click="pickTool(t); closeOverflow()"
               >
                 <span class="tool-overflow-icon">
-                  <Icon :icon="t.icon || 'mdi:toolbox-outline'" width="18" />
+                  <Icon :icon="t.icon || 'mdi:toolbox-outline'" width="20" />
                 </span>
                 <span class="tool-overflow-title">{{ t.title || t.entry }}</span>
-                <span class="tool-overflow-desc">{{ t.description }}</span>
               </button>
             </div>
           </Transition>
