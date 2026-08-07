@@ -1,12 +1,35 @@
 <script setup>
+import { ref, watch } from "vue";
 import { Icon } from "@iconify/vue";
 
-defineProps({
+const props = defineProps({
   bubble: { type: Object, required: true },
   streaming: { type: Boolean, default: false },
+  editing: { type: Boolean, default: false },
 });
 
-const emit = defineEmits(["edit", "switch-branch", "copy", "open-attachment"]);
+const emit = defineEmits([
+  "edit",
+  "switch-branch",
+  "copy",
+  "open-attachment",
+  "save-edit",
+  "cancel-edit",
+]);
+
+const editText = ref("");
+watch(
+  () => props.editing,
+  (on) => {
+    if (on) editText.value = props.bubble.text || "";
+  },
+);
+
+function saveEdit() {
+  const text = editText.value.trim();
+  if (!text) return;
+  emit("save-edit", text);
+}
 
 function attachmentIcon(att) {
   if (/\.pdf$/i.test(att.name || att.path)) return "mdi:file-pdf-box";
@@ -66,27 +89,45 @@ function attachmentIcon(att) {
         </details>
       </div>
       <template v-else>
-        <Icon v-if="bubble.toolIcon" :icon="bubble.toolIcon" width="16" class="user-tool-icon" />
-        <span>{{ bubble.text }}</span>
-        <div v-if="bubble.attachments?.length" class="bubble-attachments">
-          <button
-            v-for="att in bubble.attachments"
-            :key="att.path"
-            class="attachment-chip"
-            :aria-label="`查看附件 ${att.name}`"
-            :title="att.name"
-            @click="emit('open-attachment', att)"
-          >
-            <Icon :icon="attachmentIcon(att)" width="16" />
-            <span class="attachment-chip-name">{{ att.name }}</span>
-          </button>
-        </div>
+        <template v-if="editing">
+          <textarea
+            v-model="editText"
+            class="edit-inline"
+            rows="3"
+            aria-label="编辑消息内容"
+            @keydown.esc="emit('cancel-edit')"
+            @keydown.ctrl.enter="saveEdit()"
+          ></textarea>
+          <div class="edit-actions">
+            <button class="btn ghost" @click="emit('cancel-edit')">取消</button>
+            <button class="btn primary" :disabled="!editText.trim()" @click="saveEdit">
+              保存并派生新分支
+            </button>
+          </div>
+        </template>
+        <template v-else>
+          <Icon v-if="bubble.toolIcon" :icon="bubble.toolIcon" width="16" class="user-tool-icon" />
+          <span>{{ bubble.text }}</span>
+          <div v-if="bubble.attachments?.length" class="bubble-attachments">
+            <button
+              v-for="att in bubble.attachments"
+              :key="att.path"
+              class="attachment-chip"
+              :aria-label="`查看附件 ${att.name}`"
+              :title="att.name"
+              @click="emit('open-attachment', att)"
+            >
+              <Icon :icon="attachmentIcon(att)" width="16" />
+              <span class="attachment-chip-name">{{ att.name }}</span>
+            </button>
+          </div>
+        </template>
       </template>
     </div>
 
     <div class="bubble-actions">
       <button
-        v-if="bubble.type === 'user' && bubble.messageId"
+        v-if="bubble.type === 'user' && bubble.messageId && !editing"
         class="icon-btn"
         aria-label="编辑这条消息"
         title="编辑"

@@ -1200,6 +1200,16 @@ textarea {
   margin-top: var(--space-sm);
 }
 
+.edit-inline {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  resize: vertical;
+}
+
 /* Chat footer */
 .chat-footer {
   padding: var(--space-md) var(--space-2xl);

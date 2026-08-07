@@ -19,7 +19,6 @@ const busy = ref(false);
 const toolStatus = ref(null); // { entry, message, icon }
 const bubbles = ref([]);
 const editingId = ref(null);
-const editingText = ref("");
 const currentStreamId = ref(null);
 const branchPointers = ref({});
 const tools = ref([]); // 用户可见工具（list_tools，供输入候选）
@@ -44,7 +43,6 @@ const canSend = computed(
     (inputText.value.trim() || armedTool.value || pendingAttachments.value.length),
 );
 
-const TOOL_NAME_RE = /^([a-z][a-z0-9_]*::[a-z][a-z0-9_]*)/i;
 const GROUP_ORDER = ["批改", "学习", "记忆", "其它", "调试"];
 
 const MAX_VISIBLE_TOOLS = 5;
@@ -149,20 +147,14 @@ const cacheTitle = computed(() => {
   return lines.join("\n");
 });
 
-/** Tab 确认：补全工具名并进入待调用状态（工具名保留在输入框，后面接参数）。 */
-function armTool(tool) {
-  const entry = tool.entry;
-  const m = inputText.value.match(TOOL_NAME_RE);
-  if (m) {
-    // 把触发联想的片段补全为完整工具名（后面的文本保留）。
-    inputText.value = entry + inputText.value.slice(m[0].length);
-  } else {
-    // 工具栏按钮点击：把工具名放到输入框开头。
-    const rest = inputText.value.trim();
-    inputText.value = rest ? `${entry} ${rest}` : entry;
+/** 武装工具：工具名只进徽章，输入框只留参数（避免「徽章 + 工具名文字」双份）。 */
+function armTool(tool, stripToken = false) {
+  if (stripToken) {
+    // 从输入候选确认：移除已输入的触发词（工具名/标题），剩余文本作为参数。
+    inputText.value = inputText.value.replace(/^\S+\s*/, "");
   }
   armedTool.value = {
-    entry,
+    entry: tool.entry,
     title: tool.title || tool.entry,
     icon: toolIcon(tool.entry),
   };
@@ -173,14 +165,8 @@ function unarmTool() {
   armedTool.value = null;
 }
 
-/** 输入变化：工具名被删除/改写时自动解除待调用状态。 */
+/** 输入变化：只重算候选与自动高度；武装状态由徽章 X 或再次点选工具解除。 */
 function onInput() {
-  if (armedTool.value) {
-    const re = new RegExp(`^${armedTool.value.entry}(?:\\s|$)`);
-    if (!re.test(inputText.value)) {
-      armedTool.value = null;
-    }
-  }
   computeSuggestions();
   autoResize();
 }
@@ -204,14 +190,14 @@ function onKeydown(e) {
         suggestions.value[
           activeSuggestion.value >= 0 ? activeSuggestion.value : 0
         ];
-      armTool(t);
+      armTool(t, true);
     } else if (!armedTool.value) {
       // 候选框未弹出时兜底：输入的工具名精确匹配也直接确认。
       const firstToken = (inputText.value.match(/\S+/) || [""])[0];
       const exact = tools.value.find(
         (t) => t.entry.toLowerCase() === firstToken.toLowerCase(),
       );
-      if (exact) armTool(exact);
+      if (exact) armTool(exact, true);
     }
   } else if (e.key === "ArrowDown" && suggestions.value.length) {
     e.preventDefault();
@@ -412,11 +398,9 @@ async function sendMessage() {
     const tool = armedTool.value;
     armedTool.value = null;
     pendingAttachments.value = [];
-    const raw = inputText.value;
+    const hint = inputText.value.trim();
     inputText.value = "";
     nextTick(autoResize);
-    const m = raw.match(TOOL_NAME_RE);
-    const hint = (m ? raw.slice(m[0].length) : raw).trim();
     const display = tool.title + (hint ? `：${hint}` : "");
     addBubble({
       type: "user",
@@ -491,19 +475,21 @@ function openAttachment(attachment) {
 
 function startEdit(bubble) {
   editingId.value = bubble.messageId;
-  editingText.value = bubble.text;
 }
 
-async function saveEdit() {
+async function saveEdit(text) {
   const id = editingId.value;
-  const text = editingText.value.trim();
   editingId.value = null;
   if (!id || !text) return;
+  busy.value = true;
+  setStatus(true, "正在重新回答");
   try {
     const r = await props.kernel.call("edit_message", { message_id: id, text });
     if (r.messages) bubbles.value = renderPath(r.messages);
     scrollBottom();
   } catch (e) {
+    busy.value = false;
+    setStatus(false, "就绪");
     addBubble({ type: "error", text: `编辑失败：${e.message}` });
   }
 }
@@ -600,26 +586,15 @@ onUnmounted(() => unsubscribe?.());
           :key="b.messageId || i"
           :bubble="b"
           :streaming="b.type === 'assistant' && currentStreamId && b.messageId === currentStreamId"
+          :editing="editingId === b.messageId"
           @edit="startEdit"
           @switch-branch="switchBranch"
           @copy="copyText"
           @open-attachment="openAttachment"
+          @save-edit="saveEdit"
+          @cancel-edit="editingId = null"
         />
       </TransitionGroup>
-
-      <div v-if="editingId" class="edit-box">
-        <textarea
-          v-model="editingText"
-          rows="3"
-          aria-label="编辑消息内容"
-          @keydown.esc="editingId = null"
-          @keydown.ctrl.enter="saveEdit"
-        ></textarea>
-        <div class="edit-actions">
-          <button class="btn ghost" @click="editingId = null">取消</button>
-          <button class="btn primary" :disabled="!editingText.trim()" @click="saveEdit">保存并派生新分支</button>
-        </div>
-      </div>
     </main>
 
     <footer class="chat-footer">
@@ -660,7 +635,7 @@ onUnmounted(() => unsubscribe?.());
               :class="{ active: i === activeSuggestion }"
               role="option"
               :aria-selected="i === activeSuggestion"
-              @mousedown.prevent="armTool(t)"
+              @mousedown.prevent="armTool(t, true)"
             >
               <Icon :icon="t.icon || 'mdi:toolbox-outline'" width="16" />
               <span class="ts-title">{{ t.title || t.entry }}</span>
@@ -748,7 +723,7 @@ onUnmounted(() => unsubscribe?.());
             @keydown.enter.exact.prevent="sendMessage"
           ></textarea>
           <span
-            v-if="armedTool && inputText.trim() === armedTool.entry"
+            v-if="armedTool && !inputText.trim()"
             class="param-hint"
             aria-hidden="true"
           >&lt;可选参数&gt;</span>
