@@ -2,7 +2,7 @@
 
 消息树（ADR-0007）补齐两条 RPC：`edit_message{message_id,text}` 与 `switch_branch{message_id}`。
 
-- `derive_branch`：仅允许编辑 assistant 消息；复制新 id、parent 不变、文本替换，编辑点之后的消息保留在 JSONL 但不再属于活跃路径（历史不截断）；`SessionMeta.active_path` 指向新分支末端；返回新活跃路径。
+- `derive_branch`：仅允许编辑 user 消息（改完重发语义：新文本替换、附件保留、清空 display_text）；assistant 等模型生成消息不可手改；RPC 层对编辑自动开启新一轮回答；复制新 id、parent 不变，编辑点之后的消息保留在 JSONL 但不再属于活跃路径（历史不截断）；`SessionMeta.active_path` 指向新分支末端；返回新活跃路径。
 - `switch_branch`：沿 parent 链回溯到根，切换 `active_path`，返回该路径。
 - `read_path` 遵循 active_path：有则返回根→末端链，无则退化为线性全链（兼容旧数据）。
 - 审计新增 `MessageEdited`/`BranchSwitched`/`Compaction` 记录。

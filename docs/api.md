@@ -34,7 +34,7 @@
 | `trigger_command` | `entry: string`, `params: object` | ✅ M1 | 唯一命令通道，校验 EntryPoint + CallerPolicy |
 | `abort` | — | ✅ M1 | 停止当前回合（SIGTERM → 宽限 → SIGKILL） |
 | `get_state` | — | ✅ M1 | 返回 `{status: idle\|busy, session_key}` |
-| `edit_message` | `message_id`, `text` | ✅ M5 | 消息树编辑：从被编辑消息的父节点派生新分支，返回 `{session_key, messages}`（新活跃路径） |
+| `edit_message` | `message_id`, `text` | ✅ M5 | 消息树编辑：仅 user 消息可编辑，从被编辑消息的父节点派生新分支，返回 `{session_key, messages}`（新活跃路径）；编辑 = 改完重发，保存后自动开启新一轮回答 |
 | `switch_branch` | `message_id` | ✅ M5 | 消息树切分支：设置 active_path，返回 `{session_key, messages}` |
 | `get_settings` | — | ✅ M2/M5 | 返回设置公开视图（**不含 api_key**，只含 `key_set` 标记） |
 | `set_settings` | `patch` | ✅ M2/M5 | 应用设置补丁并持久化；模型配置变化时热替换双模型服务；成功后发 `settings_changed` 事件 |
@@ -175,7 +175,7 @@ pub trait UserPlugin {
 - 交接摘要（handoff）：生产实现 = 主模型 + summarize_prompt 生成，旧会话归档时注入摘要，新会话注入旧会话梗概；摘要与完整历史分别经 `session::read` / `session::history` 可查。
 - 空闲超时 12h：超时后新消息直接开新会话（旧会话归档 + 交接摘要注入）。
 - 消息气泡：一个输出 item = 一个气泡，**完成即落盘**（含 assistant 回复与工具调用）；中断只丢半截，已完整气泡保留。
-- 消息树：`edit_message` 从被编辑消息的父节点派生新消息并更新 active_path（旧分支完整保留）；`switch_branch` 切换 active_path；`read_path` 只读活跃路径，旁支不进入 LLM 上下文。
+- 消息树：`edit_message` 从被编辑消息的父节点派生新消息并更新 active_path（旧分支完整保留）；仅 user 消息可编辑（改完重发，自动重新回答），assistant 等模型消息不可编辑；`switch_branch` 切换 active_path；`read_path` 只读活跃路径，旁支不进入 LLM 上下文。
 - `InterruptBus`（内部中断，ADR-0023）：环境变更信号队列（会话切换/目标更新/设置变更/记忆变更/压缩），RPC 回合任务在消息进入后与回合收尾后各消费一次，转成 GUI 事件并写审计。
 
 ## 8. 运行与验收

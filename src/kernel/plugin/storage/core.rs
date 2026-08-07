@@ -290,27 +290,79 @@ mod tests {
         }
         assert_eq!(store.read_path(&key).await.unwrap().len(), 4);
 
-        // 编辑 a1 → 派生新分支 [u1, a1']
-        let path = store
-            .derive_branch(&key, a1.id, "回答一（修订）")
+        // assistant（模型）消息不可编辑。
+        assert!(store.derive_branch(&key, a1.id, "回答一（修订）").await.is_err());
+
+        // 编辑 user 消息：派生新分支，新文本生效（改完重发语义）。
+        let path3 = store
+            .derive_branch(&key, u1.id, "第一问（改错字）")
             .await
             .unwrap();
-        assert_eq!(path.len(), 2);
+        assert_eq!(path3.len(), 1);
         assert!(
-            matches!(&path[1].kind, MessageKind::Assistant { text } if text == "回答一（修订）")
+            matches!(&path3[0].kind, MessageKind::User { text, .. } if text == "第一问（改错字）")
         );
-        // 历史保留：JSONL 共 5 条，活跃路径只剩 2 条。
+        // 历史保留：JSONL 共 5 条，活跃路径只剩 1 条。
         assert_eq!(store.read_all(&key).await.unwrap().len(), 5);
-        assert_eq!(store.read_path(&key).await.unwrap().len(), 2);
-
-        // 不能编辑 user 消息。
-        assert!(store.derive_branch(&key, u1.id, "改了").await.is_err());
+        assert_eq!(store.read_path(&key).await.unwrap().len(), 1);
 
         // 切回 a2 分支（4 条原始路径）。
         let path2 = store.switch_branch(&key, a2.id).await.unwrap();
         assert_eq!(path2.len(), 4);
         assert_eq!(path2[3].id, a2.id);
         assert_eq!(store.read_path(&key).await.unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn edit_user_message_keeps_attachments_and_clears_display_text() {
+        let store = MemoryStorage::new();
+        let key = SessionKey::new();
+        store
+            .create_session(&key, &SessionMeta::new(key))
+            .await
+            .unwrap();
+        let u1 = Message {
+            id: MessageId::new(),
+            parent_id: None,
+            kind: MessageKind::User {
+                text: "帮我看看这道题\n附件：/tmp/mistake-agent-x|math.png".into(),
+                display_text: Some("展示文本".into()),
+                attachments: vec![crate::kernel::message::Attachment {
+                    mime: "image/png".into(),
+                    data_base64: "AAAA".into(),
+                }],
+            },
+            created_at: chrono::Utc::now(),
+        };
+        store.append_message(&key, &u1).await.unwrap();
+
+        let path = store
+            .derive_branch(&key, u1.id, "帮我看看这道题（改错字）")
+            .await
+            .unwrap();
+        assert_eq!(path.len(), 1);
+        assert!(
+            matches!(
+                &path[0].kind,
+                MessageKind::User {
+                    text,
+                    display_text,
+                    attachments,
+                } if text == "帮我看看这道题（改错字）"
+                    && display_text.is_none()
+                    && attachments.len() == 1
+                    && attachments[0].data_base64 == "AAAA"
+            )
+        );
+        // 只能编辑 user：assistant / system 均拒绝。
+        let mut a1 = Message::assistant("回答");
+        a1.parent_id = Some(path[0].id);
+        store.append_message(&key, &a1).await.unwrap();
+        assert!(store.derive_branch(&key, a1.id, "改").await.is_err());
+        let mut sys = Message::system("系统提示");
+        sys.parent_id = Some(path[0].id);
+        store.append_message(&key, &sys).await.unwrap();
+        assert!(store.derive_branch(&key, sys.id, "改").await.is_err());
     }
 
     #[tokio::test]

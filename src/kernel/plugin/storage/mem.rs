@@ -133,16 +133,25 @@ impl SessionStore for MemoryStorage {
             .position(|m| m.id == message_id)
             .ok_or(StorageError::Internal("消息不在活跃路径".into()))?;
         let original = &chain[idx];
-        if !matches!(original.kind, MessageKind::Assistant { .. }) {
-            return Err(StorageError::Internal("只能编辑 assistant 消息".into()));
-        }
         let mut new_msg = original.clone();
         new_msg.id = MessageId::new();
         new_msg.parent_id = original.parent_id;
-        new_msg.kind = MessageKind::Assistant {
-            text: text.to_string(),
-        };
         new_msg.created_at = chrono::Utc::now();
+        match &mut new_msg.kind {
+            // 仅允许编辑用户消息（改完重发）；assistant 等由模型生成，不可手改。
+            MessageKind::User {
+                text: t,
+                display_text,
+                ..
+            } => {
+                // 编辑用户消息：新文本作为模型指令与展示文本，附件保留（改完重发语义）。
+                *t = text.to_string();
+                *display_text = None;
+            }
+            _ => {
+                return Err(StorageError::Internal("只能编辑 user 消息".into()));
+            }
+        };
 
         let mut new_path = chain[..idx].to_vec();
         new_path.push(new_msg.clone());

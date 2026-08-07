@@ -348,6 +348,132 @@ impl Kernel {
         self.state.lock().await.turn.is_none()
     }
 
+    /// 发起一轮 agent 回合（send_user_message 与「编辑用户消息后重发」共用）：
+    /// 登记 turn 句柄、spawn loop、落盘、事件与审计收尾。
+    async fn start_turn(
+        &self,
+        key: SessionKey,
+        messages: Vec<Message>,
+        forced_tool: Option<String>,
+    ) -> Result<(), RpcError> {
+        let signal = AbortSignal::new();
+        let tools = self.registry.model_tools();
+        let loop_engine = self.loop_engine.clone();
+        let scheduler = self.scheduler.clone();
+        let store = self.store.clone();
+        let events = self.events.clone();
+        let auditor = self.auditor.clone();
+        let cache = self.cache.clone();
+        let state_for_task = self.state.clone();
+        let mut state = self.state.lock().await;
+        if state.turn.is_some() {
+            // 并发竞态兜底：另一请求已登记回合。
+            return Err(RpcError::new(
+                "turn_in_progress",
+                "当前有回合在跑，请先停止再发送新消息",
+            ));
+        }
+        state.turn = Some(TurnHandle {
+            key,
+            signal: signal.clone(),
+        });
+        drop(state);
+
+        tokio::spawn(async move {
+            let input = TurnInput {
+                messages,
+                tools,
+                signal,
+                turn_budget: std::time::Duration::from_secs(10 * 60),
+                forced_tool,
+            };
+            let outcome: Result<TurnOutcome, _> = loop_engine.run_turn(input).await;
+            match outcome {
+                Ok(outcome) => {
+                    let compaction = outcome.compaction.clone();
+                    // 回合内经 session::switch 切换后，后半段消息归新会话。
+                    let persist_key = outcome.session_key.unwrap_or(key);
+                    let skip_summary = compaction.as_ref().map(|c| c.summary.id);
+                    let persisted_last = match persist_turn_messages(
+                        &store,
+                        &persist_key,
+                        &outcome.messages,
+                        skip_summary,
+                    )
+                    .await
+                    {
+                        Ok(last) => last,
+                        Err(e) => {
+                            events.emit(Event::Error {
+                                message: format!("消息落盘失败：{e}"),
+                            });
+                            None
+                        }
+                    };
+                    if let Some(info) = &compaction {
+                        if let Err(e) = store
+                            .splice_compaction(&persist_key, &info.summary, info.tail_start)
+                            .await
+                        {
+                            events.emit(Event::Error {
+                                message: format!("压缩摘要接入失败：{e}"),
+                            });
+                        }
+                        events.emit(Event::Compaction {
+                            session: persist_key,
+                        });
+                        auditor.record(AuditRecord::Compaction {
+                            session: persist_key.to_string(),
+                            summarized: info.summarized,
+                        });
+                        scheduler.interrupt_bus().send(Interrupt::CompactionDone {
+                            session: persist_key,
+                        });
+                    }
+                    // 活跃路径推进到回合末条（消息树分支语义）。
+                    let next_active =
+                        compaction.as_ref().map(|c| c.tail_end).or(persisted_last);
+                    if let Some(next) = next_active
+                        && let Err(e) = store.set_active_path(&persist_key, Some(next)).await
+                    {
+                        events.emit(Event::Error {
+                            message: format!("活跃路径推进失败：{e}"),
+                        });
+                    }
+                    if let Err(e) = scheduler.on_turn_end(&persist_key, &outcome.messages).await {
+                        events.emit(Event::Error {
+                            message: format!("回合收尾失败：{e}"),
+                        });
+                    }
+                    if let Some(usage) = &outcome.usage {
+                        cache.record_main(&persist_key, usage);
+                        // 实时推送：前端收到事件即更新，无需再查一次（可能读到旧值）。
+                        events.emit(Event::CacheStatsUpdated {
+                            stats: cache.snapshot(Some(persist_key)),
+                        });
+                    }
+                    auditor.record(AuditRecord::Lifecycle {
+                        phase: "turn_finished".into(),
+                    });
+                }
+                Err(e) => {
+                    events.emit(Event::TurnEnd {
+                        stop_reason: crate::kernel::agent::loop_mod::StopReason::Failed,
+                    });
+                    events.emit(Event::Error {
+                        message: format!("回合失败：{e}"),
+                    });
+                }
+            }
+            // 回合结束：清除 turn 句柄（abort 在结束后无操作）。
+            let mut st = state_for_task.lock().await;
+            if st.turn.as_ref().is_some_and(|t| t.key == key) {
+                st.turn = None;
+            }
+        });
+        Ok(())
+    }
+
     /// 处理一个请求；返回需要写回 GUI 的响应帧（事件经 EventSink 另发）。
     pub async fn handle(&self, request: RpcRequest) -> Result<Option<RpcFrame>, RpcError> {
         match request.method {
@@ -420,126 +546,8 @@ impl Kernel {
                     .on_new_message_with_display(&user_text, display_text.as_deref())
                     .await
                     .map_err(|e| RpcError::new("scheduler_error", e.to_string()))?;
-                let signal = AbortSignal::new();
                 let key = ctx.session_key;
-                let tools = self.registry.model_tools();
-                let messages = ctx.messages;
-                let loop_engine = self.loop_engine.clone();
-                let scheduler = self.scheduler.clone();
-                let store = self.store.clone();
-                let events = self.events.clone();
-                let auditor = self.auditor.clone();
-                let cache = self.cache.clone();
-                let state_for_task = self.state.clone();
-                let mut state = self.state.lock().await;
-                if state.turn.is_some() {
-                    // 并发竞态兜底：另一请求已登记回合。
-                    return Err(RpcError::new(
-                        "turn_in_progress",
-                        "当前有回合在跑，请先停止再发送新消息",
-                    ));
-                }
-                state.turn = Some(TurnHandle {
-                    key,
-                    signal: signal.clone(),
-                });
-                drop(state);
-
-                tokio::spawn(async move {
-                    let input = TurnInput {
-                        messages,
-                        tools,
-                        signal,
-                        turn_budget: std::time::Duration::from_secs(10 * 60),
-                        forced_tool: forced_wire,
-                    };
-                    let outcome: Result<TurnOutcome, _> = loop_engine.run_turn(input).await;
-                    match outcome {
-                        Ok(outcome) => {
-                            let compaction = outcome.compaction.clone();
-                            // 回合内经 session::switch 切换后，后半段消息归新会话。
-                            let persist_key = outcome.session_key.unwrap_or(key);
-                            let skip_summary = compaction.as_ref().map(|c| c.summary.id);
-                            let persisted_last = match persist_turn_messages(
-                                &store,
-                                &persist_key,
-                                &outcome.messages,
-                                skip_summary,
-                            )
-                            .await
-                            {
-                                Ok(last) => last,
-                                Err(e) => {
-                                    events.emit(Event::Error {
-                                        message: format!("消息落盘失败：{e}"),
-                                    });
-                                    None
-                                }
-                            };
-                            if let Some(info) = &compaction {
-                                if let Err(e) = store
-                                    .splice_compaction(&persist_key, &info.summary, info.tail_start)
-                                    .await
-                                {
-                                    events.emit(Event::Error {
-                                        message: format!("压缩摘要接入失败：{e}"),
-                                    });
-                                }
-                                events.emit(Event::Compaction {
-                                    session: persist_key,
-                                });
-                                auditor.record(AuditRecord::Compaction {
-                                    session: persist_key.to_string(),
-                                    summarized: info.summarized,
-                                });
-                                scheduler.interrupt_bus().send(Interrupt::CompactionDone {
-                                    session: persist_key,
-                                });
-                            }
-                            // 活跃路径推进到回合末条（消息树分支语义）。
-                            let next_active =
-                                compaction.as_ref().map(|c| c.tail_end).or(persisted_last);
-                            if let Some(next) = next_active
-                                && let Err(e) =
-                                    store.set_active_path(&persist_key, Some(next)).await
-                            {
-                                events.emit(Event::Error {
-                                    message: format!("活跃路径推进失败：{e}"),
-                                });
-                            }
-                            if let Err(e) =
-                                scheduler.on_turn_end(&persist_key, &outcome.messages).await
-                            {
-                                events.emit(Event::Error {
-                                    message: format!("回合收尾失败：{e}"),
-                                });
-                            }
-                            if let Some(usage) = &outcome.usage {
-                                cache.record_main(&persist_key, usage);
-                                // 实时推送：前端收到事件即更新，无需再查一次（可能读到旧值）。
-                                events.emit(Event::CacheStatsUpdated {
-                                    stats: cache.snapshot(Some(persist_key)),
-                                });
-                            }
-                            auditor.record(AuditRecord::Lifecycle {
-                                phase: "turn_finished".into(),
-                            });
-                        }
-                        Err(e) => {
-                            events.emit(Event::TurnEnd {
-                                stop_reason: crate::kernel::agent::loop_mod::StopReason::Failed,
-                            });
-                            events.emit(Event::Error {
-                                message: format!("回合失败：{e}"),
-                            });
-                        }
-                    }
-                    // 回合结束：清除 turn 句柄（abort 在结束后无操作）。
-                    let mut st = state_for_task.lock().await;
-                    if st.turn.as_ref().is_some_and(|t| t.key == key) {
-                        st.turn = None;
-                    }
-                });
+                self.start_turn(key, ctx.messages, forced_wire).await?;
 
                 Ok(Some(RpcFrame::Response {
                     id: request.id,
@@ -726,6 +734,8 @@ impl Kernel {
             }
             Method::EditMessage { message_id, text } => {
                 let key = self.active_session_key().await?;
+                // 仅 user 消息可编辑（storage 校验）：编辑 = 改完重发，
+                // 保存后自动开启新一轮回答。
                 let path = self
                     .store
                     .derive_branch(&key, message_id, &text)
@@ -736,6 +746,7 @@ impl Kernel {
                     message_id,
                     branch_id,
                 });
+                self.start_turn(key, path.clone(), None).await?;
                 Ok(Some(RpcFrame::Response {
                     id: request.id,
                     result: Some(json!({
