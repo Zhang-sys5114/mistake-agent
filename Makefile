@@ -23,6 +23,28 @@
 #             或临时：export PATH="$LOCALAPPDATA/Microsoft/WinGet/Packages/ezwinports.make_*/bin:$PATH"
 #
 # 依赖：Rust 2024 toolchain + Node.js 18+ + Git（仅 Windows 用 Git Bash 时需要）
+#
+# ─────────────────────────────────────────────────────────────────────────
+# Windows shell 选择（PowerShell / cmd / Git Bash 都可）：
+#   - 默认 Make 4.4 (ezwinports) 在 Windows 用 cmd.exe，cmd 没有 printf / awk，
+#     会导致 recipe 失败。
+#   - 强制走 Git Bash 的 sh.exe 即可：recipe 用 POSIX 工具 (printf / awk / rm)，
+#     与 Linux/macOS 完全一致。
+#   - 路径按本机常见安装位置探测；若你的 Git 装在别处，临时覆盖：
+#       make SHELL='C:/path/to/sh.exe'
+# ─────────────────────────────────────────────────────────────────────────
+ifeq ($(OS),Windows_NT)
+    # Git Bash 自带 sh.exe；按常见安装路径探测。优先级：PATH → 默认安装位置。
+    ifdef GIT_BASH
+        SHELL := $(GIT_BASH)
+    else ifneq ($(wildcard C:/Program Files/Git/usr/bin/sh.exe),)
+        SHELL := C:/Program Files/Git/usr/bin/sh.exe
+    else ifneq ($(wildcard C:/Program Files/Git/bin/sh.exe),)
+        SHELL := C:/Program Files/Git/bin/sh.exe
+    endif
+    # 显式声明要用 bash 执行 recipe（POSIX 模式，避免 dash-only 行为差异）
+    .SHELLFLAGS := -c
+endif
 
 # ---------------------------------------------------------------------------
 # 平台探测（决定 .exe 后缀 / install 命令 / bundle 格式）
