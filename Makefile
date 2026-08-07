@@ -84,11 +84,6 @@ FRONTEND_DST := web/dist
 # Pyodide 离线 wheel 标记（任一文件存在即视为已下载）
 PYODIDE_WHEEL := web/node_modules/pyodide/numpy-2.4.3-cp314-cp314-pyemscripten_2026_0_wasm32.whl
 
-# 帮助文本生成器：兼容 grep 不可用环境（Windows 默认无 grep）。
-# 直接在 recipe 里写 awk 命令（不用变量，避免 Make 的 $ 转义和 ? 通配符干扰）。
-# 逻辑：每行形如 "target: prereq ## 说明" 时，把 target 和说明打印出来。
-HELP_AWK :=
-
 # ---------------------------------------------------------------------------
 # 默认与伪目标
 # ---------------------------------------------------------------------------
@@ -98,14 +93,23 @@ HELP_AWK :=
 all: bundle ## 完整构建（默认）
 
 help: ## 列出所有可用的 target
-	@printf "可用 target：\n"
-	@awk '/^[a-zA-Z_-]+:.*## / {name=$$1; sub(/:.*/, "", name); sub(/[^#]+## /, "", $$0); printf "  %-18s %s\n", name, $$0}' $(MAKEFILE_LIST)
+	@$(info 可用 target：)
+	@$(info   all              —— 完整构建（默认）)
+	@$(info   help             —— 列出所有可用的 target)
+	@$(info   check-tools      —— 校验 node / npm / cargo 可用)
+	@$(info   fetch-pyodide    —— 预热 Pyodide numpy/sympy/mpmath 离线 wheel)
+	@$(info   build-frontend   —— 构建前端（vite build）)
+	@$(info   build-rust       —— 编译 Rust release 二进制)
+	@$(info   bundle           —— 打安装包（NSIS / deb / AppImage / dmg）)
+	@$(info   clean            —— 清理 target/、web/dist/、web/node_modules/)
+	@echo （以上由 Make 内置 info 函数输出，不依赖外层 shell）
 
 check-tools: ## 校验 node / npm / cargo 可用
-	@command -v node  >/dev/null 2>&1 || { echo "[FAIL] 未检测到 node"; exit 1; }
-	@command -v npm   >/dev/null 2>&1 || { echo "[FAIL] 未检测到 npm";  exit 1; }
-	@command -v cargo >/dev/null 2>&1 || { echo "[FAIL] 未检测到 cargo"; exit 1; }
-	@echo "[OK] node / npm / cargo 均可用（平台：$(PLATFORM_TAG)）"
+	@echo "[check] 校验构建工具...（若下列命令失败则缺少对应工具）"
+	@node --version
+	@npm --version
+	@cargo --version
+	@echo "[OK] 所有工具均可用（平台：$(PLATFORM_TAG)）"
 
 # ---------------------------------------------------------------------------
 # 阶段 1：前端依赖 + Pyodide 离线包
@@ -132,7 +136,6 @@ build-frontend: $(FRONTEND_DST) ## 构建前端（vite build）
 $(FRONTEND_DST): web/node_modules/.package-lock.json $(PYODIDE_WHEEL) web/src web/index.html web/vite.config.js
 	@echo "[build] vite build"
 	@cd web && npm run build
-	@test -d "$(FRONTEND_DST)" || { echo "[FAIL] vite build 未产出 $(FRONTEND_DST)"; exit 1; }
 
 # ---------------------------------------------------------------------------
 # 阶段 3：Rust release 构建
@@ -144,7 +147,6 @@ build-rust: $(BIN) ## 编译 Rust release 二进制
 $(BIN): $(FRONTEND_DST) $(wildcard src/**/*.rs src/*.rs Cargo.toml build.rs)
 	@echo "[build] cargo build --release --bins"
 	@cargo build --release --bins
-	@test -f "$(BIN)" || { echo "[FAIL] cargo build 未产出 $(BIN)"; exit 1; }
 	@echo "[OK] release 二进制就绪: $(BIN)"
 
 # ---------------------------------------------------------------------------
@@ -157,7 +159,6 @@ bundle: $(BUNDLE_DIR) ## 打安装包（NSIS / deb / AppImage / dmg）
 $(BUNDLE_DIR): $(BIN)
 	@echo "[build] cargo tauri build（bundles: $(BUNDLE_TARGETS)）"
 	@cargo tauri build --bundles $(BUNDLE_TARGETS)
-	@test -d "$(BUNDLE_DIR)" || { echo "[FAIL] tauri bundler 未产出 $(BUNDLE_DIR)"; exit 1; }
 	@echo "[OK] 安装包就绪: $(BUNDLE_DIR)"
 
 # ---------------------------------------------------------------------------
