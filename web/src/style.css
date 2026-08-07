@@ -142,6 +142,48 @@ textarea {
   padding: var(--space-lg) var(--space-md);
   background: var(--color-surface);
   border-right: 1px solid var(--color-border-soft);
+  transition: width 0.28s var(--ease-out), flex-basis 0.28s var(--ease-out);
+  overflow: hidden;
+}
+
+.sidebar.collapsed {
+  width: 68px;
+  flex: 0 0 68px;
+  padding: var(--space-lg) var(--space-sm);
+}
+
+.sidebar.collapsed .brand {
+  justify-content: center;
+}
+
+.sidebar.collapsed .brand-text,
+.sidebar.collapsed .nav-label,
+.sidebar.collapsed .nav-item span,
+.sidebar.collapsed .status-text,
+.sidebar.collapsed .privacy-note {
+  display: none;
+}
+
+.sidebar.collapsed .nav-item {
+  justify-content: center;
+  padding: 10px;
+}
+
+.sidebar.collapsed .nav-item.active::after {
+  display: none;
+}
+
+.sidebar.collapsed .sidebar-foot {
+  align-items: center;
+}
+
+.sidebar.collapsed .status-pill {
+  justify-content: center;
+  padding: 8px;
+}
+
+.sidebar.collapsed .status-pill .dot {
+  margin: 0;
 }
 
 .brand {
@@ -746,13 +788,14 @@ textarea {
 .cache-chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--color-text-weak);
+  gap: 10px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-text);
   background: var(--color-surface);
   border: 1px solid var(--color-border-soft);
   border-radius: var(--radius-pill);
-  padding: 4px 12px;
+  padding: 10px 28px;
   transition:
     color 0.2s var(--ease-out),
     border-color 0.2s var(--ease-out),
@@ -1043,7 +1086,9 @@ textarea {
 .tool-bar {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
   max-width: 880px;
   margin: 0 auto var(--space-sm);
 }
@@ -1051,25 +1096,29 @@ textarea {
 .tool-chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  min-height: 32px;
-  padding: 4px 12px;
+  gap: 7px;
+  min-height: 36px;
+  padding: 6px 14px;
   border: 1px solid var(--color-border-soft);
   border-radius: var(--radius-pill);
   background: var(--color-surface);
   color: var(--color-text);
   font-size: 13px;
+  font-weight: 500;
   transition:
-    background 0.18s ease,
-    border-color 0.18s ease,
-    color 0.18s ease,
-    transform 0.18s var(--ease-out);
+    background 0.2s ease,
+    border-color 0.2s ease,
+    color 0.2s ease,
+    transform 0.2s var(--ease-out),
+    box-shadow 0.2s ease;
 }
 
 .tool-chip:hover {
-  border-color: var(--color-border);
-  background: var(--color-muted);
+  border-color: #99f6e4;
+  background: var(--color-primary-soft);
+  color: var(--color-primary-deep);
   transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(13, 148, 136, 0.10);
 }
 
 .tool-chip.active {
@@ -1077,6 +1126,142 @@ textarea {
   border-color: var(--color-primary);
   color: #ffffff;
   font-weight: 600;
+  box-shadow: 0 2px 8px rgba(13, 148, 136, 0.20);
+}
+
+/* ---- + button inside input shell ---- */
+
+.input-plus-btn {
+  width: 36px;
+  height: 36px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--color-text-weak);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  transition:
+    background 0.2s ease,
+    color 0.2s ease;
+}
+
+.input-plus-btn:hover {
+  background: var(--color-muted);
+  color: var(--color-text-strong);
+}
+
+.input-plus-btn.active {
+  background: var(--color-primary-soft);
+  color: var(--color-primary-deep);
+}
+
+/* ---- overflow floating menu (attached to +) ---- */
+
+.overflow-floating {
+  position: absolute;
+  bottom: calc(100% - 6px);
+  left: 12px;
+  z-index: 35;
+}
+
+.tool-overflow-menu {
+  min-width: 280px;
+  padding: 8px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-soft);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 8px 32px rgba(13, 148, 136, 0.14);
+}
+
+.tool-overflow-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  text-align: left;
+  transition: background 0.15s ease;
+}
+
+.tool-overflow-item:hover {
+  background: var(--color-primary-soft);
+}
+
+.tool-overflow-item.active {
+  background: var(--color-primary);
+  color: #ffffff;
+}
+
+.tool-overflow-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  border-radius: 8px;
+  background: var(--color-primary-soft);
+  color: var(--color-primary-deep);
+}
+
+.tool-overflow-item.active .tool-overflow-icon {
+  background: rgba(255, 255, 255, 0.25);
+  color: #ffffff;
+}
+
+.tool-overflow-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--color-text-strong);
+}
+
+.tool-overflow-item.active .tool-overflow-title {
+  color: #ffffff;
+}
+
+.tool-overflow-desc {
+  display: block;
+  font-size: 11px;
+  color: var(--color-text-weak);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 160px;
+}
+
+.tool-overflow-item.active .tool-overflow-desc {
+  color: rgba(255, 255, 255, 0.75);
+}
+
+/* drop transition */
+.drop-enter-active {
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s var(--ease-out);
+}
+
+.drop-leave-active {
+  transition:
+    opacity 0.12s ease,
+    transform 0.12s var(--ease-out);
+}
+
+.drop-enter-from {
+  opacity: 0;
+  transform: translateY(8px) scale(0.96);
+}
+
+.drop-leave-to {
+  opacity: 0;
+  transform: translateY(4px) scale(0.98);
 }
 
 .input-shell {
@@ -1084,38 +1269,115 @@ textarea {
   margin: 0 auto;
   display: flex;
   align-items: center;
-  gap: var(--space-sm);
-  padding: 8px;
+  gap: 6px;
+  padding: 6px 8px;
   background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-sm);
+  border: 1px solid var(--color-border-soft);
+  border-radius: 30px;
+  box-shadow: 0 1px 3px rgba(13, 148, 136, 0.06);
   transition:
-    border-color 0.18s ease,
-    box-shadow 0.18s ease;
+    border-color 0.25s ease,
+    box-shadow 0.25s ease;
+}
+
+.input-shell:hover {
+  border-color: #99f6e4;
+  box-shadow: 0 2px 12px rgba(13, 148, 136, 0.10), 0 0 0 1px rgba(13, 148, 136, 0.06);
 }
 
 .input-shell:focus-within {
   border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.18);
+  box-shadow:
+    0 0 0 10px rgba(13, 148, 136, 0.06),
+    0 0 0 4px rgba(13, 148, 136, 0.10),
+    0 4px 24px rgba(13, 148, 136, 0.12);
 }
 
 .input-shell.armed {
   border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.14);
+  box-shadow: 0 0 0 5px rgba(13, 148, 136, 0.12), 0 4px 16px rgba(13, 148, 136, 0.08);
 }
 
-.input-shell input {
+.input-shell textarea {
   flex: 1;
   min-width: 0;
   border: 0;
   background: transparent;
-  padding: 10px 6px;
+  padding: 10px 4px;
   outline: none;
+  resize: none;
+  overflow-y: hidden;
+  line-height: 1.5;
+  max-height: 200px;
+  font-family: inherit;
+  font-size: 15px;
+  color: var(--color-text-strong);
+  align-self: center;
 }
 
-.input-shell .btn {
-  min-height: 40px;
+.input-shell textarea::placeholder {
+  color: var(--color-text-weak);
+  opacity: 0.7;
+}
+
+/* ---- Gemini-style action buttons ---- */
+
+.input-shell .action-btn {
+  width: 40px;
+  height: 40px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  transition:
+    background 0.2s ease,
+    color 0.2s ease,
+    transform 0.2s var(--ease-out);
+}
+
+.input-shell .send-btn {
+  width: 36px;
+  height: 36px;
+  background: var(--color-primary-soft);
+  color: var(--color-primary-deep);
+}
+
+.input-shell .send-btn:hover:not(:disabled) {
+  background: #b2f0e8;
+  color: var(--color-primary-deep);
+  transform: scale(1.08);
+  box-shadow: 0 2px 8px rgba(13, 148, 136, 0.18);
+}
+
+.input-shell .send-btn:disabled {
+  background: #cbd5d4;
+  color: #ffffff;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.input-shell .attach-btn {
+  background: transparent;
+  color: var(--color-text-weak);
+}
+
+.input-shell .attach-btn:hover {
+  background: var(--color-muted);
+  color: var(--color-text-strong);
+}
+
+.input-shell .stop-btn {
+  background: var(--color-danger-soft);
+  color: var(--color-danger-ink);
+}
+
+.input-shell .stop-btn:hover {
+  background: #fee2e2;
+  transform: scale(1.08);
 }
 
 .input-wrap {
@@ -1930,6 +2192,10 @@ textarea {
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
+}
+
+.session-row-main > div {
   min-width: 0;
 }
 

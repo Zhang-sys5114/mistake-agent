@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { Icon } from "@iconify/vue";
 import MessageBubble from "./MessageBubble.vue";
 import AttachmentViewer from "./AttachmentViewer.vue";
@@ -29,6 +29,7 @@ const armedTool = ref(null); // Tab 确认的待调用工具 { entry, title, ico
 const pendingAttachments = ref([]); // 选完未发送的附件列表（可多张/混合 PDF）
 const cacheStats = ref(null); // 上下文缓存命中统计（get_cache_stats）
 const inputEl = ref(null);
+const overflowOpen = ref(false);
 
 let unsubscribe = null;
 let assistantIndex = -1;
@@ -45,6 +46,18 @@ const canSend = computed(
 
 const TOOL_NAME_RE = /^([a-z][a-z0-9_]*::[a-z][a-z0-9_]*)/i;
 const GROUP_ORDER = ["批改", "学习", "记忆", "其它", "调试"];
+
+const MAX_VISIBLE_TOOLS = 5;
+const visibleTools = computed(() => tools.value.slice(0, MAX_VISIBLE_TOOLS));
+const overflowTools = computed(() => tools.value.slice(MAX_VISIBLE_TOOLS));
+
+function toggleOverflow() {
+  overflowOpen.value = !overflowOpen.value;
+}
+
+function closeOverflow() {
+  overflowOpen.value = false;
+}
 
 const quickActions = [
   { id: "upload", label: "上传图片/PDF", desc: "看图提问、讲解或批改归档", icon: "mdi:upload", action: "upload" },
@@ -169,6 +182,7 @@ function onInput() {
     }
   }
   computeSuggestions();
+  autoResize();
 }
 
 /** 工具栏点击：选中/取消工具，进入待调用状态并聚焦输入框。 */
@@ -216,6 +230,13 @@ function scrollBottom() {
     const el = document.getElementById("messages");
     if (el) el.scrollTop = el.scrollHeight;
   });
+}
+
+function autoResize() {
+  const el = inputEl.value;
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = el.scrollHeight + "px";
 }
 
 function addBubble(b) {
@@ -393,6 +414,7 @@ async function sendMessage() {
     pendingAttachments.value = [];
     const raw = inputText.value;
     inputText.value = "";
+    nextTick(autoResize);
     const m = raw.match(TOOL_NAME_RE);
     const hint = (m ? raw.slice(m[0].length) : raw).trim();
     const display = tool.title + (hint ? `：${hint}` : "");
@@ -419,6 +441,7 @@ async function sendMessage() {
   }
   pendingAttachments.value = [];
   inputText.value = "";
+  nextTick(autoResize);
   addBubble({ type: "user", text: text || "我上传了图片/PDF", attachments });
   busy.value = true;
   setStatus(true, "正在回答");
@@ -610,14 +633,14 @@ onUnmounted(() => unsubscribe?.());
 
       <div v-if="tools.length && !busy" class="tool-bar" role="toolbar" aria-label="工具">
         <button
-          v-for="t in tools"
+          v-for="t in visibleTools"
           :key="t.entry"
           class="tool-chip"
           :class="{ active: armedTool?.entry === t.entry }"
           :title="t.description"
           @click="pickTool(t)"
         >
-          <Icon :icon="t.icon || 'mdi:toolbox-outline'" width="15" />
+          <Icon :icon="t.icon || 'mdi:toolbox-outline'" width="16" />
           <span>{{ t.title || t.entry }}</span>
         </button>
       </div>
@@ -647,6 +670,26 @@ onUnmounted(() => unsubscribe?.());
           </div>
         </Transition>
 
+        <div v-if="overflowTools.length" class="overflow-floating">
+          <Transition name="drop">
+            <div v-if="overflowOpen" class="tool-overflow-menu" @mouseleave="closeOverflow">
+              <button
+                v-for="t in overflowTools"
+                :key="t.entry"
+                class="tool-overflow-item"
+                :class="{ active: armedTool?.entry === t.entry }"
+                @click="pickTool(t); closeOverflow()"
+              >
+                <span class="tool-overflow-icon">
+                  <Icon :icon="t.icon || 'mdi:toolbox-outline'" width="18" />
+                </span>
+                <span class="tool-overflow-title">{{ t.title || t.entry }}</span>
+                <span class="tool-overflow-desc">{{ t.description }}</span>
+              </button>
+            </div>
+          </Transition>
+        </div>
+
         <div v-if="pendingAttachments.length" class="pending-attach-bar">
           <div
             v-for="(a, i) in pendingAttachments"
@@ -673,6 +716,15 @@ onUnmounted(() => unsubscribe?.());
           </div>
         </div>
         <div class="input-shell" :class="{ armed: armedTool }">
+          <button
+            v-if="overflowTools.length"
+            class="input-plus-btn"
+            :class="{ active: overflowOpen }"
+            title="更多功能"
+            @click="toggleOverflow"
+          >
+            <Icon icon="mdi:plus" width="20" />
+          </button>
           <span v-if="armedTool" class="armed-tool">
             <Icon :icon="armedTool.icon" width="16" />
             <span>{{ armedTool.title }}</span>
@@ -684,30 +736,30 @@ onUnmounted(() => unsubscribe?.());
               <Icon icon="mdi:close" width="14" />
             </button>
           </span>
-          <input
+          <textarea
             ref="inputEl"
             v-model="inputText"
-            type="text"
+            rows="1"
             :placeholder="armedTool ? '<可选参数>' : '发消息，或输入功能名（如：生成练习题）按 Tab 确认'"
             autocomplete="off"
             aria-label="消息输入框"
             @input="onInput"
             @keydown="onKeydown"
-            @keydown.enter="sendMessage"
-          />
+            @keydown.enter.exact.prevent="sendMessage"
+          ></textarea>
           <span
             v-if="armedTool && inputText.trim() === armedTool.entry"
             class="param-hint"
             aria-hidden="true"
           >&lt;可选参数&gt;</span>
-          <button class="btn ghost" id="pickBtn" aria-label="选择图片/PDF" title="选择图片/PDF" @click="pickHomework()">
+          <button class="action-btn attach-btn" aria-label="选择图片/PDF" title="选择图片/PDF" @click="pickHomework()">
             <Icon icon="mdi:paperclip" width="18" />
           </button>
-          <button class="btn primary" id="sendBtn" :disabled="!canSend" @click="sendMessage">
-            <Icon icon="mdi:send" width="18" />发送
+          <button class="action-btn send-btn" :disabled="!canSend" @click="sendMessage">
+            <Icon icon="mdi:arrow-up" width="20" />
           </button>
-          <button v-if="busy" class="btn danger" id="stopBtn" @click="abortTurn">
-            <Icon icon="mdi:stop-circle" width="18" />停止
+          <button v-if="busy" class="action-btn stop-btn" @click="abortTurn">
+            <Icon icon="mdi:stop-circle" width="18" />
           </button>
         </div>
       </div>
