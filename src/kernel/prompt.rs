@@ -67,6 +67,21 @@ pub fn practice_check_system_prompt() -> &'static str {
      - 词形/时态/词性填空以语法正确性为准（时态一致、主谓一致、词性转换正确即判对）；\
      - 解答题按解题思路与关键步骤给分：思路正确、步骤完整即判对，小错在 analysis 中指出；\
      - analysis 用中文、面向中学生，公式一律用 LaTeX 标记（行内 $...$）。\
+    不要输出 JSON 以外的任何内容。"
+}
+
+/// 练习出题提示：practice::generate 的 LLM 自由出题路径（模板未命中时使用），严格输出 JSON 对象。
+pub fn practice_generate_system_prompt() -> &'static str {
+    "你是中学出题助手。根据给定的知识点与难度，出一道结构化练习题，严格只输出 JSON 对象：\
+     {\"knowledge_point\":\"知识点\",\"question_text\":\"题目\",\"answer_spec\":\"参考答案/解析（供自动对拍）\",\"diagram_spec\":{\"points\":{...},\"objects\":[...],\"labels\":[...]}}。\
+     规则：\
+     - 难度定义：basic 基础（直接套用公式/定理）；variant 同类变式（条件隐藏或逆用）；advanced 综合拔高（多步组合、辅助线、跨知识点联动）；\
+     - 题目、答案、图形三者同源自洽：几何题必须提供 diagram_spec 图纸规格，非几何题省略（输出 null）；\
+     - diagram_spec 结构：points 为命名坐标 {\"A\":[x,y],...}；objects 为对象列表，支持类型 segment/polygon/circle/right_mark/equal_ticks/angle_arc/label，\
+       可用 dashed/color 修饰（如 {\"type\":\"segment\",\"ends\":[\"A\",\"B\"],\"dashed\":true}），坐标取整数或一位小数；labels 为要标注的点名列表；\
+     - 数学公式一律用 LaTeX 标记（行内 $...$）；\
+     - answer_spec 必须给出确定答案或关键步骤，供判分对拍；\
+     - 面向中学生，题目文字简洁清晰、数据自洽（三角形满足三角不等式、角度和为 180° 等）；\
      不要输出 JSON 以外的任何内容。"
 }
 
