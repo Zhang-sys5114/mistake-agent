@@ -84,23 +84,28 @@ impl UserPlugin for PracticePlugin {
                 Box::pin(async move { generate_handler(params).await })
             }),
         )?;
-        let storage_gaps = storage.clone();
+
+        let storage_for_gaps = storage.clone();
         ctx.registrar.tool(
             "gaps",
             std::sync::Arc::new(move |_call_ctx: &ToolCallContext, params: Value| {
-                let storage = storage_gaps.clone();
+                let storage = storage_for_gaps.clone();
                 Box::pin(async move { gaps_handler(storage, params).await })
             }),
         )?;
-        let model_check = model.clone();
+
+        let storage_for_check = storage.clone();
+        let model_for_check = model.clone();
         ctx.registrar.tool(
             "check",
             std::sync::Arc::new(move |_call_ctx: &ToolCallContext, params: Value| {
-                let model = model_check.clone();
-                let storage = storage.clone();
+                let model = model_for_check.clone();
+                let storage = storage_for_check.clone();
                 Box::pin(async move { check_handler(model, storage, params).await })
             }),
-        )
+        )?;
+
+        Ok(())
     }
 }
 
