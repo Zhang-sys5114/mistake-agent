@@ -10,6 +10,8 @@ const TMP_PATH_RE = /\/tmp\/mistake-agent-[^\s|（(]+/g;
 const WIN_PATH_RE = /\b[A-Z]:\\[^\s|（(]*?mistake-agent[^\s|（(]*/gi;
 // 老消息（无 display_text）：从「请调用工具 X 处理：Y」还原为「标题：Y」。
 const FORCED_RE = /^请调用工具 (\S+) 处理[:：]?\s*(.*)$/s;
+// AI 模型在附件/路径旁生成的说明文字（括号注记）：展示时一律隐藏。
+const SYSTEM_NOTE_RE = /[（(]该路径仅用于界面展示[，,]\s*file\s*参数[必须请使用]*前面的暂存路径[）)]/g;
 
 /** 从消息文本解析全部持久化附件标记（kernel 落盘的「附件：路径|名称」，可能多条）。 */
 export function parseAttachments(text) {
@@ -147,12 +149,13 @@ export function renderPath(view, opts = {}) {
           .replace(ATTACH_RE, "")
           .replace(TMP_PATH_RE, "")
           .replace(WIN_PATH_RE, "")
+          .replace(SYSTEM_NOTE_RE, "")
           .trim();
         if (!kind.display_text) {
           const forced = shown.match(FORCED_RE);
           if (forced) {
             const title = toolTitle(forced[1]);
-            const rest = forced[2].replace(TMP_PATH_RE, "").replace(WIN_PATH_RE, "").trim();
+            const rest = forced[2].replace(TMP_PATH_RE, "").replace(WIN_PATH_RE, "").replace(SYSTEM_NOTE_RE, "").trim();
             shown = rest ? `${title}：${rest}` : title;
           }
         }
