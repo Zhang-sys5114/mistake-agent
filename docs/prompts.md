@@ -57,10 +57,17 @@ new_text 为 null = 回合结束判断目标是否完成。存疑即 continue，
 生产实现 = 主模型 + summarize_prompt 生成：保留错题 id、知识点、未完成事项、结论；≤300 字；
 用于会话交接摘要（旧会话归档）与上下文压缩。
 
+### 6. 练习答案判分提示（practice_check_system_prompt）— 场景二即时批改
+
+practice::check 的模型判分路径使用（参考答案可对拍时先走确定性对拍，不调模型）：
+先按参考答案归一化对拍（填空/选择等封闭题型直接判分）；对不上再走主模型判分，配合 json_schema 强约束
+输出 {correct, score, total, analysis}；答错自动回写错题本（防重复刷题数据源）。
+
 ## 迭代记录
 
 | 日期 | 变更 | 原因/结果 |
 |---|---|---|
+| 2026-08-06 | 新增练习答案判分提示（practice_check_system_prompt） | practice::check 即时批改：对拍优先、模型兜底、答错回写错题本 |
 | 2026-08-07 | 结构式改为 SMILES 代码块约定（```smiles），前端 smiles-drawer 绘制 | 模型输出 SMILES 比 chemfig 更可靠；前端离线轻量渲染结构式 |
 | 2026-08-07 | 化学式从 `\mathrm{}` 改为 `\ce{}`，明确禁用 `\chemfig` | 前端启用 KaTeX mhchem 扩展；chemfig 基于 TikZ，KaTeX 不支持 |
 | 2026-08-05 | 视觉提示从"只 OCR"升级为"图片理解"（作业转写 / 图片描述） | 用户明确：图片理解模型不止 OCR，还能描述角色/照片等内容给主模型 |

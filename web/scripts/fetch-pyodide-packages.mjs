@@ -19,7 +19,8 @@ if (!existsSync(path.join(pyodideDir, "pyodide.asm.wasm"))) {
 }
 
 const py = await loadPyodide({ indexURL: pyodideDir });
-await py.loadPackage(["numpy", "sympy"]);
+// mpmath 需显式加载：新版 SymPy 把 mpmath 当作外部依赖（wheel 校验也要求它）。
+await py.loadPackage(["numpy", "sympy", "mpmath"]);
 // 冒烟：符号计算 + numpy 各跑一句，确认 wheel 可用。
 py.runPython(
   "import sympy as sp, numpy as np\n" +

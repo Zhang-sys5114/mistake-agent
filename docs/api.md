@@ -109,6 +109,8 @@ pub trait UserPlugin {
 | `memory::remove` | tool | **user_only** | `{filename}` 强制参数，删除整棵子树；仅用户可调，不进模型工具列表 |
 | `compute::verify` | tool | user_and_model | `{code}` 在 GUI WebView 内 Pyodide 跑 Python 验算，返回 stdout/stderr/duration |
 | `practice::generate` | tool | user_and_model | `{knowledge_point, difficulty?}` 按模板生成变式题（几何题含 diagram_spec） |
+| `practice::gaps` | tool | user_and_model | `{subject?, days?, limit?}` 聚合错题本薄弱知识点（错误次数排序 + 建议起点难度 basic/variant/advanced） |
+| `practice::check` | tool | user_and_model | `{question, student_answer, reference_answer?, subject?, knowledge_point?, kind?}` 批改练习作答（对拍优先/模型兜底，答错回写错题本） |
 | `report::weekly` | tool | user_and_model | `{days?}` 按错题本聚合周复盘（正确率/新增/薄弱知识点） |
 | `exam::compose` | tool | user_and_model | `{subjects?, count?, minutes?}` 按薄弱知识点组卷 |
 | `tracking::checkin` | tool | user_and_model | `{subject?}` 掌握度统计 + 7/14/30 天重测计划 |
