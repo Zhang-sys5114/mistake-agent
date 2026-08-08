@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::kernel::contract::ToolError;
-use crate::kernel::contract::ToolErrorCode;
 use crate::kernel::message::Message;
 use crate::kernel::plugin::services::{
     AbortSignal, Mistake, MistakeId, ModelHandle, ModelKind, ModelRequest, ResponseFormat,
@@ -190,6 +189,7 @@ fn parse_check_json(text: &str) -> Result<CheckResult, ToolError> {
 mod tests {
     use super::*;
     use crate::kernel::audit::{Auditor, MemoryAuditSink};
+    use crate::kernel::contract::ToolErrorCode;
     use crate::kernel::plugin::services::{
         Mistake, MistakeFilter, MistakeId, MistakePatch, MistakeStore, ModelError, ModelRequest,
         ModelResponse, ModelService, ModelStream, StorageError,
