@@ -81,8 +81,8 @@ pub async fn check_handler(
     // 第一步：参考答案确定性对拍（封闭题型直接判分，不消耗模型调用）。
     if let Some(ref_text) = reference {
         if exact_match(&p.student_answer, ref_text) {
-            return Ok(check_output(true, "exact_match", None, None, "参考答案对拍一致，作答正确。", false));
-        }
+        return Ok(check_output(true, "exact_match", None, None, "参考答案对拍一致，作答正确。", false));
+    }
     }
 
     // 第二步：模型判分（自由作答 / 数学等价等对拍覆盖不了的形态）。
