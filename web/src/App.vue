@@ -183,7 +183,6 @@ onBeforeUnmount(() => {
         <div class="status-pill" :class="{ busy, ready: ready && !busy }">
           <span class="dot"></span><span class="status-text">{{ status }}</span>
         </div>
-        <p class="privacy-note">数据与密钥只保存在本机</p>
       </div>
     </aside>
 
@@ -193,9 +192,6 @@ onBeforeUnmount(() => {
           <h1>{{ navItems.find((n) => n.id === view)?.label }}</h1>
           <span class="topbar-sub">{{ viewMeta[view]?.sub }}</span>
         </div>
-        <span class="topbar-tag">
-          <Icon icon="mdi:shield-lock-outline" width="14" />本地优先
-        </span>
       </header>
 
       <div class="view-host">
