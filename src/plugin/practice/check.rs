@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::kernel::contract::ToolError;
+use crate::kernel::contract::ToolErrorCode;
 use crate::kernel::message::Message;
 use crate::kernel::plugin::services::{
     AbortSignal, Mistake, MistakeId, ModelHandle, ModelKind, ModelRequest, ResponseFormat,
@@ -68,7 +69,7 @@ pub async fn check_handler(
         serde_json::from_value(params).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     if p.question.trim().is_empty() || p.student_answer.trim().is_empty() {
         return Err(ToolError::invalid_params(
-            "question 与 student_answer 不能为空".into(),
+            "question 与 student_answer 不能为空",
         ));
     }
 
@@ -374,6 +375,6 @@ mod tests {
         let err = check_handler(model, storage, json!({ "question": "1+1=?", "student_answer": "" }))
             .await
             .unwrap_err();
-        assert_eq!(err.code, "invalid_params");
+        assert_eq!(err.code, ToolErrorCode::InvalidParams);
     }
 }
