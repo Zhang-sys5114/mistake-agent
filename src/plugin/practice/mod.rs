@@ -84,10 +84,11 @@ impl UserPlugin for PracticePlugin {
                 Box::pin(async move { generate_handler(params).await })
             }),
         )?;
+        let storage_gaps = storage.clone();
         ctx.registrar.tool(
             "gaps",
             std::sync::Arc::new(move |_call_ctx: &ToolCallContext, params: Value| {
-                let storage = storage.clone();
+                let storage = storage_gaps.clone();
                 Box::pin(async move { gaps_handler(storage, params).await })
             }),
         )?;
