@@ -65,6 +65,10 @@ pub enum MessageKind {
     },
     System {
         text: String,
+        /// 前端展示文本（如会话切换提示）：模型上下文始终使用 `text`；
+        /// 缺省时前端回退渲染 `text`。与 User.display_text 同一机制。
+        #[serde(default)]
+        display_text: Option<String>,
     },
 }
 
@@ -115,7 +119,23 @@ impl Message {
         Self {
             id: MessageId::new(),
             parent_id: None,
-            kind: MessageKind::System { text: text.into() },
+            kind: MessageKind::System {
+                text: text.into(),
+                display_text: None,
+            },
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    /// 带前端展示文本的 System 消息：模型看到完整 `text`，学生只看到 `display_text`。
+    pub fn system_with_display(text: impl Into<String>, display_text: Option<String>) -> Self {
+        Self {
+            id: MessageId::new(),
+            parent_id: None,
+            kind: MessageKind::System {
+                text: text.into(),
+                display_text,
+            },
             created_at: chrono::Utc::now(),
         }
     }

@@ -11,8 +11,8 @@
 ## 决策
 
 1. **新消息不再触发切换决策**：`SessionScheduler::on_new_message` 默认继续当前会话（只保留系统级空闲 12h 超时切换）。省去每回合一次守卫调用。
-2. **回合结束决策**：`LlmTurnDecider`（替代 `LlmGuard`）在回合结束时用主模型判断 continue / update_goal / start_new，输入为最近 30 条消息文本（非摘要），输出结构化 JSON；模型错误/解析失败/超时一律降级 continue（存疑即继续）。start_new 现在允许在回合结束执行（切换并携带近期历史）。
-3. **回合内主动切换**：注册 `session::switch` 工具（`user_visible=false`，仅模型调度时出现在工具列表），主模型在回合中判断"该换话题了"时直接调用；agent loop 特殊执行 `SessionScheduler::switch`（归档旧会话 + 创建新会话 + 历史副本），结果回填模型。
+2. **回合结束决策**：`LlmTurnDecider`（替代 `LlmGuard`）在回合结束时用主模型判断 continue / update_goal / start_new，输入为最近 30 条消息文本（非摘要），输出结构化 JSON；模型错误/解析失败/超时一律降级 continue（存疑即继续）。start_new 现在允许在回合结束执行（树内分叉出摘要节点，下一条消息从该子树继续）。
+3. **回合内主动切换**：注册 `session::switch` 工具（`user_visible=false`，仅模型调度时出现在工具列表），主模型在回合中判断"该换话题了"时直接调用；agent loop 特殊执行 `SessionScheduler::switch`——**树内分叉**：当前叶子下挂「摘要节点 + 新子树」，不新建会话、无历史副本，结果回填模型。
 4. **护栏保留**：切换频率限制（1 小时 5 次）、空目标拒绝、决策失败默认 continue。
 
 ## 后果

@@ -75,14 +75,15 @@ v2 同一轮多个工具调用**串行执行**；并行列入后续（按依赖�
 **显式 tool-calling（用户发起，不绕过 LLM）**：用户在输入框输入 `namespace::tool`（如 `practice::generate`），前端弹候选框、按 Tab 确认后进入待调用状态（工具徽章 + `<可选参数>` 占位）；发送时 RPC 携带 `force_tool {entry, hint, display?}`（`display` = 前端原始展示文本，落盘为 user 消息的 `display_text`，重开会话后渲染仍友好；模型上下文仍用拼好的指令文本），kernel 开回合并让模型**首轮强制调用该工具**（Responses API `tool_choice`，整回合 `thinking=none`），工具结果回填后由模型继续生成回复——所有内容输出都走聊天框 LLM 侧。工具清单/标题/分组/图标/参数说明/用法示例全部来自 `list_tools`（后端唯一事实源），前端不写死（工具名 → 标题/图标的映射一律不允许在前端维护）。
 
 ### 会话与消息树
-- 会话调度由独立内核级模块（Session scheduler）承担：平台层按来源派生 SessionKey（v2 独立 App 即单键）；任务层由**主模型**决策（ADR-0030/0032）——**新消息到达先判断要不要切换上下文，再进入回合回答**；回合中可经 `session::switch` 工具主动切换；回合结束由 LlmTurnDecider 判断 continue / update_goal / start_new。判断依据是**会话目标（Goal）**（start_new 时主模型生成并写入会话元数据）。三动作：`continue`（目标不变）、`update_goal`（同会话内改写/细化 Goal，如"录入错题"→"讲解已录入的错题"）、`start_new`（仅当新目标明显无关且不依赖当前会话上下文）；偏向规则为**存疑即继续**，避免切换丢失上下文。切换时旧会话归档，新会话注入旧会话**梗概**与最近消息副本（豆包式无感切换），并暴露历史路由（session::history / session::read）供模型按需翻阅完整旧记录；带频率护栏（1 小时 5 次），决策失败默认 continue。
+- 会话调度由独立内核级模块（Session scheduler）承担：任务层由**主模型**决策（ADR-0030/0032）——**新消息到达先判断要不要切换上下文，再进入回合回答**；回合中可经 `session::switch` 工具主动切换；回合结束由 LlmTurnDecider 判断 continue / update_goal / start_new。判断依据是**会话目标（Goal）**（start_new 时主模型生成并写入会话元数据）。三动作：`continue`（目标不变）、`update_goal`（同会话内改写/细化 Goal，如"录入错题"→"讲解已录入的错题"）、`start_new`（仅当新目标明显无关且不依赖当前会话上下文）；偏向规则为**存疑即继续**。**start_new 是树内分叉**：不新建会话，在当前叶子节点下挂一棵「会话子树」（以「上一会话梗概」摘要节点开头，新用户消息随后），旧分支保留为兄弟版本（GUI `< / >` 可切回）；摘要节点同时是模型上下文边界——新会话上下文 = 摘要起算到当前，旧会话内容不进模型上下文；根会话无摘要，直接从首条用户消息开始。带频率护栏（1 小时 5 次），决策失败默认 continue。
+- 每次模型请求注入**当前会话 ID**（分叉会话 = 摘要节点 UUID，根会话 = 链首消息 UUID）：会话内保持不变、分叉后变化，模型可据此确认切换是否完成。
 - 消息树：每条消息有 id/parentId，JSONL 追加式、永不截断；**编辑消息或"重新生成"会从该点派生新分支**，用户可用 GUI 的 `<` / `>` 翻看旧分支。LLM 上下文只包含活跃路径。
 - 会话是过程记录，业务真相在错题本（storage）——对话历史用完即弃，错题数据长期保留。
 
 ### 压缩（compaction）
 上下文用量达模型窗口 75% 时，在回合边界自动压缩活跃路径：最近 15 条不压，其余旧消息由 LLM 生成任务摘要（保留错题 id、知识点、未完成事项），摘要作为特殊条目写入 JSONL，**原始消息全量保留**。失败重试一次，再失败下回合再试。
 
-**无感知切换（豆包式）**：会话切换时，新会话除梗概外还注入旧会话**最近 20 条消息副本**（重建 parent 链挂在梗概后），模型上下文与消息树连续保留近期历史；再次切换时链式携带，保证"上上个会话"的内容也可用；更早内容由梗概/压缩摘要覆盖。
+**会话切换 = 树内分叉（新版）**：整个历史是一棵消息树，`start_new` / 空闲超时 / `session::switch` 都在**当前消息节点下分叉出一棵会话子树**——以「上一会话梗概」摘要节点开头（摘要整条链，模型上下文从该节点起算），新用户消息随后；旧分支保留为兄弟版本，GUI `< / >` 即可切换旧会话/新会话。改错别字等消息编辑仍是消息级版本切换，与开会话无关。
 
 ### 记忆路由（memory）
 记忆是第三个内核插件，按层级路径组织（`学科/知识点/条目`）。工具：`memory::save(path, content)`（模型自动保存，用户也可调）、`memory::show(path?)`（无参数列出全部条目名，带参数看详情）、`memory::remove(path)`（强制参数，**仅用户可调**）。上下文只注入一行入口提示，模型自行浏览（show 无参数 = 列目录）；路径由 memory 插件校验（拒绝越界）。
@@ -144,7 +145,7 @@ GUI → kernel：`send_user_message`、`trigger_command(entry, params)`、`edit_
 | 图片输入 | 不支持（占位替换）→ 视觉模型走 Chat Completions |
 | 来源 | [官方指南（英）](https://api-docs.deepseek.com/guides/responses_api/) / [（中）](https://api-docs.deepseek.com/zh-cn/guides/responses_api/)，2026-08-04 核对 |
 
-- 会话切换决策归主模型（LlmTurnDecider：新消息先判断 / 回合末三动作 / `session::switch` 工具）；会话交接摘要与上下文压缩摘要由 LlmSummarizer 生成（≤300 字，保留错题 id/知识点/未完成事项，模型错误降级为计数摘要）。
+- 会话切换决策归主模型（LlmTurnDecider：新消息先判断 / 回合末三动作 / `session::switch` 工具）；会话分叉摘要与上下文压缩摘要由 LlmSummarizer 生成（≤300 字，保留错题 id/知识点/未完成事项，模型错误降级为计数摘要）。
 - 可选 Ollama 本地模型（离线场景，不填 key）。
 - 首次运行由设置向导引导填写。
 - 设置热更新：`set_settings` 落盘后双模型服务热替换（LiveSettingsModelService），下一轮模型调用即用新端点/模型/key；settings.json 仍为唯一持久事实。
@@ -176,7 +177,7 @@ mistake-agent/
 │   ├── kernel/                   ← 内核（Rust 2018 布局，目录即模块）
 │   │   ├── agent/                ← Agent 核心调度层
 │   │   │   ├── loop_mod.rs       ← agent loop（护栏/压缩/中断消费）
-│   │   │   ├── session.rs        ← 会话调度（SessionKey/Goal/切换决策/交接摘要）
+│   │   │   ├── session.rs        ← 会话调度（Goal/切换决策/树内分叉 + 摘要边界）
 │   │   │   ├── dispatch.rs  rpc.rs  balance.rs  cache.rs
 │   │   ├── plugin/               ← 内核插件层（一插件一文件夹，mod.rs 承载插件 info）
 │   │   │   ├── services.rs       ← 内核插件公共契约（服务 trait + 受控句柄）
@@ -214,7 +215,7 @@ mistake-agent/
 | 里程碑 | 内容 | 验收标准 |
 |---|---|---|
 | M1 | 单 crate 骨架 + kernel 模块 | ✅ 完成：trait、注册表、dispatch、loop，hello 回合真实跑通 |
-| M1.5 | kernel 的 session 模块 | ✅ 完成：SessionKey、生命周期、交接摘要（LlmSummarizer） |
+| M1.5 | kernel 的 session 模块 | ✅ 完成：生命周期、切换决策、会话分叉摘要（LlmSummarizer） |
 | M2 | services：storage / model / memory | ✅ 完成：会话/审计文件持久化、双模型可调用（热更新）、记忆目录可读写 |
 | M3 | RPC + Tauri 壳 | ✅ 完成：GUI ↔ kernel 进程内 RPC 闭环（standalone） |
 | M4 | 五个插件 + compute::verify | ✅ 完成：7 用户插件 + 5 内核插件注册；场景一全链路 + Pyodide 验算桥接 |
@@ -222,6 +223,14 @@ mistake-agent/
 | M6 | Windows 打包 + 测试 + 文档 | 🟡 除 Windows 打包外完成：80 单测 + 真实 API 链路 + 文档同步；setup.exe 待 Windows 环境 |
 
 后续计划：**M7 = Agent core 剥离为 `so-lite-agent` crate**（ADR-0037，未落地）——参考 Pi 分层，开箱即用，内核/用户插件由使用方编写；实施顺序见 [docs/plan/so-lite-agent.md](plan/so-lite-agent.md)。
+
+产品路线图（规划中，未排期）：
+
+| 阶段 | 内容 | 关键点 |
+|---|---|---|
+| 近期（桌面输入增强） | 剪贴板粘贴截图（Ctrl+V）；摄像头拍题 | 走现有附件暂存管线（vision__read → 判分归档）；WebView2 摄像头权限 |
+| 中期（Android 手机/平板） | Tauri v2 Android target：移动壳 + 触控/窄屏响应式 + 相册/摄像头/剪贴板输入 + Pyodide 移动端验证 | 移动存储路径与权限模型、离线包体积、性能；Windows 装 Android SDK 即可构建，不依赖 macOS |
+| 长期（iOS / iPadOS） | Android 落地后追加 iOS/iPadOS target | 本机无 macOS：构建/签名/发布走云 macOS（GitHub Actions macOS runner——公开仓库免费额度，优先；备选 Codemagic / MacStadium）、Apple 权限模型 |
 
 ## 11. 分工建议（3-5 人）
 
@@ -259,7 +268,7 @@ mistake-agent/
 - **Session scheduler**：独立内核级模块，负责会话调度；任务层由主模型决策（ADR-0030/0032），持久化委托 storage。
 - **Guard model（守卫模型）**：已退役（ADR-0030）——现切换决策全部归主模型：新消息到达先判断（ADR-0032）、回合内 `session::switch` 工具、回合末 LlmTurnDecider 判断三动作；失败一律 continue（存疑即继续）。
 - **Goal（会话目标）**：当前会话要完成的学习目标，主模型在 start_new 时生成并写入会话元数据，作为 continue / update_goal / start_new 的决策依据。
-- **History route（历史路由）**：session::history / session::read，模型按需翻阅旧会话完整记录；新会话只注入梗概。
+- **History route（历史路由）**：session::history / session::read，模型按需翻阅完整消息树；新会话上下文只含本会话子树（从摘要节点起算），旧会话内容不进模型上下文。
 - **Message tree / Active path**：id/parentId 消息树 / 上下文只包含的当前路径。
 - **Memory route**：按层级路径组织的跨会话记忆。
 - **Compaction**：活跃路径旧消息的上下文摘要（原文保留）。

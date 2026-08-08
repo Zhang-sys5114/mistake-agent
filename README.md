@@ -60,15 +60,60 @@ Kernel（agent loop · 工具注册与调度 · 会话调度（主模型决策�
 
 ### 构建与运行
 
+推荐用仓库根的 **Makefile** 一键完成（跨平台，自动增量；产出落在 `target/`）：
+
 ```bash
-cd web && npm install && npm run fetch:pyodide && npm run build && cd ..
-cargo build --bins
-./target/debug/mistake-agent
+make               # 完整构建：前端 + Rust release + 安装包
+make help          # 列出所有可用 target
+make build-rust    # 只重编 Rust（前端未变则跳过 vite build）
+make clean         # 清掉 target/、web/dist/、web/node_modules/
 ```
 
-> `npm run fetch:pyodide` 预热 numpy/sympy 离线包（构建期必需，产物随 dist/pyodide 打包，运行期不依赖 CDN）。
+#### 前置依赖
+
+| 工具 | 版本要求 | 安装方式 |
+|---|---|---|
+| **Rust** | 2024 edition | [rustup.rs](https://rustup.rs/) 安装后 `rustup default stable` |
+| **Node.js** | 18+ | [nodejs.org](https://nodejs.org/) 或包管理器（`apt install nodejs`） |
+| **GNU Make** | 4.x | 见下表 |
+
+**GNU Make 安装（按平台）：**
+
+| 平台 | 安装命令 | 说明 |
+|---|---|---|
+| **Linux** | `sudo apt install make`<br>`sudo dnf install make` | 包管理器自带 |
+| **macOS** | `brew install make` | Apple 自带的是 BSD make，不支持本项目语法 |
+| **Windows** | `winget install ezwinports.make` | 装完后需把 `%LOCALAPPDATA%\Microsoft\WinGet\Packages\ezwinports.make_*\bin` 加进系统 PATH，或每次运行前：<br>`$env:PATH="$env:LOCALAPPDATA\Microsoft\WinGet\Packages\ezwinports.make_Microsoft.Winget.Source_8wekyb3d8bbwe\bin;$env:PATH"`<br>（PowerShell） |
+
+**Windows 额外依赖（打包时）：**
+- Git for Windows（Makefile 内部用 Git Bash 的 `sh.exe` 执行 recipe）
+- NSIS（Tauri bundler 自带，无需手动安装）
+- WebView2（Win10 1809+ / Win11 已预装）
+
+#### 构建产物
+
+| 平台 | 可执行文件 | 安装包 |
+|---|---|---|
+| **Windows** | `target/release/mistake-agent.exe` | `target/release/bundle/nsis/*.exe` |
+| **Linux** | `target/release/mistake-agent` | `target/release/bundle/deb/*.deb`<br>`target/release/bundle/appimage/*.AppImage` |
+| **macOS** | `target/release/mistake-agent` | `target/release/bundle/macos/*.dmg` |
+
+`make bundle` 会按当前平台自动选安装包格式。
+
+#### 等效手动步骤（调试 Makefile 失败时用）
+
+```bash
+cd web && npm ci && npm run fetch:pyodide && npm run build && cd ..
+cargo build --release --bins                    # 只编译二进制
+cargo tauri build --bundles nsis                # Windows 打包
+cargo tauri build --bundles deb appimage        # Linux 打包
+cargo tauri build --bundles dmg                 # macOS 打包
+```
+
+> **`npm run fetch:pyodide` 为什么必须：**  
+> 预热 numpy/sympy/mpmath 离线 wheel，构建期必需。产物随 `dist/pyodide/` 打包进应用，运行期不依赖 CDN。清过 `node_modules` 后必须重跑一次。
 >
-> 完整构建流程（含 Pyodide 离线包说明、常见问题）见 [docs/build.md](docs/build.md)。
+> 完整构建流程（含 Pyodide 离线包说明、Makefile 各 target 含义、常见问题）见 [docs/build.md](docs/build.md)。
 
 ### 开发命令
 
@@ -77,7 +122,8 @@ cargo test                                  # 单元测试
 cargo test --test live_api -- --ignored     # 真实 API 集成测试（需已配置 key）
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
-cd web && npm run build                     # 前端构建
+make build-frontend                         # 只重建前端
+make build-rust                             # 只重编 Rust release
 cd web && npm run check:pyodide             # Pyodide 真实执行自检（算术/符号计算/物理/numpy）
 cd web && node scripts/katex-check.mjs      # LaTeX 渲染链路自检
 ```

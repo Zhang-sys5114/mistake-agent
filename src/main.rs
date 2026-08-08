@@ -1,6 +1,10 @@
 //! Tauri GUI 入口：kernel 直接运行在本进程内（standalone，无 sidecar 依赖）。
 //! GUI ↔ kernel 经内存通道桥接：前端请求 → Kernel::handle → 响应/事件帧 → Channel 回推。
 
+// Release 构建在 Windows 下不弹出黑色控制台窗口（双击 .exe 直接进 GUI）。
+// 非 Windows 平台该属性不存在，cfg_attr 让它完全跳过。
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;

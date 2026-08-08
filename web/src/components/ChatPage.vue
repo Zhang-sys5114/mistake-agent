@@ -1,11 +1,16 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { Icon } from "@iconify/vue";
 import MessageBubble from "./MessageBubble.vue";
 import AttachmentViewer from "./AttachmentViewer.vue";
 import { runPython } from "../lib/pyodide";
 import { attachmentUrl } from "../lib/attachments";
-import { renderPath } from "../lib/messages";
+import {
+  buildSessionView,
+  getActiveChain,
+  navigateBranch,
+  renderPath,
+} from "../lib/messages";
 import { loadToolCatalog, toolIcon, toolList } from "../lib/tools";
 
 const props = defineProps({
@@ -19,9 +24,9 @@ const busy = ref(false);
 const toolStatus = ref(null); // { entry, message, icon }
 const bubbles = ref([]);
 const editingId = ref(null);
-const editingText = ref("");
 const currentStreamId = ref(null);
-const branchPointers = ref({});
+const sessionViews = ref({}); // sessionKey -> buildSessionView（含逐节点版本指针）
+const activeSessionKey = ref(null);
 const tools = ref([]); // 用户可见工具（list_tools，供输入候选）
 const suggestions = ref([]);
 const activeSuggestion = ref(-1);
@@ -29,6 +34,7 @@ const armedTool = ref(null); // Tab 确认的待调用工具 { entry, title, ico
 const pendingAttachments = ref([]); // 选完未发送的附件列表（可多张/混合 PDF）
 const cacheStats = ref(null); // 上下文缓存命中统计（get_cache_stats）
 const inputEl = ref(null);
+const overflowOpen = ref(false);
 
 let unsubscribe = null;
 let assistantIndex = -1;
@@ -43,8 +49,19 @@ const canSend = computed(
     (inputText.value.trim() || armedTool.value || pendingAttachments.value.length),
 );
 
-const TOOL_NAME_RE = /^([a-z][a-z0-9_]*::[a-z][a-z0-9_]*)/i;
 const GROUP_ORDER = ["批改", "学习", "记忆", "其它", "调试"];
+
+const MAX_VISIBLE_TOOLS = 5;
+const visibleTools = computed(() => tools.value.slice(0, MAX_VISIBLE_TOOLS));
+const overflowTools = computed(() => tools.value.slice(MAX_VISIBLE_TOOLS));
+
+function toggleOverflow() {
+  overflowOpen.value = !overflowOpen.value;
+}
+
+function closeOverflow() {
+  overflowOpen.value = false;
+}
 
 const quickActions = [
   { id: "upload", label: "上传图片/PDF", desc: "看图提问、讲解或批改归档", icon: "mdi:upload", action: "upload" },
@@ -136,20 +153,14 @@ const cacheTitle = computed(() => {
   return lines.join("\n");
 });
 
-/** Tab 确认：补全工具名并进入待调用状态（工具名保留在输入框，后面接参数）。 */
-function armTool(tool) {
-  const entry = tool.entry;
-  const m = inputText.value.match(TOOL_NAME_RE);
-  if (m) {
-    // 把触发联想的片段补全为完整工具名（后面的文本保留）。
-    inputText.value = entry + inputText.value.slice(m[0].length);
-  } else {
-    // 工具栏按钮点击：把工具名放到输入框开头。
-    const rest = inputText.value.trim();
-    inputText.value = rest ? `${entry} ${rest}` : entry;
+/** 武装工具：工具名只进徽章，输入框只留参数（避免「徽章 + 工具名文字」双份）。 */
+function armTool(tool, stripToken = false) {
+  if (stripToken) {
+    // 从输入候选确认：移除已输入的触发词（工具名/标题），剩余文本作为参数。
+    inputText.value = inputText.value.replace(/^\S+\s*/, "");
   }
   armedTool.value = {
-    entry,
+    entry: tool.entry,
     title: tool.title || tool.entry,
     icon: toolIcon(tool.entry),
   };
@@ -160,15 +171,10 @@ function unarmTool() {
   armedTool.value = null;
 }
 
-/** 输入变化：工具名被删除/改写时自动解除待调用状态。 */
+/** 输入变化：只重算候选与自动高度；武装状态由徽章 X 或再次点选工具解除。 */
 function onInput() {
-  if (armedTool.value) {
-    const re = new RegExp(`^${armedTool.value.entry}(?:\\s|$)`);
-    if (!re.test(inputText.value)) {
-      armedTool.value = null;
-    }
-  }
   computeSuggestions();
+  autoResize();
 }
 
 /** 工具栏点击：选中/取消工具，进入待调用状态并聚焦输入框。 */
@@ -190,14 +196,14 @@ function onKeydown(e) {
         suggestions.value[
           activeSuggestion.value >= 0 ? activeSuggestion.value : 0
         ];
-      armTool(t);
+      armTool(t, true);
     } else if (!armedTool.value) {
       // 候选框未弹出时兜底：输入的工具名精确匹配也直接确认。
       const firstToken = (inputText.value.match(/\S+/) || [""])[0];
       const exact = tools.value.find(
         (t) => t.entry.toLowerCase() === firstToken.toLowerCase(),
       );
-      if (exact) armTool(exact);
+      if (exact) armTool(exact, true);
     }
   } else if (e.key === "ArrowDown" && suggestions.value.length) {
     e.preventDefault();
@@ -216,6 +222,13 @@ function scrollBottom() {
     const el = document.getElementById("messages");
     if (el) el.scrollTop = el.scrollHeight;
   });
+}
+
+function autoResize() {
+  const el = inputEl.value;
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = el.scrollHeight + "px";
 }
 
 function addBubble(b) {
@@ -257,31 +270,46 @@ function finalize() {
   currentStreamId.value = null;
 }
 
-/** 全量历史：所有会话的消息按时间合并成一条大树（副本按消息 id 去重）。 */
+/** 用缓存的会话视图重建合并气泡流（聊天页：各会话只渲染活跃链，副本按 id 去重）。 */
+function renderMergedBubbles() {
+  const seen = new Set();
+  const all = [];
+  for (const [key, view] of Object.entries(sessionViews.value)) {
+    for (const b of renderPath(view, { sessionKey: key })) {
+      const id = String(b.messageId);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      all.push(b);
+    }
+  }
+  all.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  if (all.length) {
+    bubbles.value = all;
+    scrollBottom();
+  }
+}
+
+/** 全量历史：每个会话建消息树视图（DeepSeek 式逐节点版本指针），只渲染活跃链。 */
 async function refreshAllHistory() {
   try {
     const list = await props.kernel.call("list_sessions", {}, 8000);
     const arr = list.sessions || [];
-    const seen = new Set();
-    const all = [];
+    const views = {};
+    activeSessionKey.value =
+      arr.find((s) => s.status === "active")?.key || null;
     for (const s of arr) {
       try {
         const detail = await props.kernel.call("read_session", { key: s.key }, 8000);
-        for (const m of detail.messages || []) {
-          const id = String(m.id);
-          if (seen.has(id)) continue;
-          seen.add(id);
-          all.push(m);
-        }
+        views[s.key] = buildSessionView(
+          detail.messages,
+          detail.meta?.active_path || null,
+        );
       } catch {
         // 单个会话读取失败不阻断整体历史。
       }
     }
-    all.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-    if (all.length) {
-      bubbles.value = renderPath(all);
-      scrollBottom();
-    }
+    sessionViews.value = views;
+    renderMergedBubbles();
   } catch (e) {
     // list_sessions/read_session 尚未接通时，聊天仍可用，只是没有分支/编辑入口。
     if (e.code !== "not_implemented") console.warn("会话回读失败：", e);
@@ -391,10 +419,9 @@ async function sendMessage() {
     const tool = armedTool.value;
     armedTool.value = null;
     pendingAttachments.value = [];
-    const raw = inputText.value;
+    const hint = inputText.value.trim();
     inputText.value = "";
-    const m = raw.match(TOOL_NAME_RE);
-    const hint = (m ? raw.slice(m[0].length) : raw).trim();
+    nextTick(autoResize);
     const display = tool.title + (hint ? `：${hint}` : "");
     addBubble({
       type: "user",
@@ -419,6 +446,7 @@ async function sendMessage() {
   }
   pendingAttachments.value = [];
   inputText.value = "";
+  nextTick(autoResize);
   addBubble({ type: "user", text: text || "我上传了图片/PDF", attachments });
   busy.value = true;
   setStatus(true, "正在回答");
@@ -468,36 +496,40 @@ function openAttachment(attachment) {
 
 function startEdit(bubble) {
   editingId.value = bubble.messageId;
-  editingText.value = bubble.text;
 }
 
-async function saveEdit() {
+async function saveEdit(text) {
   const id = editingId.value;
-  const text = editingText.value.trim();
   editingId.value = null;
   if (!id || !text) return;
+  busy.value = true;
+  setStatus(true, "正在重新回答");
   try {
-    const r = await props.kernel.call("edit_message", { message_id: id, text });
-    if (r.messages) bubbles.value = renderPath(r.messages);
-    scrollBottom();
+    await props.kernel.call("edit_message", { message_id: id, text });
+    // 从服务端重读：编辑后的版本就地替换，其余对话保持不塌缩。
+    await refreshAllHistory();
   } catch (e) {
+    busy.value = false;
+    setStatus(false, "就绪");
     addBubble({ type: "error", text: `编辑失败：${e.message}` });
   }
 }
 
-async function switchBranch(bubble) {
-  const ids = bubble.siblingIds || [];
-  if (!ids.length) return;
-  const key = bubble.parentId || "__root__";
-  const idx = (branchPointers.value[key] ?? 0) % ids.length;
-  const target = ids[idx];
-  branchPointers.value = { ...branchPointers.value, [key]: (idx + 1) % ids.length };
-  try {
-    const r = await props.kernel.call("switch_branch", { message_id: target });
-    if (r.messages) bubbles.value = renderPath(r.messages);
-    scrollBottom();
-  } catch (e) {
-    addBubble({ type: "error", text: `分支切换失败：${e.message}` });
+/** < / > 切换版本（DeepSeek 式）：本地改版本指针即时渲染；活跃会话同步服务端。 */
+function switchBranch(bubble, dir = 1) {
+  const view = bubble.sessionKey ? sessionViews.value[bubble.sessionKey] : null;
+  if (!view) return;
+  navigateBranch(view, bubble.messageId, dir);
+  renderMergedBubbles();
+  // 活跃会话：把新链末端同步给服务端，后续发送从所选版本继续。
+  if (bubble.sessionKey === activeSessionKey.value) {
+    const chain = getActiveChain(view);
+    const end = chain.length ? String(chain[chain.length - 1].id) : null;
+    if (end) {
+      props.kernel
+        .call("switch_branch", { message_id: end })
+        .catch(() => {});
+    }
   }
 }
 
@@ -529,6 +561,7 @@ onUnmounted(() => unsubscribe?.());
   <div class="chat-page">
     <div class="chat-topbar">
       <button
+        v-if="false"
         class="cache-chip"
         :title="cacheTitle"
         aria-label="聊天上下文缓存命中率"
@@ -577,26 +610,15 @@ onUnmounted(() => unsubscribe?.());
           :key="b.messageId || i"
           :bubble="b"
           :streaming="b.type === 'assistant' && currentStreamId && b.messageId === currentStreamId"
+          :editing="editingId === b.messageId"
           @edit="startEdit"
           @switch-branch="switchBranch"
           @copy="copyText"
           @open-attachment="openAttachment"
+          @save-edit="saveEdit"
+          @cancel-edit="editingId = null"
         />
       </TransitionGroup>
-
-      <div v-if="editingId" class="edit-box">
-        <textarea
-          v-model="editingText"
-          rows="3"
-          aria-label="编辑消息内容"
-          @keydown.esc="editingId = null"
-          @keydown.ctrl.enter="saveEdit"
-        ></textarea>
-        <div class="edit-actions">
-          <button class="btn ghost" @click="editingId = null">取消</button>
-          <button class="btn primary" :disabled="!editingText.trim()" @click="saveEdit">保存并派生新分支</button>
-        </div>
-      </div>
     </main>
 
     <footer class="chat-footer">
@@ -610,14 +632,14 @@ onUnmounted(() => unsubscribe?.());
 
       <div v-if="tools.length && !busy" class="tool-bar" role="toolbar" aria-label="工具">
         <button
-          v-for="t in tools"
+          v-for="t in visibleTools"
           :key="t.entry"
           class="tool-chip"
           :class="{ active: armedTool?.entry === t.entry }"
           :title="t.description"
           @click="pickTool(t)"
         >
-          <Icon :icon="t.icon || 'mdi:toolbox-outline'" width="15" />
+          <Icon :icon="t.icon || 'mdi:toolbox-outline'" width="16" />
           <span>{{ t.title || t.entry }}</span>
         </button>
       </div>
@@ -637,7 +659,7 @@ onUnmounted(() => unsubscribe?.());
               :class="{ active: i === activeSuggestion }"
               role="option"
               :aria-selected="i === activeSuggestion"
-              @mousedown.prevent="armTool(t)"
+              @mousedown.prevent="armTool(t, true)"
             >
               <Icon :icon="t.icon || 'mdi:toolbox-outline'" width="16" />
               <span class="ts-title">{{ t.title || t.entry }}</span>
@@ -646,6 +668,26 @@ onUnmounted(() => unsubscribe?.());
             <p class="tool-suggest-hint">按 Tab 确认调用 · ↑↓ 选择 · 也可点选</p>
           </div>
         </Transition>
+
+        <div v-if="overflowTools.length" class="overflow-floating">
+          <Transition name="drop">
+            <div v-if="overflowOpen" class="tool-overflow-menu" @mouseleave="closeOverflow">
+              <button
+                v-for="t in overflowTools"
+                :key="t.entry"
+                class="tool-overflow-item"
+                :class="{ active: armedTool?.entry === t.entry }"
+                :title="t.title + '：' + t.description"
+                @click="pickTool(t); closeOverflow()"
+              >
+                <span class="tool-overflow-icon">
+                  <Icon :icon="t.icon || 'mdi:toolbox-outline'" width="20" />
+                </span>
+                <span class="tool-overflow-title">{{ t.title || t.entry }}</span>
+              </button>
+            </div>
+          </Transition>
+        </div>
 
         <div v-if="pendingAttachments.length" class="pending-attach-bar">
           <div
@@ -673,6 +715,15 @@ onUnmounted(() => unsubscribe?.());
           </div>
         </div>
         <div class="input-shell" :class="{ armed: armedTool }">
+          <button
+            v-if="overflowTools.length"
+            class="input-plus-btn"
+            :class="{ active: overflowOpen }"
+            title="更多功能"
+            @click="toggleOverflow"
+          >
+            <Icon icon="mdi:plus" width="20" />
+          </button>
           <span v-if="armedTool" class="armed-tool">
             <Icon :icon="armedTool.icon" width="16" />
             <span>{{ armedTool.title }}</span>
@@ -684,30 +735,30 @@ onUnmounted(() => unsubscribe?.());
               <Icon icon="mdi:close" width="14" />
             </button>
           </span>
-          <input
+          <textarea
             ref="inputEl"
             v-model="inputText"
-            type="text"
+            rows="1"
             :placeholder="armedTool ? '<可选参数>' : '发消息，或输入功能名（如：生成练习题）按 Tab 确认'"
             autocomplete="off"
             aria-label="消息输入框"
             @input="onInput"
             @keydown="onKeydown"
-            @keydown.enter="sendMessage"
-          />
+            @keydown.enter.exact.prevent="sendMessage"
+          ></textarea>
           <span
-            v-if="armedTool && inputText.trim() === armedTool.entry"
+            v-if="armedTool && !inputText.trim()"
             class="param-hint"
             aria-hidden="true"
           >&lt;可选参数&gt;</span>
-          <button class="btn ghost" id="pickBtn" aria-label="选择图片/PDF" title="选择图片/PDF" @click="pickHomework()">
+          <button class="action-btn attach-btn" aria-label="选择图片/PDF" title="选择图片/PDF" @click="pickHomework()">
             <Icon icon="mdi:paperclip" width="18" />
           </button>
-          <button class="btn primary" id="sendBtn" :disabled="!canSend" @click="sendMessage">
-            <Icon icon="mdi:send" width="18" />发送
+          <button class="action-btn send-btn" :disabled="!canSend" @click="sendMessage">
+            <Icon icon="mdi:arrow-up" width="20" />
           </button>
-          <button v-if="busy" class="btn danger" id="stopBtn" @click="abortTurn">
-            <Icon icon="mdi:stop-circle" width="18" />停止
+          <button v-if="busy" class="action-btn stop-btn" @click="abortTurn">
+            <Icon icon="mdi:stop-circle" width="18" />
           </button>
         </div>
       </div>

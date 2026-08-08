@@ -124,7 +124,7 @@ fn messages_to_responses_input_impl(
                 "role": "assistant",
                 "content": [{"type": "output_text", "text": text}],
             })),
-            MessageKind::System { text } => {
+            MessageKind::System { text, .. } => {
                 pending_reasoning = None;
                 calls_since_reasoning = 0;
                 items.push(json!({
@@ -224,7 +224,7 @@ pub(crate) fn messages_to_cc(messages: &[Message]) -> Vec<Value> {
             MessageKind::Assistant { text } => {
                 out.push(json!({"role": "assistant", "content": text}));
             }
-            MessageKind::System { text } => {
+            MessageKind::System { text, .. } => {
                 out.push(json!({"role": "system", "content": text}));
             }
             // Chat Completions 无 reasoning 概念：忽略（Ollama 等兼容端）。

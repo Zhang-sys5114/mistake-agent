@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::kernel::message::{Message, MessageId};
+use crate::kernel::message::{Message, MessageId, MessageKind};
 use crate::kernel::plugin::services::{
     AbortSignal, ModelError, ModelKind, ModelRequest, ModelResponse, ModelService, ResponseFormat,
     SessionStore, StorageError,
@@ -296,7 +296,7 @@ fn message_text(msg: &Message) -> String {
     match &msg.kind {
         MessageKind::User { text, .. } => format!("用户：{text}"),
         MessageKind::Assistant { text } => format!("助手：{text}"),
-        MessageKind::System { text } => format!("系统：{text}"),
+        MessageKind::System { text, .. } => format!("系统：{text}"),
         MessageKind::Reasoning { text, .. } => format!("推理：{text}"),
         MessageKind::ToolCall {
             entry,
@@ -555,8 +555,6 @@ pub struct SessionScheduler {
     idle_timeout: Duration,
     max_switches_per_hour: usize,
     switch_times: Mutex<VecDeque<DateTime<Utc>>>,
-    /// 切换时复制到新会话的旧会话最近消息数（无感知切换：历史上下文连续）。
-    history_carryover: usize,
 }
 
 impl SessionScheduler {
@@ -576,7 +574,6 @@ impl SessionScheduler {
             idle_timeout: Duration::from_secs(12 * 60 * 60),
             max_switches_per_hour: 5,
             switch_times: Mutex::new(VecDeque::new()),
-            history_carryover: 20,
         }
     }
 
@@ -610,9 +607,8 @@ impl SessionScheduler {
             .cloned();
         let Some(meta) = active else {
             // 首条消息：建新会话（不产生切换中断）。
-            let (_, to) = self
-                .switch_session(
-                    None,
+            let to = self
+                .create_first_session(
                     Goal {
                         text: text.chars().take(40).collect(),
                     },
@@ -625,14 +621,13 @@ impl SessionScheduler {
         let idle = now - meta.last_activity_at
             > chrono::Duration::from_std(self.idle_timeout).unwrap_or(chrono::Duration::hours(12));
         if idle {
-            // 系统级空闲超时：开新会话（不依赖模型决策）。
+            // 系统级空闲超时：树内分叉新会话（不依赖模型决策）。
             let goal = Goal {
                 text: text.chars().take(40).collect(),
             };
-            let (from, to) = self.switch_session(Some(&meta), goal.clone(), now).await?;
-            self.record_switch(now);
-            self.bus.send(Interrupt::SessionSwitched { from, to, goal });
-            return self.append_user(&to, text, display_text).await;
+            return self
+                .fork_branch(&meta, goal, Some(text), display_text, now)
+                .await;
         }
 
         // 先判断（主模型）：这条新消息要不要切换上下文。
@@ -670,11 +665,9 @@ impl SessionScheduler {
                     log::warn!("切换过于频繁，新消息 start_new 降级忽略");
                     return self.continue_in(&meta, text, display_text, now).await;
                 }
-                // 先切换上下文（归档旧会话 + 梗概 + 历史副本），再把新消息放进新会话回答。
-                let (from, to) = self.switch_session(Some(&meta), goal.clone(), now).await?;
-                self.record_switch(now);
-                self.bus.send(Interrupt::SessionSwitched { from, to, goal });
-                self.append_user(&to, text, display_text).await
+                // 树内分叉新会话：当前叶子下挂「摘要节点 + 新用户消息」。
+                self.fork_branch(&meta, goal, Some(text), display_text, now)
+                    .await
             }
             GuardDecision::UpdateGoal(goal) => {
                 if !goal.text.trim().is_empty() {
@@ -779,54 +772,69 @@ impl SessionScheduler {
                     log::warn!("切换过于频繁，回合结束 start_new 降级忽略");
                     return Ok(());
                 }
-                let (from, to) = self.switch_session(Some(&meta), goal.clone(), now).await?;
-                self.record_switch(now);
-                self.bus.send(Interrupt::SessionSwitched { from, to, goal });
+                // 回合结束分叉：只挂摘要节点，下一条新消息从该子树继续。
+                self.fork_branch(&meta, goal, None, None, now).await?;
             }
             GuardDecision::Continue => {}
         }
         Ok(())
     }
 
-    async fn switch_session(
+    /// 创建根会话（仅首条消息调用）：根会话没有摘要节点，直接以用户消息开头。
+    async fn create_first_session(
         &self,
-        old: Option<&SessionMeta>,
         goal: Goal,
         now: DateTime<Utc>,
-    ) -> Result<(SessionKey, SessionKey), SchedulerError> {
-        match old {
-            Some(meta) => {
-                // 摘要只生成一次：同时写入旧会话交接摘要与新会话梗概（历史路由保留完整记录）。
-                let all = self.store.read_all(&meta.key).await?;
-                let active = self.store.read_path(&meta.key).await?;
-                let summary = self.summarizer.summarize(&all, meta.goal.as_ref()).await;
-                let mut handoff = Message::system(format!("交接摘要：{summary}"));
-                handoff.parent_id = all.last().map(|m| m.id);
-                self.store.append_message(&meta.key, &handoff).await?;
-                self.store.archive(&meta.key).await?;
-                let to = SessionKey::new();
-                self.create_session(to, goal.clone(), now).await?;
-                // 无感知切换：新会话注入「梗概 + 旧会话最近消息副本」，
-                // 模型上下文与消息树都保留连续历史（跨上上个会话由链式复制累积）。
-                let handoff = Message::system(format!("上一会话梗概：{summary}"));
-                self.store.append_message(&to, &handoff).await?;
-                let copied = carry_history(&active, self.history_carryover);
-                for (i, mut m) in copied.into_iter().enumerate() {
-                    // 副本链挂在梗概之后，保证活跃路径（梗概 → 副本 → 新消息）完整。
-                    if i == 0 {
-                        m.parent_id = Some(handoff.id);
-                    }
-                    self.store.append_message(&to, &m).await?;
-                }
-                Ok((meta.key, to))
-            }
-            None => {
-                let dummy = SessionKey::new();
-                let new_key = SessionKey::new();
-                self.create_session(new_key, goal.clone(), now).await?;
-                Ok((dummy, new_key))
-            }
+    ) -> Result<SessionKey, SchedulerError> {
+        let new_key = SessionKey::new();
+        self.create_session(new_key, goal, now).await?;
+        Ok(new_key)
+    }
+
+    /// 树内分叉新会话：在当前叶子节点下挂一棵「会话子树」——
+    /// 先追加摘要节点（上一会话梗概，同时是模型上下文边界），再挂新用户消息（如有）。
+    /// 摘要节点与当前叶子互为兄弟版本（旧分支保留，< / > 可切回）；不新建 SessionKey。
+    async fn fork_branch(
+        &self,
+        meta: &SessionMeta,
+        goal: Goal,
+        text: Option<&str>,
+        display_text: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<TurnContext, SchedulerError> {
+        let all = self.store.read_all(&meta.key).await?;
+        let path = self.store.read_path(&meta.key).await?;
+        let summary = self.summarizer.summarize(&all, meta.goal.as_ref()).await;
+        let leaf = path.last();
+        // 摘要节点挂成当前叶子的子节点：新会话在模型回复之后线性延续，
+        // 旧回复保留在链上（不产生「回复=1、新会话=2」的版本分裂）。
+        let summary_parent = leaf.map(|m| m.id);
+        let mut summary_msg = Message::system_with_display(
+            format!("上一会话梗概：{summary}"),
+            None,
+        );
+        summary_msg.parent_id = summary_parent;
+        summary_msg.created_at = now;
+        self.store.append_message(&meta.key, &summary_msg).await?;
+        self.store.set_active_path(&meta.key, Some(summary_msg.id)).await?;
+        if let Some(text) = text {
+            let mut user_msg = Message::user_with_display(text, display_text.map(str::to_string));
+            user_msg.parent_id = Some(summary_msg.id);
+            user_msg.created_at = now;
+            self.store.append_message(&meta.key, &user_msg).await?;
+            self.store.set_active_path(&meta.key, Some(user_msg.id)).await?;
         }
+        self.store.set_goal(&meta.key, &goal).await?;
+        self.record_switch(now);
+        self.bus.send(Interrupt::SessionSwitched {
+            from: meta.key,
+            to: meta.key,
+            goal,
+        });
+        Ok(TurnContext {
+            session_key: meta.key,
+            messages: self.store.read_path(&meta.key).await?,
+        })
     }
 
     async fn create_session(
@@ -897,35 +905,30 @@ impl SessionSwitch for SessionScheduler {
         let goal = Goal {
             text: goal.to_string(),
         };
-        let (from, to) = self
-            .switch_session(Some(&active), goal.clone(), now)
+        let ctx = self
+            .fork_branch(&active, goal.clone(), None, None, now)
             .await
             .map_err(|e| e.to_string())?;
-        self.record_switch(now);
-        self.bus.send(Interrupt::SessionSwitched { from, to, goal });
-        Ok(to)
+        Ok(ctx.session_key)
     }
 }
 
-/// 取活跃路径最近 N 条并重建副本 parent 链（副本自成一条链，挂到新会话树）。
-fn carry_history(path: &[Message], keep: usize) -> Vec<Message> {
-    let tail: Vec<Message> = path
-        .iter()
-        .rev()
-        // 会话切换控制消息不随历史携带（ADR-0034），避免模型在新上下文反复切换。
-        .filter(|m| !m.is_switch_tool_call())
-        .take(keep)
-        .cloned()
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    let mut copied: Vec<Message> = Vec::with_capacity(tail.len());
-    for mut m in tail {
-        m.parent_id = copied.last().map(|c| c.id);
-        copied.push(m);
+/// 判断是否为「会话摘要」节点（新会话子树的根，模型上下文边界）。
+pub fn is_session_summary(m: &Message) -> bool {
+    matches!(
+        &m.kind,
+        MessageKind::System { text, .. } if text.starts_with("上一会话梗概：")
+    )
+}
+
+/// 会话上下文边界：从最近的「上一会话梗概」节点起算（含该节点）。
+/// 摘要之前的祖先（旧会话内容）不进模型上下文——新会话只带本会话内容。
+pub fn scope_session_context(messages: &[Message]) -> Vec<Message> {
+    if let Some(idx) = messages.iter().rposition(is_session_summary) {
+        messages[idx..].to_vec()
+    } else {
+        messages.to_vec()
     }
-    copied
 }
 
 #[cfg(test)]
@@ -1059,24 +1062,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_timeout_starts_new_session() {
+    async fn idle_timeout_forks_session_branch() {
         let (scheduler, clock, store, _) = setup();
         let first = scheduler.on_new_message("帮我看看这道题").await.unwrap();
         clock.advance(Duration::from_secs(13 * 60 * 60));
         let second = scheduler.on_new_message("生成周复习报告").await.unwrap();
-        assert_ne!(first.session_key, second.session_key);
+        // 空闲超时不再开新会话：同一棵树内分叉。
+        assert_eq!(first.session_key, second.session_key);
         let metas = store.list_sessions().await.unwrap();
-        assert_eq!(metas.len(), 2);
-        let active = metas
-            .iter()
-            .find(|m| m.status == SessionStatus::Active)
-            .unwrap();
-        assert_eq!(active.key, second.session_key);
-        // 新会话注入旧会话梗概（System 消息）。
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].status, SessionStatus::Active);
+        // 活跃路径 = [..., 摘要节点, 新用户消息]
         let msgs = store.read_path(&second.session_key).await.unwrap();
         assert!(matches!(
-            msgs[0].kind,
-            crate::kernel::message::MessageKind::System { .. }
+            msgs[msgs.len() - 2].kind,
+            crate::kernel::message::MessageKind::System { ref text, .. }
+                if text.contains("上一会话梗概")
+        ));
+        assert!(matches!(
+            msgs.last().unwrap().kind,
+            crate::kernel::message::MessageKind::User { .. }
         ));
     }
 
@@ -1102,42 +1107,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_message_start_new_switches_before_turn() {
-        // StubGuard 命中“报告”关键词 → start_new：先切换上下文，再把新消息放进新会话。
+    async fn new_message_start_new_forks_branch() {
+        // StubGuard 命中“报告”关键词 → start_new：树内分叉（摘要节点 + 新用户消息）。
         let (scheduler, _, store, bus) = setup();
         let first = scheduler.on_new_message("帮我看看这道题").await.unwrap();
         let second = scheduler.on_new_message("生成周复习报告").await.unwrap();
-        assert_ne!(first.session_key, second.session_key, "应切换到新会话");
+        assert_eq!(first.session_key, second.session_key, "分叉不新建会话");
         let metas = store.list_sessions().await.unwrap();
-        assert_eq!(metas.len(), 2, "旧会话归档 + 新会话");
-        let archived = metas
-            .iter()
-            .find(|m| m.status == SessionStatus::Archived)
-            .expect("旧会话应归档");
-        assert_eq!(archived.key, first.session_key);
-        let active = metas
-            .iter()
-            .find(|m| m.status == SessionStatus::Active)
-            .expect("应有活动会话");
-        assert_eq!(active.key, second.session_key);
-        // 新会话末尾必须是用户新消息（先切上下文，再进入回合回答）。
+        assert_eq!(metas.len(), 1, "仍是同一个会话");
+        assert_eq!(metas[0].status, SessionStatus::Active);
         let msgs = store.read_path(&second.session_key).await.unwrap();
+        assert!(
+            msgs.iter().any(|m| {
+                matches!(
+                    m.kind,
+                    crate::kernel::message::MessageKind::System { ref text, .. }
+                        if text.contains("上一会话梗概")
+                )
+            }),
+            "分叉点应有会话摘要节点"
+        );
         assert!(
             matches!(
                 msgs.last().unwrap().kind,
                 crate::kernel::message::MessageKind::User { .. }
             ),
-            "新会话应包含用户消息"
-        );
-        assert!(
-            msgs.iter().any(|m| {
-                matches!(
-                    m.kind,
-                    crate::kernel::message::MessageKind::System { ref text }
-                        if text.contains("上一会话梗概")
-                )
-            }),
-            "新会话应注入旧会话梗概"
+            "新用户消息应挂到摘要之后"
         );
         let interrupts = bus.take_all();
         assert!(
@@ -1294,13 +1289,13 @@ mod tests {
             Arc::new(StubSummarizer),
             bus.clone(),
         );
-        // 首条建会话；随后主模型主动切换 5 次（达到 1 小时上限）。
+        // 首条建会话；随后分叉 5 次（达到 1 小时上限）。
         let first = scheduler.on_new_message("帮我看看这道题").await.unwrap();
         let mut last_key = first.session_key;
         for _ in 0..5 {
             last_key = scheduler.switch("新目标").await.unwrap();
         }
-        // 第 6 次超限：拒绝并返回错误（调用方/模型可感知），不归档任何会话。
+        // 第 6 次超限：拒绝并返回错误（调用方/模型可感知），不产生新分支。
         assert!(scheduler.switch("再切一次").await.is_err());
         let metas = store.list_sessions().await.unwrap();
         let active = metas
@@ -1308,67 +1303,41 @@ mod tests {
             .find(|m| m.status == SessionStatus::Active)
             .unwrap();
         assert_eq!(active.key, last_key);
-        assert_eq!(metas.len(), 6, "1 个初始会话 + 5 次切换");
+        assert_eq!(metas.len(), 1, "分叉不新建会话");
     }
 
     #[tokio::test]
-    async fn switch_carries_recent_history_into_new_session() {
+    async fn switch_forks_branch_with_summary() {
         let (scheduler, _, store, _) = setup();
         scheduler.on_new_message("帮我看看这道题").await.unwrap();
         scheduler.on_new_message("继续讲第二题").await.unwrap();
-        let new_key = scheduler.switch("批改英语作业").await.unwrap();
-        let msgs = store.read_path(&new_key).await.unwrap();
-        assert!(
-            matches!(
-                msgs[0].kind,
-                crate::kernel::message::MessageKind::System { .. }
-            ),
-            "新会话应以梗概开头"
-        );
+        let key = scheduler.switch("批改英语作业").await.unwrap();
+        let metas = store.list_sessions().await.unwrap();
+        assert_eq!(metas.len(), 1, "切换不新建会话");
+        let msgs = store.read_path(&key).await.unwrap();
         assert!(
             matches!(
                 msgs.last().unwrap().kind,
-                crate::kernel::message::MessageKind::User { .. }
+                crate::kernel::message::MessageKind::System { ref text, .. }
+                    if text.contains("上一会话梗概")
             ),
-            "新会话以梗概开头"
+            "切换后活跃路径末尾应为会话摘要节点"
         );
-        let user_count = msgs
-            .iter()
-            .filter(|m| matches!(m.kind, crate::kernel::message::MessageKind::User { .. }))
-            .count();
-        assert!(
-            user_count >= 2,
-            "新会话应携带旧消息副本（2 条）：实际 {user_count}"
-        );
-        // parent 链连续：从末尾回溯能一路走到根（副本首条 parent=None）。
-        let by_id: std::collections::HashMap<_, _> = msgs.iter().map(|m| (m.id, m)).collect();
-        let mut cur = msgs.last().unwrap().parent_id;
-        let mut steps = 0;
-        while let Some(id) = cur {
-            let m = by_id.get(&id).expect("parent 必须存在");
-            cur = m.parent_id;
-            steps += 1;
-        }
-        assert!(steps >= 2, "parent 链应连续：{steps}");
     }
 
     #[test]
-    fn carry_history_filters_switch_calls_and_relinks_chain() {
+    fn scope_session_context_cuts_at_summary() {
         let u1 = Message::user("u1");
+        let a1 = Message::assistant("a1");
+        let mut s = Message::system_with_display("上一会话梗概：摘要", None);
+        s.parent_id = Some(a1.id);
         let u2 = Message::user("u2");
-        let mut switch = Message::tool_call(
-            "session::switch",
-            json!({"goal": "英语"}),
-            Ok(json!({"switched": true})),
-        );
-        switch.parent_id = Some(u2.id);
-        let mut answer = Message::assistant("ok");
-        answer.parent_id = Some(switch.id);
-
-        let copied = carry_history(&[u1, u2, switch, answer], 10);
-        assert_eq!(copied.len(), 3, "切换控制消息不应随历史携带");
-        assert!(copied.iter().all(|m| !m.is_switch_tool_call()));
-        // answer 副本应直接挂到 u2 副本之后（链重新连接）。
-        assert_eq!(copied.last().unwrap().parent_id, Some(copied[1].id));
+        let scoped = scope_session_context(&[u1.clone(), a1.clone(), s.clone(), u2.clone()]);
+        assert_eq!(scoped.len(), 2, "从摘要节点起算");
+        assert_eq!(scoped[0].id, s.id);
+        assert_eq!(scoped[1].id, u2.id);
+        // 无摘要节点（根会话）时原样返回。
+        let full = scope_session_context(&[u1.clone(), a1.clone()]);
+        assert_eq!(full.len(), 2);
     }
 }
