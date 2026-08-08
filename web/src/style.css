@@ -150,12 +150,12 @@ textarea {
 /* ---- Sidebar: icon-only drawer (Gemini-style) ---- */
 
 .sidebar {
-  width: 64px;
-  flex: 0 0 64px;
+  width: 72px;
+  flex: 0 0 72px;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 16px 10px;
+  padding: 16px 8px;
   background: var(--color-surface);
   border-right: 1px solid var(--color-border);
   transition:
@@ -322,7 +322,7 @@ textarea {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 40px;
+  min-height: 42px;
   padding: 8px 10px;
   border: 0;
   border-radius: var(--radius-md);
@@ -336,6 +336,14 @@ textarea {
   transition:
     background 0.15s ease,
     color 0.15s ease;
+}
+
+/* 折叠态（无 hover 无 expanded）：居中图标 */
+.sidebar:not(:hover):not(.expanded) .nav-item {
+  justify-content: center;
+  gap: 0;
+  padding-left: 0;
+  padding-right: 0;
 }
 
 .nav-item:hover {
@@ -475,7 +483,7 @@ textarea {
 
 .view-host {
   flex: 1;
-  overflow: hidden;
+  overflow-y: auto;
 }
 
 .view-enter-active,
@@ -793,7 +801,6 @@ textarea {
 
 .page {
   height: 100%;
-  overflow-y: auto;
   padding: var(--space-xl);
 }
 
@@ -2569,8 +2576,8 @@ textarea {
 /* Tablet: 768-1024px — sidebar stays icon-only, cards adjust */
 @media (max-width: 1024px) {
   .sidebar {
-    width: 56px;
-    flex: 0 0 56px;
+    width: 72px;
+    flex: 0 0 72px;
     padding: 12px 8px;
   }
 

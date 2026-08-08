@@ -270,7 +270,9 @@ function finalize() {
   currentStreamId.value = null;
 }
 
-/** 用缓存的会话视图重建合并气泡流（聊天页：各会话只渲染活跃链，副本按 id 去重）。 */
+/** 用缓存的会话视图重建合并气泡流（聊天页：各会话只渲染活跃链，副本按 id 去重）。
+ *  与本地已渲染气泡做合并（按 messageId 或用户消息文本去重），避免
+ *  turn_end 后全量替换时因后端数据缺失导致刚发出的消息消失。 */
 function renderMergedBubbles() {
   const seen = new Set();
   const all = [];
@@ -282,11 +284,51 @@ function renderMergedBubbles() {
       all.push(b);
     }
   }
-  all.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-  if (all.length) {
-    bubbles.value = all;
-    scrollBottom();
+  all.sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0));
+  if (!all.length) return;
+
+  // 合并策略：后端已有的按 ID/文本匹配更新；本地独有的保留不丢
+  const backendIds = new Set(all.map((b) => String(b.messageId)));
+  const backendUserTexts = new Set(
+    all.filter((b) => b.type === "user").map((b) => b.text),
+  );
+
+  // 第一遍：将本地已有气泡更新为后端版本（匹配 messageId 或同文本用户消息）
+  const consumedTexts = new Set();
+  for (let i = 0; i < bubbles.value.length; i++) {
+    const lb = bubbles.value[i];
+    const lbId = lb.messageId ? String(lb.messageId) : null;
+    if (lbId && backendIds.has(lbId)) {
+      // 直接替换为后端气泡（含完整 messageId / versions 等元数据）
+      const backend = all.find((b) => String(b.messageId) === lbId);
+      if (backend) bubbles.value[i] = backend;
+      continue;
+    }
+    // 用户消息无 messageId（刚由 addBubble 添加）：按文本匹配后端版本
+    if (!lbId && lb.type === "user" && backendUserTexts.has(lb.text) && !consumedTexts.has(lb.text)) {
+      const backend = all.find(
+        (b) => b.type === "user" && b.text === lb.text,
+      );
+      if (backend) {
+        bubbles.value[i] = backend;
+        consumedTexts.add(lb.text);
+      }
+    }
   }
+
+  // 第二遍：追加后端独有的气泡（本次回合新增的 assistant / tool / reasoning 等）
+  const existingIds = new Set(bubbles.value.map((b) => (b.messageId ? String(b.messageId) : null)).filter(Boolean));
+  for (const b of all) {
+    if (!existingIds.has(String(b.messageId))) {
+      bubbles.value.push(b);
+    }
+  }
+
+  // 按时间排序（本地气泡无 createdAt 的排在前面保持插入顺序）
+  bubbles.value.sort(
+    (a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0),
+  );
+  scrollBottom();
 }
 
 /** 全量历史：每个会话建消息树视图（DeepSeek 式逐节点版本指针），只渲染活跃链。 */
@@ -754,7 +796,7 @@ onUnmounted(() => unsubscribe?.());
           <button class="action-btn attach-btn" aria-label="选择图片/PDF" title="选择图片/PDF" @click="pickHomework()">
             <Icon icon="mdi:paperclip" width="18" />
           </button>
-          <button class="action-btn send-btn" :disabled="!canSend" @click="sendMessage">
+          <button v-if="!busy" class="action-btn send-btn" :disabled="!canSend" @click="sendMessage">
             <Icon icon="mdi:arrow-up" width="20" />
           </button>
           <button v-if="busy" class="action-btn stop-btn" @click="abortTurn">
