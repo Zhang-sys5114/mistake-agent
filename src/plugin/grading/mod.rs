@@ -60,7 +60,7 @@ impl UserPlugin for GradingPlugin {
             commands: vec![
                 CommandDef {
                     name: "get".into(),
-                    user_visible: true,
+                    user_visible: false,
                     title: Some("查看错题详情".into()),
                     group: Some("错题本".into()),
                     description: "按 id 获取单条错题详情，供详情页和追问使用。".into(),
@@ -69,7 +69,7 @@ impl UserPlugin for GradingPlugin {
                 },
                 CommandDef {
                     name: "update".into(),
-                    user_visible: true,
+                    user_visible: false,
                     title: Some("编辑错题".into()),
                     group: Some("错题本".into()),
                     description: "编辑错题字段；置顶传 pinned，标记已掌握传 is_correct=true。".into(),
@@ -78,7 +78,7 @@ impl UserPlugin for GradingPlugin {
                 },
                 CommandDef {
                     name: "remove".into(),
-                    user_visible: true,
+                    user_visible: false,
                     title: Some("删除错题".into()),
                     group: Some("错题本".into()),
                     description: "软删除单条错题，列表不再展示，数据仍保留。".into(),
@@ -87,7 +87,7 @@ impl UserPlugin for GradingPlugin {
                 },
                 CommandDef {
                     name: "remove_many".into(),
-                    user_visible: true,
+                    user_visible: false,
                     title: Some("批量删除错题".into()),
                     group: Some("错题本".into()),
                     description: "按 id 列表批量软删除，支持全选后整页删除。".into(),

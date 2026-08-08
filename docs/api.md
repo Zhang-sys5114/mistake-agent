@@ -119,6 +119,8 @@ pub trait UserPlugin {
 | `exam::compose` | tool | user_and_model | `{subjects?, count?, minutes?}` 按薄弱知识点组卷 |
 | `tracking::checkin` | tool | user_and_model | `{subject?}` 掌握度统计 + 7/14/30 天重测计划 |
 
+> `grading::get/update/remove/remove_many` 是 UserOnly 命令且 `user_visible=false`，不进入聊天功能中心；由错题本页菜单经 `trigger_command` 调用。
+
 > 会话历史经 RPC `list_sessions` / `read_session` 提供（GUI 会话历史页），不注册为模型工具；模型侧历史路由按需经 memory 或系统提示引导。
 
 > `trigger_command` 找不到同名 Command 时，会回退放行同名 Tool（用户对 UserAndModel/UserOnly 工具均可调），因此 GUI 可直接触发 `grading::list` 等工具。
