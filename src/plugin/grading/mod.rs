@@ -8,14 +8,16 @@ use serde_json::{Value, json};
 
 use crate::kernel::agent::dispatch::ToolCallContext;
 use crate::kernel::context::PluginContext;
-use crate::kernel::contract::{CallerPolicy, Info, PluginError, ToolDef, ToolError};
+use crate::kernel::contract::{CallerPolicy, CommandDef, Info, PluginError, ToolDef, ToolError};
 use crate::kernel::plugin::services::MistakeFilter;
 use crate::kernel::registry::{PluginDescriptor, UserPlugin};
 mod core;
 mod params;
 
-use core::upload_handler;
-use params::{ListParams, UploadParams};
+use core::{
+    get_handler, remove_handler, remove_many_handler, update_handler, upload_handler,
+};
+use params::{GetParams, ListParams, RemoveManyParams, RemoveParams, UpdateParams, UploadParams};
 
 pub struct GradingPlugin;
 
@@ -55,6 +57,44 @@ impl UserPlugin for GradingPlugin {
                     icon: Some("mdi:format-list-bulleted".into()),
                 },
             ],
+            commands: vec![
+                CommandDef {
+                    name: "get".into(),
+                    user_visible: true,
+                    title: Some("查看错题详情".into()),
+                    group: Some("错题本".into()),
+                    description: "按 id 获取单条错题详情，供详情页和追问使用。".into(),
+                    params: schemars::schema_for!(GetParams),
+                    icon: Some("mdi:card-text-outline".into()),
+                },
+                CommandDef {
+                    name: "update".into(),
+                    user_visible: true,
+                    title: Some("编辑错题".into()),
+                    group: Some("错题本".into()),
+                    description: "编辑错题字段；置顶传 pinned，标记已掌握传 is_correct=true。".into(),
+                    params: schemars::schema_for!(UpdateParams),
+                    icon: Some("mdi:pencil-outline".into()),
+                },
+                CommandDef {
+                    name: "remove".into(),
+                    user_visible: true,
+                    title: Some("删除错题".into()),
+                    group: Some("错题本".into()),
+                    description: "软删除单条错题，列表不再展示，数据仍保留。".into(),
+                    params: schemars::schema_for!(RemoveParams),
+                    icon: Some("mdi:delete-outline".into()),
+                },
+                CommandDef {
+                    name: "remove_many".into(),
+                    user_visible: true,
+                    title: Some("批量删除错题".into()),
+                    group: Some("错题本".into()),
+                    description: "按 id 列表批量软删除，支持全选后整页删除。".into(),
+                    params: schemars::schema_for!(RemoveManyParams),
+                    icon: Some("mdi:delete-sweep-outline".into()),
+                },
+            ],
             ..Default::default()
         }
     }
@@ -81,10 +121,11 @@ impl UserPlugin for GradingPlugin {
             }),
         )?;
 
+        let storage_list = storage.clone();
         ctx.registrar.tool(
             "list",
             std::sync::Arc::new(move |_call_ctx: &ToolCallContext, params: Value| {
-                let storage = storage.clone();
+                let storage = storage_list.clone();
                 Box::pin(async move {
                     let filter: ListParams = serde_json::from_value(params)
                         .map_err(|e| ToolError::invalid_params(e.to_string()))?;
@@ -103,7 +144,45 @@ impl UserPlugin for GradingPlugin {
                     }))
                 })
             }),
-        )
+        )?;
+
+        let storage_get = storage.clone();
+        ctx.registrar.command(
+            "get",
+            std::sync::Arc::new(move |_call_ctx: &ToolCallContext, params: Value| {
+                let storage = storage_get.clone();
+                Box::pin(async move { get_handler(storage, params).await })
+            }),
+        )?;
+
+        let storage_update = storage.clone();
+        ctx.registrar.command(
+            "update",
+            std::sync::Arc::new(move |_call_ctx: &ToolCallContext, params: Value| {
+                let storage = storage_update.clone();
+                Box::pin(async move { update_handler(storage, params).await })
+            }),
+        )?;
+
+        let storage_remove = storage.clone();
+        ctx.registrar.command(
+            "remove",
+            std::sync::Arc::new(move |_call_ctx: &ToolCallContext, params: Value| {
+                let storage = storage_remove.clone();
+                Box::pin(async move { remove_handler(storage, params).await })
+            }),
+        )?;
+
+        let storage_remove_many = storage.clone();
+        ctx.registrar.command(
+            "remove_many",
+            std::sync::Arc::new(move |_call_ctx: &ToolCallContext, params: Value| {
+                let storage = storage_remove_many.clone();
+                Box::pin(async move { remove_many_handler(storage, params).await })
+            }),
+        )?;
+
+        Ok(())
     }
 }
 
@@ -140,7 +219,7 @@ mod tests {
                 .lock()
                 .expect("poisoned")
                 .iter()
-                .find(|m| &m.id == id)
+                .find(|m| &m.id == id && m.deleted_at.is_none())
                 .cloned())
         }
         async fn list(&self, f: &MistakeFilter) -> Result<Vec<Mistake>, StorageError> {
@@ -155,15 +234,56 @@ mod tests {
                             .as_ref()
                             .is_none_or(|k| &m.knowledge_point == k)
                         && f.is_correct.is_none_or(|c| m.is_correct == c)
+                        && m.deleted_at.is_none()
                 })
                 .cloned()
                 .collect())
         }
-        async fn update(&self, _id: &MistakeId, _p: &MistakePatch) -> Result<(), StorageError> {
-            Err(StorageError::Internal("fake".into()))
+        async fn update(&self, id: &MistakeId, p: &MistakePatch) -> Result<(), StorageError> {
+            let mut items = self.items.lock().expect("poisoned");
+            let m = items
+                .iter_mut()
+                .find(|m| m.id == *id)
+                .ok_or_else(|| StorageError::MistakeNotFound(id.to_string()))?;
+            if m.deleted_at.is_some() {
+                return Err(StorageError::MistakeNotFound(id.to_string()));
+            }
+            if let Some(s) = &p.subject {
+                m.subject = s.clone();
+            }
+            if let Some(k) = &p.knowledge_point {
+                m.knowledge_point = k.clone();
+            }
+            if let Some(q) = &p.question {
+                m.question = q.clone();
+            }
+            if let Some(s) = &p.student_answer {
+                m.student_answer = s.clone();
+            }
+            if let Some(r) = &p.reference_answer {
+                m.reference_answer = r.clone();
+            }
+            if let Some(a) = &p.analysis {
+                m.analysis = a.clone();
+            }
+            if let Some(c) = p.is_correct {
+                m.is_correct = c;
+            }
+            if let Some(pinned) = p.pinned {
+                m.pinned = pinned;
+            }
+            Ok(())
         }
-        async fn remove(&self, _id: &MistakeId) -> Result<(), StorageError> {
-            Err(StorageError::Internal("fake".into()))
+        async fn remove(&self, id: &MistakeId) -> Result<(), StorageError> {
+            let mut items = self.items.lock().expect("poisoned");
+            let m = items
+                .iter_mut()
+                .find(|m| m.id == *id)
+                .ok_or_else(|| StorageError::MistakeNotFound(id.to_string()))?;
+            if m.deleted_at.is_none() {
+                m.deleted_at = Some(chrono::Utc::now());
+            }
+            Ok(())
         }
     }
 
@@ -229,6 +349,8 @@ mod tests {
             is_correct: false,
             analysis: "负数的绝对值".into(),
             created_at: chrono::Utc::now(),
+            pinned: false,
+            deleted_at: None,
         };
         handle.save(&m).await.unwrap();
         m.id = MistakeId(uuid::Uuid::new_v4());
@@ -271,11 +393,109 @@ mod tests {
                 is_correct: item.correct,
                 analysis: item.analysis.clone().unwrap_or_default(),
                 created_at: chrono::Utc::now(),
+                pinned: false,
+                deleted_at: None,
             })
             .await
             .unwrap();
         let got = handle.get(&saved).await.unwrap().unwrap();
         assert_eq!(got.subject, "数学");
         assert_eq!(got.reference_answer.as_deref(), Some("2"));
+    }
+
+    #[tokio::test]
+    async fn get_handler_returns_single_mistake() {
+        let store = Arc::new(FakeStore::default());
+        let handle = StorageHandle::new(store.clone());
+        let m = Mistake {
+            id: MistakeId(uuid::Uuid::new_v4()),
+            subject: "数学".into(),
+            knowledge_point: "绝对值".into(),
+            question: "|-3| = ?".into(),
+            student_answer: "-3".into(),
+            reference_answer: Some("3".into()),
+            is_correct: false,
+            analysis: "符号错误".into(),
+            created_at: chrono::Utc::now(),
+            pinned: false,
+            deleted_at: None,
+        };
+        let id = handle.save(&m).await.unwrap();
+
+        let out = get_handler(handle, json!({ "id": id.to_string() }))
+            .await
+            .unwrap();
+        assert_eq!(out["mistake"]["id"], id.to_string());
+    }
+
+    #[tokio::test]
+    async fn update_handler_pins_and_marks_mastered() {
+        let store = Arc::new(FakeStore::default());
+        let handle = StorageHandle::new(store.clone());
+        let m = Mistake {
+            id: MistakeId(uuid::Uuid::new_v4()),
+            subject: "数学".into(),
+            knowledge_point: "绝对值".into(),
+            question: "|-3| = ?".into(),
+            student_answer: "-3".into(),
+            reference_answer: Some("3".into()),
+            is_correct: false,
+            analysis: "符号错误".into(),
+            created_at: chrono::Utc::now(),
+            pinned: false,
+            deleted_at: None,
+        };
+        let id = handle.save(&m).await.unwrap();
+
+        let out = update_handler(
+            handle.clone(),
+            json!({ "id": id.to_string(), "pinned": true, "is_correct": true }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["mistake"]["pinned"], true);
+        assert_eq!(out["mistake"]["is_correct"], true);
+
+        let stored = store
+            .items
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|m| m.id == id)
+            .cloned()
+            .unwrap();
+        assert!(stored.pinned);
+        assert!(stored.is_correct);
+    }
+
+    #[tokio::test]
+    async fn remove_many_handler_soft_deletes_selected() {
+        let store = Arc::new(FakeStore::default());
+        let handle = StorageHandle::new(store.clone());
+        let mut m = Mistake {
+            id: MistakeId(uuid::Uuid::new_v4()),
+            subject: "数学".into(),
+            knowledge_point: "绝对值".into(),
+            question: "|-3| = ?".into(),
+            student_answer: "-3".into(),
+            reference_answer: Some("3".into()),
+            is_correct: false,
+            analysis: "符号错误".into(),
+            created_at: chrono::Utc::now(),
+            pinned: false,
+            deleted_at: None,
+        };
+        let id1 = handle.save(&m).await.unwrap();
+        m.id = MistakeId(uuid::Uuid::new_v4());
+        let id2 = handle.save(&m).await.unwrap();
+
+        let out = remove_many_handler(
+            handle.clone(),
+            json!({ "ids": [id1.to_string(), id2.to_string()] }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["deleted"], 2);
+        assert!(handle.list(&MistakeFilter::default()).await.unwrap().is_empty());
     }
 }

@@ -174,3 +174,6 @@ _Avoid_: 任务（Task，易与工具任务混淆）
 **Chemistry rendering（化学渲染）**:
 前端 Markdown 中化学内容的渲染方式：KaTeX + 官方 mhchem 扩展（`\ce{}` / `\pu{}`）支持化学式、方程式、同位素与单位；结构式（键线式）由模型以 SMILES 代码块（```smiles）输出，前端 smiles-drawer 绘制 SVG；不支持 chemfig/TikZ 类结构式宏包（KaTeX 无 TikZ 引擎，需完整 LaTeX 才可编译）。
 _Avoid_: 直接把 chemfig 当 KaTeX 宏包引入（会静默渲染失败）、让模型输出结构式图片或 Unicode 伪图形
+
+**Mistake management state（错题管理状态）**:
+错题本记录的轻量管理字段：`is_correct` 表示已掌握（复用原有字段），`pinned` 表示置顶，`deleted_at` 非空表示软删除；`grading::list` 默认隐藏已删除记录，`grading::remove` / `grading::remove_many` 只写 `deleted_at`，不物理删除。_Avoid_: 硬删除错题、为已掌握另建 `mastered` 字段

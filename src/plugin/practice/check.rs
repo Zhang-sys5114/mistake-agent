@@ -106,6 +106,8 @@ pub async fn check_handler(
             is_correct: false,
             analysis: result.analysis.clone(),
             created_at: chrono::Utc::now(),
+            pinned: false,
+            deleted_at: None,
         };
         match storage.save(&mistake).await {
             Ok(_) => true,

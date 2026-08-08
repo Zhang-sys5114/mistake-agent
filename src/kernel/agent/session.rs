@@ -809,20 +809,22 @@ impl SessionScheduler {
         // 摘要节点挂成当前叶子的子节点：新会话在模型回复之后线性延续，
         // 旧回复保留在链上（不产生「回复=1、新会话=2」的版本分裂）。
         let summary_parent = leaf.map(|m| m.id);
-        let mut summary_msg = Message::system_with_display(
-            format!("上一会话梗概：{summary}"),
-            None,
-        );
+        let mut summary_msg =
+            Message::system_with_display(format!("上一会话梗概：{summary}"), None);
         summary_msg.parent_id = summary_parent;
         summary_msg.created_at = now;
         self.store.append_message(&meta.key, &summary_msg).await?;
-        self.store.set_active_path(&meta.key, Some(summary_msg.id)).await?;
+        self.store
+            .set_active_path(&meta.key, Some(summary_msg.id))
+            .await?;
         if let Some(text) = text {
             let mut user_msg = Message::user_with_display(text, display_text.map(str::to_string));
             user_msg.parent_id = Some(summary_msg.id);
             user_msg.created_at = now;
             self.store.append_message(&meta.key, &user_msg).await?;
-            self.store.set_active_path(&meta.key, Some(user_msg.id)).await?;
+            self.store
+                .set_active_path(&meta.key, Some(user_msg.id))
+                .await?;
         }
         self.store.set_goal(&meta.key, &goal).await?;
         self.record_switch(now);

@@ -443,8 +443,7 @@ impl Kernel {
                         });
                     }
                     // 活跃路径推进到回合末条（消息树分支语义）。
-                    let next_active =
-                        compaction.as_ref().map(|c| c.tail_end).or(persisted_last);
+                    let next_active = compaction.as_ref().map(|c| c.tail_end).or(persisted_last);
                     if let Some(next) = next_active
                         && let Err(e) = store.set_active_path(&persist_key, Some(next)).await
                     {

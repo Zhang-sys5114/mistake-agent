@@ -8,13 +8,95 @@ use crate::kernel::contract::ToolError;
 use crate::kernel::events::Event;
 use crate::kernel::message::Message;
 use crate::kernel::plugin::services::{
-    AbortSignal, Mistake, MistakeId, ModelHandle, ModelKind, ModelRequest, ResponseFormat,
-    StorageHandle,
+    AbortSignal, Mistake, MistakeId, MistakePatch, ModelHandle, ModelKind, ModelRequest,
+    ResponseFormat, StorageHandle,
 };
 use crate::kernel::prompt::grading_system_prompt;
 use crate::plugin::vision::{map_model_error, read_content};
 
-use super::params::{GradedItem, UploadParams};
+use super::params::{GetParams, GradedItem, RemoveManyParams, RemoveParams, UpdateParams, UploadParams};
+
+fn parse_mistake_id(raw: &str) -> Result<MistakeId, ToolError> {
+    uuid::Uuid::parse_str(raw)
+        .map(MistakeId)
+        .map_err(|e| ToolError::invalid_params(format!("非法错题 id：{e}")))
+}
+
+pub(crate) async fn get_handler(
+    storage: StorageHandle,
+    params: Value,
+) -> Result<Value, ToolError> {
+    let p: GetParams =
+        serde_json::from_value(params).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let id = parse_mistake_id(&p.id)?;
+    let mistake = storage
+        .get(&id)
+        .await
+        .map_err(|e| ToolError::handler(e.to_string()))?
+        .ok_or_else(|| ToolError::handler(format!("错题不存在：{}", p.id)))?;
+    Ok(json!({ "mistake": mistake }))
+}
+
+pub(crate) async fn update_handler(
+    storage: StorageHandle,
+    params: Value,
+) -> Result<Value, ToolError> {
+    let p: UpdateParams =
+        serde_json::from_value(params).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let id = parse_mistake_id(&p.id)?;
+    let patch = MistakePatch {
+        subject: p.subject,
+        knowledge_point: p.knowledge_point,
+        question: p.question,
+        student_answer: p.student_answer,
+        reference_answer: p.reference_answer,
+        analysis: p.analysis,
+        is_correct: p.is_correct,
+        pinned: p.pinned,
+    };
+    storage
+        .update(&id, &patch)
+        .await
+        .map_err(|e| ToolError::handler(e.to_string()))?;
+    let mistake = storage
+        .get(&id)
+        .await
+        .map_err(|e| ToolError::handler(e.to_string()))?
+        .ok_or_else(|| ToolError::handler(format!("错题不存在：{}", p.id)))?;
+    Ok(json!({ "mistake": mistake }))
+}
+
+pub(crate) async fn remove_handler(
+    storage: StorageHandle,
+    params: Value,
+) -> Result<Value, ToolError> {
+    let p: RemoveParams =
+        serde_json::from_value(params).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let id = parse_mistake_id(&p.id)?;
+    storage
+        .remove(&id)
+        .await
+        .map_err(|e| ToolError::handler(e.to_string()))?;
+    Ok(json!({ "deleted": true, "id": id.to_string() }))
+}
+
+pub(crate) async fn remove_many_handler(
+    storage: StorageHandle,
+    params: Value,
+) -> Result<Value, ToolError> {
+    let p: RemoveManyParams =
+        serde_json::from_value(params).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let ids = p
+        .ids
+        .iter()
+        .map(|raw| parse_mistake_id(raw))
+        .collect::<Result<Vec<_>, _>>()?;
+    let deleted = storage
+        .remove_many(&ids)
+        .await
+        .map_err(|e| ToolError::handler(e.to_string()))?;
+    Ok(json!({ "deleted": deleted }))
+}
 
 pub(crate) async fn upload_handler(
     ctx: &ToolCallContext,
@@ -62,6 +144,8 @@ pub(crate) async fn upload_handler(
                 is_correct: false,
                 analysis: item.analysis.clone().unwrap_or_default(),
                 created_at: chrono::Utc::now(),
+                pinned: false,
+                deleted_at: None,
             };
             match storage.save(&mistake).await {
                 Ok(_) => archived += 1,

@@ -104,6 +104,10 @@ pub trait UserPlugin {
 | `vision::read` | tool | user_and_model | `{file: 路径}` 图片理解：作业/试卷转写文字，角色/照片等描述内容；不判分不归档；上传后模型先调它理解内容，再根据内容与用户意图决定下一步（判分走 grading::upload） |
 | `grading::upload` | tool | user_and_model | 场景一：`{file: 路径}` 图片(png/jpg/jpeg/webp/bmp)或文本型 PDF |
 | `grading::list` | tool | user_and_model | `{subject?, knowledge_point?}` 列出错题本 |
+| `grading::get` | command | user_only | `{id}` 获取单条错题详情，软删除后返回不存在 |
+| `grading::update` | command | user_only | `{id, subject?, knowledge_point?, question?, student_answer?, reference_answer?, analysis?, is_correct?, pinned?}` 单题编辑、置顶/取消置顶、标记已掌握 |
+| `grading::remove` | command | user_only | `{id}` 软删除单条错题 |
+| `grading::remove_many` | command | user_only | `{ids: [uuid]}` 按 id 列表批量/全选软删除 |
 | `memory::save` | tool | user_and_model | `{filename?, content?}` 保存记忆条目（可选参数；content 缺省时模型应总结当前会话要点填入） |
 | `memory::show` | tool | user_and_model | `{filename?}` 无参数列出全部条目名，带参数看详情（用法：memory::show <记忆片段>） |
 | `memory::remove` | tool | **user_only** | `{filename}` 强制参数，删除整棵子树；仅用户可调，不进模型工具列表 |
@@ -123,7 +127,7 @@ pub trait UserPlugin {
 
 | 服务 | 角色 trait | 注入视图 | 说明 |
 |---|---|---|---|
-| Storage | `SessionStore` + `MistakeStore` + `AuditSink` | `StorageHandle`（只有错题本 5 操作） | 会话/错题/审计；文件持久化（sessions/*.jsonl、mistakes.json、audit.jsonl，10MB 轮转） |
+| Storage | `SessionStore` + `MistakeStore` + `AuditSink` | `StorageHandle`（错题本 save/get/list/update/remove/remove_many 6 操作） | 会话/错题/审计；文件持久化（sessions/*.jsonl、mistakes.json、audit.jsonl，10MB 轮转） |
 | Memory | `MemoryService`（save/show/remove，remove 删子树） | `MemoryHandle` | 路径类型化校验；文件持久化到数据根目录 memory/（失败回退内存实现） |
 | Compute | `ComputeService::run` | `ComputeHandle` | BridgeCompute：经 `compute_request` 事件把代码发给 GUI，等待 `compute_result` 回执；超时/取消由 kernel 侧负责 |
 | Model | `ModelService::stream/complete` | `ModelHandle`（仅 complete + 超时/abort/审计） | 路由主/视觉模型；设置变更时经共享持有器热替换，已注册插件的句柄同步生效 |
@@ -184,7 +188,7 @@ pub trait UserPlugin {
 
 ```bash
 cd web && npm install && npm run build    # 前端构建（改过 web/ 后必须执行）
-cargo test                                # 单元测试（71 项）
+cargo test                                # 单元测试（97 项）
 cargo test --test live_api -- --ignored   # 真实 API 验收：hello + samples/ 三套样例
 cargo run --bin mistake-agent             # Tauri GUI（Wayland/X11 均可）
 ```

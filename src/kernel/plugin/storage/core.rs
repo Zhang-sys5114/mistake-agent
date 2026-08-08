@@ -160,6 +160,12 @@ impl MistakeStore for AnyStorage {
             AnyStorage::Mem(s) => s.remove(id).await,
         }
     }
+    async fn remove_many(&self, ids: &[MistakeId]) -> Result<usize, StorageError> {
+        match self {
+            AnyStorage::File(s) => s.remove_many(ids).await,
+            AnyStorage::Mem(s) => s.remove_many(ids).await,
+        }
+    }
 }
 
 impl AuditSink for AnyStorage {
@@ -227,6 +233,8 @@ mod tests {
             is_correct: false,
             analysis: "符号错误".into(),
             created_at: chrono::Utc::now(),
+            pinned: false,
+            deleted_at: None,
         };
         let id = store.save(&m).await.unwrap();
         let got = store.get(&id).await.unwrap().unwrap();
@@ -241,6 +249,51 @@ mod tests {
         assert_eq!(list.len(), 1);
         store.remove(&id).await.unwrap();
         assert!(store.get(&id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn mistake_soft_delete_pin_and_batch_remove() {
+        let store = MemoryStorage::new();
+        let m1 = Mistake {
+            id: MistakeId(uuid::Uuid::new_v4()),
+            subject: "数学".into(),
+            knowledge_point: "绝对值".into(),
+            question: "|-3| = ?".into(),
+            student_answer: "-3".into(),
+            reference_answer: Some("3".into()),
+            is_correct: false,
+            analysis: "符号错误".into(),
+            created_at: chrono::Utc::now(),
+            pinned: false,
+            deleted_at: None,
+        };
+        let id1 = store.save(&m1).await.unwrap();
+        let mut m2 = m1.clone();
+        m2.id = MistakeId(uuid::Uuid::new_v4());
+        let id2 = store.save(&m2).await.unwrap();
+
+        store
+            .update(
+                &id1,
+                &MistakePatch {
+                    is_correct: Some(true),
+                    pinned: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let got = store.get(&id1).await.unwrap().unwrap();
+        assert!(got.is_correct);
+        assert!(got.pinned);
+
+        store.remove(&id2).await.unwrap();
+        assert!(store.get(&id2).await.unwrap().is_none());
+        assert_eq!(store.list(&MistakeFilter::default()).await.unwrap().len(), 1);
+
+        let deleted = store.remove_many(&[id1, id2]).await.unwrap();
+        assert_eq!(deleted, 1);
+        assert!(store.list(&MistakeFilter::default()).await.unwrap().is_empty());
     }
 
     #[tokio::test]
