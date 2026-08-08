@@ -71,22 +71,6 @@ function attachmentIcon(att) {
             {{ bubble.toolOk === true ? "完成" : bubble.toolOk === false ? "失败" : "进行中" }}
           </span>
         </div>
-        <details
-          v-if="bubble.params || bubble.result"
-          class="tool-card-detail"
-        >
-          <summary>查看详情{{ bubble.entry ? `（${bubble.entry}）` : "" }}</summary>
-          <pre class="tool-card-body">{{
-            JSON.stringify(
-              {
-                params: bubble.params,
-                result: bubble.result,
-              },
-              null,
-              2,
-            )
-          }}</pre>
-        </details>
       </div>
       <template v-else>
         <template v-if="editing">

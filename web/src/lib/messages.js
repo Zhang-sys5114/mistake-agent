@@ -5,8 +5,9 @@ import { toolIcon, toolTitle } from "./tools";
 // 附件名截到（ 或 ( 为止：历史消息里 kernel 曾在名字后接「（…）」注记，
 // 不截断会把注记吞进附件名。
 const ATTACH_RE = /\n附件：(\S+)\|([^|\n（(]+)/g;
-// 系统临时暂存路径（mistake-agent- 前缀）：展示时一律隐藏，不把路径暴露给学生。
+// 系统临时暂存路径（Unix + Windows）：展示时一律隐藏，不把路径暴露给学生。
 const TMP_PATH_RE = /\/tmp\/mistake-agent-[^\s|（(]+/g;
+const WIN_PATH_RE = /\b[A-Z]:\\[^\s|（(]*?mistake-agent[^\s|（(]*/gi;
 // 老消息（无 display_text）：从「请调用工具 X 处理：Y」还原为「标题：Y」。
 const FORCED_RE = /^请调用工具 (\S+) 处理[:：]?\s*(.*)$/s;
 
@@ -145,12 +146,13 @@ export function renderPath(view, opts = {}) {
         let shown = (kind.display_text || raw)
           .replace(ATTACH_RE, "")
           .replace(TMP_PATH_RE, "")
+          .replace(WIN_PATH_RE, "")
           .trim();
         if (!kind.display_text) {
           const forced = shown.match(FORCED_RE);
           if (forced) {
             const title = toolTitle(forced[1]);
-            const rest = forced[2].replace(TMP_PATH_RE, "").trim();
+            const rest = forced[2].replace(TMP_PATH_RE, "").replace(WIN_PATH_RE, "").trim();
             shown = rest ? `${title}：${rest}` : title;
           }
         }

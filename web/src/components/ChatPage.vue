@@ -754,7 +754,7 @@ onUnmounted(() => unsubscribe?.());
           <button class="action-btn attach-btn" aria-label="选择图片/PDF" title="选择图片/PDF" @click="pickHomework()">
             <Icon icon="mdi:paperclip" width="18" />
           </button>
-          <button class="action-btn send-btn" :disabled="!canSend" @click="sendMessage">
+          <button v-if="!busy" class="action-btn send-btn" :disabled="!canSend" @click="sendMessage">
             <Icon icon="mdi:arrow-up" width="20" />
           </button>
           <button v-if="busy" class="action-btn stop-btn" @click="abortTurn">

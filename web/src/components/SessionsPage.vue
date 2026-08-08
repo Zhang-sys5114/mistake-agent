@@ -43,7 +43,11 @@ async function loadSessions() {
   detail.value = null;
   try {
     const r = await props.kernel.call("list_sessions", {}, 10000);
-    sessions.value = r.sessions || [];
+    sessions.value = (r.sessions || []).sort((a, b) => {
+      const ta = new Date(a.last_activity_at || a.created_at || 0);
+      const tb = new Date(b.last_activity_at || b.created_at || 0);
+      return tb - ta;
+    });
   } catch (e) {
     error.value =
       e.code === "not_implemented"
