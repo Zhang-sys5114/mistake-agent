@@ -17,6 +17,34 @@ pub struct ListParams {
     pub knowledge_point: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct GetParams {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct UpdateParams {
+    pub id: String,
+    pub subject: Option<String>,
+    pub knowledge_point: Option<String>,
+    pub question: Option<String>,
+    pub student_answer: Option<String>,
+    pub reference_answer: Option<Option<String>>,
+    pub analysis: Option<String>,
+    pub is_correct: Option<bool>,
+    pub pinned: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct RemoveParams {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct RemoveManyParams {
+    pub ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct GradedItem {
     pub(crate) number: Option<String>,

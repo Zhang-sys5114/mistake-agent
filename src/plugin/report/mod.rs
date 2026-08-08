@@ -157,6 +157,8 @@ mod tests {
             is_correct: correct,
             analysis: "x".into(),
             created_at: chrono::Utc::now() - chrono::Duration::days(days_ago),
+            pinned: false,
+            deleted_at: None,
         }
     }
 

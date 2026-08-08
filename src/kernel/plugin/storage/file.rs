@@ -402,7 +402,7 @@ impl MistakeStore for FileStorage {
             .expect("storage poisoned")
             .mistakes
             .iter()
-            .find(|m| m.id == *id)
+            .find(|m| m.id == *id && m.deleted_at.is_none())
             .cloned())
     }
 
@@ -423,6 +423,7 @@ impl MistakeStore for FileStorage {
                         .map(|k| m.knowledge_point == k)
                         .unwrap_or(true)
                     && filter.is_correct.map(|c| m.is_correct == c).unwrap_or(true)
+                    && m.deleted_at.is_none()
             })
             .cloned()
             .collect())
@@ -436,14 +437,32 @@ impl MistakeStore for FileStorage {
                 .iter_mut()
                 .find(|m| m.id == *id)
                 .ok_or(StorageError::MistakeNotFound(id.to_string()))?;
+            if m.deleted_at.is_some() {
+                return Err(StorageError::MistakeNotFound(id.to_string()));
+            }
+            if let Some(s) = &patch.subject {
+                m.subject = s.clone();
+            }
             if let Some(k) = &patch.knowledge_point {
                 m.knowledge_point = k.clone();
+            }
+            if let Some(q) = &patch.question {
+                m.question = q.clone();
+            }
+            if let Some(s) = &patch.student_answer {
+                m.student_answer = s.clone();
+            }
+            if let Some(r) = &patch.reference_answer {
+                m.reference_answer = r.clone();
             }
             if let Some(a) = &patch.analysis {
                 m.analysis = a.clone();
             }
             if let Some(c) = patch.is_correct {
                 m.is_correct = c;
+            }
+            if let Some(p) = patch.pinned {
+                m.pinned = p;
             }
         }
         self.persist_mistakes()
@@ -452,13 +471,35 @@ impl MistakeStore for FileStorage {
     async fn remove(&self, id: &MistakeId) -> Result<(), StorageError> {
         {
             let mut inner = self.inner.lock().expect("storage poisoned");
-            let before = inner.mistakes.len();
-            inner.mistakes.retain(|m| m.id != *id);
-            if inner.mistakes.len() == before {
-                return Err(StorageError::MistakeNotFound(id.to_string()));
+            let m = inner
+                .mistakes
+                .iter_mut()
+                .find(|m| m.id == *id)
+                .ok_or(StorageError::MistakeNotFound(id.to_string()))?;
+            if m.deleted_at.is_none() {
+                m.deleted_at = Some(chrono::Utc::now());
             }
         }
         self.persist_mistakes()
+    }
+
+    async fn remove_many(&self, ids: &[MistakeId]) -> Result<usize, StorageError> {
+        let deleted = {
+            let mut inner = self.inner.lock().expect("storage poisoned");
+            let now = chrono::Utc::now();
+            let mut deleted = 0usize;
+            for id in ids {
+                if let Some(m) = inner.mistakes.iter_mut().find(|m| m.id == *id)
+                    && m.deleted_at.is_none()
+                {
+                    m.deleted_at = Some(now);
+                    deleted += 1;
+                }
+            }
+            deleted
+        };
+        self.persist_mistakes()?;
+        Ok(deleted)
     }
 }
 

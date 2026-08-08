@@ -436,6 +436,10 @@ pub struct Mistake {
     pub is_correct: bool,
     pub analysis: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -447,9 +451,14 @@ pub struct MistakeFilter {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MistakePatch {
+    pub subject: Option<String>,
     pub knowledge_point: Option<String>,
+    pub question: Option<String>,
+    pub student_answer: Option<String>,
+    pub reference_answer: Option<Option<String>>,
     pub analysis: Option<String>,
     pub is_correct: Option<bool>,
+    pub pinned: Option<bool>,
 }
 
 /// 错题本：用户插件唯一可见的 storage 面。
@@ -460,6 +469,17 @@ pub trait MistakeStore: Send + Sync {
     async fn list(&self, filter: &MistakeFilter) -> Result<Vec<Mistake>, StorageError>;
     async fn update(&self, id: &MistakeId, patch: &MistakePatch) -> Result<(), StorageError>;
     async fn remove(&self, id: &MistakeId) -> Result<(), StorageError>;
+    async fn remove_many(&self, ids: &[MistakeId]) -> Result<usize, StorageError> {
+        let mut deleted = 0usize;
+        for id in ids {
+            match self.remove(id).await {
+                Ok(()) => deleted += 1,
+                Err(StorageError::MistakeNotFound(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(deleted)
+    }
 }
 
 /// Storage 服务组合接口：kernel 持有全量，插件拿 StorageHandle 视图。
@@ -489,6 +509,9 @@ impl StorageHandle {
     }
     pub async fn remove(&self, id: &MistakeId) -> Result<(), StorageError> {
         self.inner.remove(id).await
+    }
+    pub async fn remove_many(&self, ids: &[MistakeId]) -> Result<usize, StorageError> {
+        self.inner.remove_many(ids).await
     }
 }
 

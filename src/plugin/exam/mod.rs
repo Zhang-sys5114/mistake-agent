@@ -174,6 +174,8 @@ mod tests {
             is_correct: correct,
             analysis: "x".into(),
             created_at: chrono::Utc::now(),
+            pinned: false,
+            deleted_at: None,
         }
     }
 
