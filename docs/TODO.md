@@ -27,6 +27,7 @@
 - [ ] 每学科 `mistakes/graph/<学科>.json`（sanitize + 路径校验）；先验边（模板依赖表人工标注）+ 共现边（判分批次增量）事件驱动更新；跨学科边存发起学科文件。
 - [ ] `tracking::graph_query` 工具（UserAndModel）：知识点 → 掌握度/邻居/关联错题/近期事件（Agentic RAG 落地，不做向量）。
 - [ ] 主动重测回合（ADR-0041）：30 分钟 tokio 定时器扫 due → InterruptBus 排队 / 空闲发起 proactive 回合；每知识点每天提醒 ≤1 次；拒绝则 24h 冷却。
+- [ ] 反复丢分考点聚合视图：跨快照/跨事件统计「连续两期以上均丢分」的知识点清单（数据源：事件流时间线 + schedule），供 report/tracking 输出与图谱高亮。
 - [ ] 知识图谱力导向图：ECharts graph 渲染（数据源 graph.json）。
 
 ### 加分项
@@ -34,7 +35,7 @@
 - [ ] **知识图谱力导向图**：方案已定（ECharts graph + graph.json，实现见场景 5 对应项）。
 - [ ] **错题本导出 Anki 卡组**：前端导出 tab 分隔文本（问题\t答案\t知识点标签\t错因），Anki「文件→导入」直接成卡组；PDF 复用复习清单打印。
 - [ ] **语音提问**：MediaRecorder 录音 → SiliconFlow `audio/transcriptions`（SenseVoice）→ 文本回填输入框（用户确认后发送）；**拍照讲解**：getUserMedia 进附件管线（vision::read）。
-- [ ] **手写 OCR 评测**：🔬 待测——vision::read 功能已覆盖，鲁棒性后续用现有 3 套样例轻量验证，暂不建评测集。
+- [ ] **手写 OCR 评测**：🔬 待测——vision::read 功能已覆盖；答辩兜底：用现有 3 套样例（含 1 真实手写）端到端跑通结果整理进 docs/testing.md 作鲁棒性证据，暂不建评测集。
 - [ ] **家长端报表订阅**：⏸ 挂起——候选形态为设置页 PIN 家长模式 + 学情总览视图（复用 ReportChart），未排期。
 
 ### 交付物缺口（任务书必交）
@@ -42,11 +43,22 @@
 - [ ] **演示视频**：5 个场景各 1-2 分钟，未产出。
 - [ ] **Prompt 人工评测报告**：docs/prompts.md 有 prompt 记录但无正式人工评测报告（任务书要求"人工评测若干题"）。
 - [ ] **答辩要点：LangChain/LangGraph 取舍说明**：任务书"强烈建议"LangGraph，本项目为自研 Rust kernel（PROJECT.md §2 有理由），需在技术文档/答辩中明确对比说明。
+- [ ] **项目复盘报告**：任务书通用规则 D14 必交 1-2 页（做对了什么/踩了什么坑/学到什么），未产出。
+- [ ] **Agent 流程图**：任务书交付物要求"源代码仓库（含 Agent 流程图、Prompt 库）"——Prompt 库已有（docs/prompts.md），缺 agent 工作流图（工具调度/会话切换/重测循环的流程图，答辩文档用）。
 
 
 ## Agent core 剥离为 so-lite-agent（计划，未落地）
 
 把通用 Agent 运行时（loop/工具注册/会话/模型 Provider 抽象/通用 RPC）剥离为独立 crate `so-lite-agent`，开箱即用（`cargo add` 即可开发新 Agent），内核/用户插件由使用方编写。完整计划见 [docs/plan/so-lite-agent.md](plan/so-lite-agent.md)，决策见 [ADR-0037](adr/0037-so-lite-agent-crate-extraction.md)。当前只做计划，不落地。
+
+## 近期：英语练习模式（规划，未落地）
+
+沉浸式英语环境：开启后整个对话环境切全英文，含模型输出。
+
+- settings.json 加 `english_mode: bool`（用户独占写，默认 false；设置页开关）。
+- 启动/热更新时生效：`agent_system_prompt()`（[src/kernel/prompt.rs](../src/kernel/prompt.rs)）在 english_mode 下替换为英文版系统提示（或追加强指令"All replies must be in English"），全链路模型输出（含判分/出题/复盘）随主系统提示走英文。
+- 范围决策：判定模型指令（判分、摘要等）是否也切英文——倾向跟随（同一沉浸语境）；GUI 界面文字暂不切（只切模型对话侧，UI 留中文更安全）。
+- 提示词让模型在 english_mode 下判分/讲解也用英文（练习 + 答题一体）。
 
 ## 近期：桌面输入方式增强（规划，未落地）
 
