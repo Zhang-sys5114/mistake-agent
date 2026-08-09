@@ -6,11 +6,22 @@ Mistake Agent v2：面向中学生的本地错题管理 + 辅助学习 Agent（W
 
 **动任何代码之前，先读一遍 [PROJECT.md](PROJECT.md)**——它是唯一入门文档，包含架构、信任模型、机制、命名规范、里程碑和分工。
 
+## Agent 启动流程（每次开始工作前执行）
+
+按固定顺序读文档，**读完必须先问协作开发者本次要做什么，确认范围后再动手**：
+
+1. **PROJECT.md** —— 项目全貌：架构、信任模型、机制、命名规范、里程碑、分工
+2. **CONTEXT.md** —— 术语表；PROJECT.md 里不懂的词在这里查
+3. **docs/TODO.md** —— 当前待办与已定方案（很多任务的方案已在 TODO 里定好，先看再问）
+4. **docs/adr/** —— 决策留痕；重点读与任务相关的条目（改设计必须新增 ADR，见开发约定）
+
+读完后：向协作开发者确认本次任务（**做什么 / 范围 / 验收标准**），确认后才开始动手；任务相关细节再按下方「读文档路由」精确定位。
+
 ## 读文档路由：做什么 → 读什么
 
 | 你要做什么 | 先去读 | 重点内容 |
 |---|---|---|
-| 刚加入项目 | PROJECT.md 全文 + CONTEXT.md | 全貌、术语；不懂的词去 CONTEXT.md 查 |
+| 刚加入项目 / 开始新任务 | 按「Agent 启动流程」读 PROJECT.md → CONTEXT.md → docs/TODO.md → docs/adr/ | 全貌、术语、待办、决策；不懂的词去 CONTEXT.md 查 |
 | 改设计 / 做架构决策 | docs/adr/ 全部 + CONTEXT.md | 决策留痕；新决策要新增 ADR 并更新术语 |
 | 看后续计划 / so-lite-agent 剥离 | docs/plan/so-lite-agent.md + docs/adr/0037 | 计划未落地，单 crate 红线仍有效 |
 | 改内核机制（loop/调度/注册表） | PROJECT.md §4-§5 + docs/adr/0003~0010 | 两段式契约、CallerPolicy、护栏、容灾 |
