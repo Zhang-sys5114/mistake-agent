@@ -1,8 +1,9 @@
 //! practice 插件：分层变式练习（场景二入口：薄弱点定位 + 分层变式练习）。
 //!
-//! 插件信息：namespace = practice，requires = [Storage, Model]
+//! 插件信息：namespace = practice，requires = [Storage, Model, Memory]
 //! tools = [generate（变式练习）, gaps（薄弱点定位）, check（练习答案批改）]
-//! 实现拆分（Linux 内核风格）：`templates.rs` 模板库（题目/答案/图纸同源）；`gaps.rs` 薄弱点聚合；`check.rs` 答案批改
+//! 实现拆分（Linux 内核风格）：`templates.rs` 模板库（题目/答案/图纸同源）；`gaps.rs` 薄弱点聚合；
+//! `check.rs` 答案批改；`history.rs` 练习历史与防重复；`exam_pool.rs` 高考真题池；`generate.rs` LLM 自由出题
 
 use serde_json::{Value, json};
 
@@ -16,11 +17,14 @@ mod check;
 mod exam_pool;
 mod generate;
 mod gaps;
+mod history;
 mod templates;
 
 use check::{CheckParams, check_handler};
+use exam_pool::draw_from_pool;
 use generate::model_generate;
 use gaps::{GapsParams, gaps_handler};
+use history::recent_mastered;
 use templates::GenerateParams;
 pub use templates::{Difficulty, PracticeItem, SUPPORTED_POINTS, build_item};
 
@@ -30,7 +34,7 @@ impl UserPlugin for PracticePlugin {
     fn info() -> Info {
         Info {
             namespace: "practice".into(),
-            requires: vec![ServiceId::Storage, ServiceId::Model],
+            requires: vec![ServiceId::Storage, ServiceId::Model, ServiceId::Memory],
             tools: vec![ToolDef {
                 name: "generate".into(),
                 user_visible: true,
@@ -80,13 +84,20 @@ impl UserPlugin for PracticePlugin {
             .model()
             .cloned()
             .ok_or_else(|| PluginError::Internal("缺少 Model 句柄".into()))?;
+        let memory = ctx
+            .handles
+            .memory()
+            .cloned()
+            .ok_or_else(|| PluginError::Internal("缺少 Memory 句柄".into()))?;
 
         let model_for_generate = model.clone();
+        let memory_for_generate = memory.clone();
         ctx.registrar.tool(
             "generate",
             std::sync::Arc::new(move |_call_ctx: &ToolCallContext, params: Value| {
                 let model = model_for_generate.clone();
-                Box::pin(async move { generate_handler(model, params).await })
+                let memory = memory_for_generate.clone();
+                Box::pin(async move { generate_handler(model, memory, params).await })
             }),
         )?;
 
@@ -101,12 +112,14 @@ impl UserPlugin for PracticePlugin {
 
         let storage_for_check = storage.clone();
         let model_for_check = model.clone();
+        let memory_for_check = memory.clone();
         ctx.registrar.tool(
             "check",
             std::sync::Arc::new(move |_call_ctx: &ToolCallContext, params: Value| {
                 let model = model_for_check.clone();
                 let storage = storage_for_check.clone();
-                Box::pin(async move { check_handler(model, storage, params).await })
+                let memory = memory_for_check.clone();
+                Box::pin(async move { check_handler(model, storage, memory, params).await })
             }),
         )?;
 
@@ -118,7 +131,11 @@ pub fn descriptor() -> PluginDescriptor {
     PluginDescriptor::from_plugin::<PracticePlugin>()
 }
 
-async fn generate_handler(model: ModelHandle, params: Value) -> Result<Value, ToolError> {
+async fn generate_handler(
+    model: ModelHandle,
+    memory: MemoryHandle,
+    params: Value,
+) -> Result<Value, ToolError> {
     let p: GenerateParams =
         serde_json::from_value(params).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     let knowledge_point = p.knowledge_point.trim();
@@ -126,21 +143,37 @@ async fn generate_handler(model: ModelHandle, params: Value) -> Result<Value, To
         return Err(ToolError::invalid_params("knowledge_point 不能为空"));
     }
     let difficulty = p.difficulty.unwrap_or_default();
+    // 防重复：近期已掌握题目标识（近 30 天答对的），模板/真题池/LLM 生成均避开。
+    let mastered = recent_mastered(&memory).await;
     // 真题层：只走池内抽取（真实来源），不走模板与 LLM 生成。
     if difficulty == Difficulty::Exam {
-        return match build_item(knowledge_point, difficulty) {
+        return match draw_from_pool(knowledge_point, &mastered) {
             Some(item) => Ok(json!({ "matched": true, "source": "exam_pool", "item": item })),
             None => Ok(json!({
                 "matched": false,
-                "message": "真题池暂未收录该知识点的题目；可改用基础/同类变式/综合拔高难度，或换用支持的知识点。",
+                "message": "真题池暂未收录该知识点的未做题目；可改用基础/同类变式/综合拔高难度，或换用支持的知识点。",
             })),
         };
     }
     match build_item(knowledge_point, difficulty) {
-        Some(item) => Ok(json!({ "matched": true, "item": item })),
+        Some(item) => {
+            if mastered.contains(&item.template_id) {
+                // 模板命中但近期已掌握 → LLM 兜底生成同知识点新题（注入已掌握清单避开）。
+                match model_generate(&model, knowledge_point, difficulty, &mastered).await {
+                    Ok(item) => Ok(json!({ "matched": true, "source": "llm", "item": item })),
+                    Err(e) => Ok(json!({
+                        "matched": false,
+                        "supported": SUPPORTED_POINTS,
+                        "message": format!("该知识点近期已练习且掌握，模型出新题失败：{}", e.message),
+                    })),
+                }
+            } else {
+                Ok(json!({ "matched": true, "item": item }))
+            }
+        }
         // P1 智能出题：模板未命中时走 LLM 生成（结构化 schema，见 generate.rs）；
         // 生成失败回退为未命中提示，工具始终可用。
-        None => match model_generate(&model, knowledge_point, difficulty).await {
+        None => match model_generate(&model, knowledge_point, difficulty, &mastered).await {
             Ok(item) => Ok(json!({ "matched": true, "source": "llm", "item": item })),
             Err(e) => Ok(json!({
                 "matched": false,
@@ -157,8 +190,10 @@ mod tests {
     use crate::kernel::audit::{Auditor, MemoryAuditSink};
     use crate::kernel::plugin::services::{
         AbortSignal, ModelError, ModelHandle, ModelRequest, ModelResponse, ModelService,
-        ModelStream,
+        ModelStream, MemoryHandle,
     };
+    use crate::plugin::practice::history::tests::FakeMemory;
+    use crate::plugin::practice::history::record_attempt;
     use crate::plugin::practice::templates::*;
     use std::sync::{Arc, Mutex};
 
@@ -189,12 +224,15 @@ mod tests {
         }
     }
 
-    fn fake_handle(reply: &str) -> ModelHandle {
+    fn fake_handle(reply: &str) -> (ModelHandle, MemoryHandle) {
         let model: Arc<dyn ModelService> = Arc::new(FakeModel {
             reply: Mutex::new(reply.into()),
         });
         let auditor = Auditor::new(Arc::new(MemoryAuditSink::default()));
-        ModelHandle::new(model, std::time::Duration::from_secs(5), auditor)
+        (
+            ModelHandle::new(model, std::time::Duration::from_secs(5), auditor),
+            MemoryHandle::new(Arc::new(FakeMemory::default())),
+        )
     }
 
     #[test]
@@ -214,8 +252,10 @@ mod tests {
 
     #[tokio::test]
     async fn generate_returns_matched_item() {
+        let (model, memory) = fake_handle(r#"{"question_text":"不应走到模型生成","answer_spec":""}"#);
         let out = generate_handler(
-            fake_handle(r#"{"question_text":"不应走到模型生成","answer_spec":""}"#),
+            model,
+            memory,
             json!({
                 "knowledge_point": "三角形全等判定",
                 "difficulty": "basic",
@@ -232,10 +272,12 @@ mod tests {
 
     #[tokio::test]
     async fn generate_llm_fallback_returns_item() {
+        let (model, memory) = fake_handle(
+            r#"{"knowledge_point":"一元二次方程","question_text":"解方程 $x^2-3x+2=0$。","answer_spec":"$x=1$ 或 $x=2$","diagram_spec":null}"#,
+        );
         let out = generate_handler(
-            fake_handle(
-                r#"{"knowledge_point":"一元二次方程","question_text":"解方程 $x^2-3x+2=0$。","answer_spec":"$x=1$ 或 $x=2$","diagram_spec":null}"#,
-            ),
+            model,
+            memory,
             json!({
                 "knowledge_point": "一元二次方程",
                 "difficulty": "variant",
@@ -252,8 +294,10 @@ mod tests {
 
     #[tokio::test]
     async fn generate_llm_unparseable_falls_back_to_miss() {
+        let (model, memory) = fake_handle("抱歉，我无法出题。");
         let out = generate_handler(
-            fake_handle("抱歉，我无法出题。"),
+            model,
+            memory,
             json!({
                 "knowledge_point": "量子力学",
                 "difficulty": "variant",
@@ -268,8 +312,10 @@ mod tests {
 
     #[tokio::test]
     async fn generate_exam_pool_draws_item() {
+        let (model, memory) = fake_handle("不应走到模型生成");
         let out = generate_handler(
-            fake_handle("不应走到模型生成"),
+            model,
+            memory,
             json!({
                 "knowledge_point": "集合运算",
                 "difficulty": "exam",
@@ -286,8 +332,10 @@ mod tests {
 
     #[tokio::test]
     async fn generate_exam_pool_miss_returns_message() {
+        let (model, memory) = fake_handle("不应走到模型生成");
         let out = generate_handler(
-            fake_handle("不应走到模型生成"),
+            model,
+            memory,
             json!({
                 "knowledge_point": "量子力学",
                 "difficulty": "exam",
@@ -297,6 +345,36 @@ mod tests {
         .unwrap();
         assert_eq!(out["matched"], false);
         assert!(out["message"].as_str().unwrap().contains("真题池"));
+    }
+
+    #[tokio::test]
+    async fn generate_skips_mastered_template_via_llm() {
+        // 预置：triangle_sss 近期已答对（已掌握）。
+        let (model, memory) = fake_handle(
+            r#"{"knowledge_point":"三角形全等判定","question_text":"如图，在 △ABC 与 △DEF 中，AB=DE，∠A=∠D，AC=DF，请判断全等并说明依据。","answer_spec":"全等（SAS）","diagram_spec":null}"#,
+        );
+        record_attempt(
+            &memory,
+            "triangle_sss",
+            "三角形全等判定",
+            Difficulty::Basic,
+            true,
+        )
+        .await;
+        let out = generate_handler(
+            model,
+            memory,
+            json!({
+                "knowledge_point": "三角形全等判定",
+                "difficulty": "basic",
+            }),
+        )
+        .await
+        .unwrap();
+        // 模板命中但已掌握 → 改走 LLM 出新题。
+        assert_eq!(out["matched"], true);
+        assert_eq!(out["source"], "llm");
+        assert_eq!(out["item"]["template_id"], "llm_freeform");
     }
 
     #[test]
