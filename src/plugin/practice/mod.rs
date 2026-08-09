@@ -238,9 +238,8 @@ mod tests {
     use super::*;
     use crate::kernel::audit::{Auditor, MemoryAuditSink};
     use crate::kernel::plugin::services::{
-        AbortSignal, ComputeError, ComputeHandle, ComputeRequest, ComputeResult, ComputeService,
-        ModelError, ModelHandle, ModelRequest, ModelResponse, ModelService, ModelStream,
-        MemoryHandle,
+        AbortSignal, ComputeError, ComputeHandle, ModelError, ModelHandle, ModelRequest,
+        ModelResponse, ModelService, ModelStream, MemoryHandle,
     };
     use crate::plugin::practice::geometry_check::tests::FakeCompute;
     use crate::plugin::practice::history::tests::FakeMemory;
