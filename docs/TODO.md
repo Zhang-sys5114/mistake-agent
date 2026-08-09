@@ -69,11 +69,11 @@
 
 ## AGENTS.md 加载进系统提示（未完成）
 
-现状：AGENTS.md（教学规则，家长/老师可编辑）已完成初始化写入（见上一条），但内核系统提示仍是静态文本（[src/kernel/prompt.rs](../src/kernel/prompt.rs) gent_system_prompt()），文件内容对模型行为暂无影响。
+现状：AGENTS.md（教学规则，家长/老师可编辑）已完成初始化写入（见上一条），但内核系统提示仍是静态文本（[src/kernel/prompt.rs](../src/kernel/prompt.rs) agent_system_prompt()），文件内容对模型行为暂无影响。
 
 目标：
-- gent_system_prompt() 改为加载数据根目录 AGENTS.md 全文进系统提示（PROJECT.md §6 指令加载 / ADR-0011 / ADR-0012）
-- 缺失、损坏或超限时回退当前静态文本；路径校验仅限数据根目录内（参照 ootstrap::init_data_root）
+- agent_system_prompt() 改为加载数据根目录 AGENTS.md 全文进系统提示（PROJECT.md §6 指令加载 / ADR-0011 / ADR-0012）
+- 缺失、损坏或超限时回退当前静态文本；路径校验仅限数据根目录内（参照 bootstrap::init_data_root）
 - 建议与设置页「教学规则」编辑入口（或「打开规则文件」按钮）配套落地，前端展示规则已加载状态
 - 优先级：中（MVP 不阻塞，静态提示词已覆盖核心教学流程）
 
