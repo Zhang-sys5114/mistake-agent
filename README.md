@@ -5,7 +5,7 @@
 ## 功能
 
 - **上传图片/PDF**：可一次选多张、混合图片与 PDF，附件挂在输入框上方（不进入聊天气泡），发送后模型逐个理解（`vision::read`：作业转写、角色/照片等描述内容），再根据图片内容与你的话决定——要批改就逐题判分、错题自动归档（LaTeX 公式增强渲染），只想讲解/描述就讲解。
-- **五个学习场景**：批改、变式练习（`practice::generate`，几何题带图形规格）、周复盘（`report::weekly`）、组卷（`exam::compose`）、掌握度追踪（`tracking::checkin`，7/14/30 天重测计划）。
+- **五个学习场景**：批改、变式练习（`practice::generate` 模板/LLM 智能出题，几何题带图形规格并经可解性对拍；`practice::gaps` 薄弱点定位；`practice::check` 即时批改，答错回写错题本；高考真题池）、周复盘（`report::weekly`）、组卷（`exam::compose`）、掌握度追踪（`tracking::checkin`，7/14/30 天重测计划）。
 - **显式工具调用**：输入功能名（如"生成练习题"）按 Tab 确认，或点输入框上方的工具按钮；模型被强制调用该工具并基于结果在聊天中讲解——不绕过 LLM。
 - **连续对话历史**：聊天记录是从第一次使用到现在的完整消息树（会话切换无感知、旧消息自动携带），支持编辑/重新生成与分支切换。
 - **跨会话记忆**：`memory::save/show/remove` 文件持久化，重启不丢。
@@ -146,9 +146,10 @@ cd web && node scripts/katex-check.mjs      # LaTeX 渲染链路自检
 - [CONTEXT.md](CONTEXT.md) — 术语表
 - [docs/api.md](docs/api.md) — GUI ↔ kernel RPC 协议与真实模型对接
 - [docs/build.md](docs/build.md) — 构建流程与 Pyodide 离线包步骤
-- [docs/adr/](docs/adr/) — 架构决策记录（37 条）
+- [docs/adr/](docs/adr/) — 架构决策记录（38 条）
 - [docs/plan/so-lite-agent.md](docs/plan/so-lite-agent.md) — Agent core 剥离后续计划（ADR-0037，未落地）
-- [docs/prompts.md](docs/prompts.md) / [docs/testing.md](docs/testing.md) — Prompt 与测试记录
+- [docs/prompts.md](docs/prompts.md) / [docs/testing.md](docs/testing.md) / [docs/usage.md](docs/usage.md) — Prompt、测试与使用记录
+- [docs/variants.md](docs/variants.md) — 变式出题设计（场景二，已按设计落地）
 
 ## 许可证
 

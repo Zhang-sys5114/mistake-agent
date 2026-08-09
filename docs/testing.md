@@ -2,14 +2,14 @@
 
 ## 1. 测试策略
 
-- **单元测试**：`cargo test`（80 项），覆盖注册表校验、dispatch、session 调度（守卫/摘要/分支/压缩/中断）、storage（文件/内存）、memory（文件 CRUD/路径越界）、model（SSE/usage 解析）、settings（patch/public_view）、compute 桥接与 handler、12 个插件入口（schema/模板/聚合）。
+- **单元测试**：`cargo test`（121 项），覆盖注册表校验、dispatch、session 调度（守卫/摘要/分支/压缩/中断）、storage（文件/内存）、memory（文件 CRUD/路径越界）、model（SSE/usage 解析）、settings（patch/public_view）、compute 桥接与 handler、12 个插件入口（schema/模板/聚合）。
 - **真实 API 集成测试**：`cargo test --test live_api -- --ignored --nocapture`，直接接 DeepSeek/SiliconFlow（无 key 自动跳过）。
 - **样例端到端**：`samples/` 三套作业图片逐一走 上传→OCR→判分→归档 全链路。
 - **前端自检**：`cd web && npm run check:pyodide`（真实加载 Pyodide WASM 并执行 Python：算术、符号计算（sympy 解方程/求导/积分）、物理（单位换算/运动学）、numpy 数值、异常路径）；`node scripts/katex-check.mjs`（KaTeX 行内/块级/化学式/矩阵/非法公式容错）。
 
-## 2. 用例与结果（2026-08-04 实测）
+## 2. 用例与结果（2026-08-09 实测）
 
-### 单元测试：80 项全过
+### 单元测试：121 项全过
 
 | 模块 | 覆盖点 |
 |---|---|

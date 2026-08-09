@@ -60,7 +60,7 @@ let kernel = KernelBuilder::new()
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| M1 | 本仓库解耦准备（上表清单） | 行为不变，80 单测 + live_api 全绿 |
+| M1 | 本仓库解耦准备（上表清单） | 行为不变，121 单测 + live_api 全绿 |
 | M2 | 新仓库骨架：搬通用模块 + 默认服务 | `cargo add` 后十行代码跑通 hello 回合（mock 模型） |
 | M3 | Provider 层：内置适配器 + register_provider | DeepSeek 真实 API 回合通过 |
 | M4 | 通用 RPC + KernelBuilder 定型；插件手册/参考模板迁移到新仓库 | 使用方按手册写一个内核插件 + 一个用户插件并注册跑通 |

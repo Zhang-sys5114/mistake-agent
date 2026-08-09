@@ -18,6 +18,7 @@ Mistake Agent v2：面向中学生的本地错题管理 + 辅助学习 Agent（W
 | 改内核插件（services） | PROJECT.md §4-§5 + docs/adr/0001、0014、0015、0016 | 服务句柄、ModelHandle、配置独占、compute 桥接 |
 | 改记忆 | PROJECT.md §5 记忆 + docs/adr/0008 | memory::save/show/remove、路径校验、路由式浏览 |
 | 改用户插件（plugin/） | PROJECT.md §3、§12 + docs/adr/0002、0003 | 五场景、命名规范、入口点、注册校验 |
+| 改 practice 出题（变式/真题/几何校验） | docs/variants.md + PROJECT.md §3、§9 | 出题架构与落地状态、未落地项 |
 | 改 GUI / 协议 | PROJECT.md §5 通信 + docs/adr/0013 | trigger_command 唯一命令通道、事件流 |
 | 改模型 / 设置 | PROJECT.md §6 + docs/adr/0015、0019 | 双模型配置、用户独占写、明文 key 取舍 |
 | 改审计 / 日志 | PROJECT.md §5 审计日志 + docs/adr/0017、0018 | 全覆盖审计、分级日志、脱敏 |
