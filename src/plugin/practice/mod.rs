@@ -13,10 +13,12 @@ use crate::kernel::plugin::services::ServiceId;
 use crate::kernel::registry::{PluginDescriptor, UserPlugin};
 
 mod check;
+mod generate;
 mod gaps;
 mod templates;
 
 use check::{CheckParams, check_handler};
+use generate::model_generate;
 use gaps::{GapsParams, gaps_handler};
 use templates::GenerateParams;
 pub use templates::{Difficulty, PracticeItem, SUPPORTED_POINTS, build_item};
@@ -78,10 +80,12 @@ impl UserPlugin for PracticePlugin {
             .cloned()
             .ok_or_else(|| PluginError::Internal("缺少 Model 句柄".into()))?;
 
+        let model_for_generate = model.clone();
         ctx.registrar.tool(
             "generate",
-            std::sync::Arc::new(|_call_ctx: &ToolCallContext, params: Value| {
-                Box::pin(async move { generate_handler(params).await })
+            std::sync::Arc::new(move |_call_ctx: &ToolCallContext, params: Value| {
+                let model = model_for_generate.clone();
+                Box::pin(async move { generate_handler(model, params).await })
             }),
         )?;
 
@@ -113,27 +117,74 @@ pub fn descriptor() -> PluginDescriptor {
     PluginDescriptor::from_plugin::<PracticePlugin>()
 }
 
-async fn generate_handler(params: Value) -> Result<Value, ToolError> {
+async fn generate_handler(model: ModelHandle, params: Value) -> Result<Value, ToolError> {
     let p: GenerateParams =
         serde_json::from_value(params).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     let knowledge_point = p.knowledge_point.trim();
     if knowledge_point.is_empty() {
         return Err(ToolError::invalid_params("knowledge_point 不能为空"));
     }
-    match build_item(knowledge_point, p.difficulty.unwrap_or_default()) {
+    let difficulty = p.difficulty.unwrap_or_default();
+    match build_item(knowledge_point, difficulty) {
         Some(item) => Ok(json!({ "matched": true, "item": item })),
-        None => Ok(json!({
-            "matched": false,
-            "supported": SUPPORTED_POINTS,
-            "message": "当前内置模板仅支持：三角形全等判定、绝对值、一般现在时三单。请用支持的知识点重试。",
-        })),
+        // P1 智能出题：模板未命中时走 LLM 生成（结构化 schema，见 generate.rs）；
+        // 生成失败回退为未命中提示，工具始终可用。
+        None => match model_generate(&model, knowledge_point, difficulty).await {
+            Ok(item) => Ok(json!({ "matched": true, "source": "llm", "item": item })),
+            Err(e) => Ok(json!({
+                "matched": false,
+                "supported": SUPPORTED_POINTS,
+                "message": format!("模板未命中且模型生成失败：{}", e.message),
+            })),
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::audit::{Auditor, MemoryAuditSink};
+    use crate::kernel::plugin::services::{
+        AbortSignal, ModelError, ModelHandle, ModelRequest, ModelResponse, ModelService,
+        ModelStream,
+    };
     use crate::plugin::practice::templates::*;
+    use std::sync::{Arc, Mutex};
+
+    struct FakeModel {
+        reply: Mutex<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelService for FakeModel {
+        async fn stream(
+            &self,
+            _request: &ModelRequest,
+            _signal: &AbortSignal,
+        ) -> Result<ModelStream, ModelError> {
+            unreachable!("FakeModel 只服务于 complete")
+        }
+
+        async fn complete(
+            &self,
+            _request: &ModelRequest,
+            _signal: &AbortSignal,
+        ) -> Result<ModelResponse, ModelError> {
+            Ok(ModelResponse {
+                text: self.reply.lock().expect("poisoned").clone(),
+                tool_calls: Vec::new(),
+                usage: None,
+            })
+        }
+    }
+
+    fn fake_handle(reply: &str) -> ModelHandle {
+        let model: Arc<dyn ModelService> = Arc::new(FakeModel {
+            reply: Mutex::new(reply.into()),
+        });
+        let auditor = Auditor::new(Arc::new(MemoryAuditSink::default()));
+        ModelHandle::new(model, std::time::Duration::from_secs(5), auditor)
+    }
 
     #[test]
     fn schema_parses_all_difficulties() {
@@ -152,10 +203,13 @@ mod tests {
 
     #[tokio::test]
     async fn generate_returns_matched_item() {
-        let out = generate_handler(json!({
-            "knowledge_point": "三角形全等判定",
-            "difficulty": "basic",
-        }))
+        let out = generate_handler(
+            fake_handle(r#"{"question_text":"不应走到模型生成","answer_spec":""}"#),
+            json!({
+                "knowledge_point": "三角形全等判定",
+                "difficulty": "basic",
+            }),
+        )
         .await
         .unwrap();
         assert_eq!(out["matched"], true);
@@ -166,15 +220,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generate_returns_supported_list_on_miss() {
-        let out = generate_handler(json!({
-            "knowledge_point": "量子力学",
-            "difficulty": "variant",
-        }))
+    async fn generate_llm_fallback_returns_item() {
+        let out = generate_handler(
+            fake_handle(
+                r#"{"knowledge_point":"一元二次方程","question_text":"解方程 $x^2-3x+2=0$。","answer_spec":"$x=1$ 或 $x=2$","diagram_spec":null}"#,
+            ),
+            json!({
+                "knowledge_point": "一元二次方程",
+                "difficulty": "variant",
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["matched"], true);
+        assert_eq!(out["source"], "llm");
+        assert_eq!(out["item"]["template_id"], "llm_freeform");
+        assert_eq!(out["item"]["difficulty"], "variant");
+        assert_eq!(out["item"]["question_text"], "解方程 $x^2-3x+2=0$。");
+    }
+
+    #[tokio::test]
+    async fn generate_llm_unparseable_falls_back_to_miss() {
+        let out = generate_handler(
+            fake_handle("抱歉，我无法出题。"),
+            json!({
+                "knowledge_point": "量子力学",
+                "difficulty": "variant",
+            }),
+        )
         .await
         .unwrap();
         assert_eq!(out["matched"], false);
         assert_eq!(out["supported"].as_array().unwrap().len(), 3);
+        assert!(out["message"].as_str().unwrap().contains("模型生成失败"));
     }
 
     #[test]
