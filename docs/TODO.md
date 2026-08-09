@@ -31,7 +31,7 @@
 
 ### 加分项
 
-- [x] **知识图谱力导向图**：方案已定（ECharts graph + graph.json，见场景 5）。
+- [ ] **知识图谱力导向图**：方案已定（ECharts graph + graph.json，实现见场景 5 对应项）。
 - [ ] **错题本导出 Anki 卡组**：前端导出 tab 分隔文本（问题\t答案\t知识点标签\t错因），Anki「文件→导入」直接成卡组；PDF 复用复习清单打印。
 - [ ] **语音提问**：MediaRecorder 录音 → SiliconFlow `audio/transcriptions`（SenseVoice）→ 文本回填输入框（用户确认后发送）；**拍照讲解**：getUserMedia 进附件管线（vision::read）。
 - [ ] **手写 OCR 评测**：🔬 待测——vision::read 功能已覆盖，鲁棒性后续用现有 3 套样例轻量验证，暂不建评测集。
