@@ -44,13 +44,21 @@ pub async fn model_generate(
     model: &ModelHandle,
     knowledge_point: &str,
     difficulty: Difficulty,
+    mastered: &[String],
 ) -> Result<PracticeItem, ToolError> {
     let system = Message::system(practice_generate_system_prompt());
-    let user = Message::user(format!(
-        "知识点：{}\n难度：{}",
-        knowledge_point.trim(),
-        difficulty_label(difficulty)
-    ));
+    let mut lines = vec![
+        format!("知识点：{}", knowledge_point.trim()),
+        format!("难度：{}", difficulty_label(difficulty)),
+    ];
+    // 防重复：近期已掌握清单注入 prompt，要求模型避开相同/相似题。
+    if !mastered.is_empty() {
+        lines.push(format!(
+            "请避开以下近期已做且已掌握的题目（不要出相同或高度相似的题）：{}",
+            mastered.join("、")
+        ));
+    }
+    let user = Message::user(lines.join("\n"));
     let mut request = ModelRequest::chat(ModelKind::Main, vec![system, user]);
     request.response_format = Some(ResponseFormat::JsonSchema {
         name: "practice_generate".into(),
