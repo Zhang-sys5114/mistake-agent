@@ -83,10 +83,6 @@ mod tests {
 
     #[test]
     fn draw_skips_mastered_items() {
-        // 排除全部集合题后应抽不到（防重复：已掌握的题不再出）。
-        let excludes: Vec<String> = (1..=6)
-            .map(|i| format!("exam:gk2020gj1_p1"))
-            .collect();
         // 先用空排除拿到实际 item_id，再排除它。
         let first = draw_from_pool("集合", &[]).expect("题库应包含集合题");
         let exclude = vec![first.template_id.clone()];
