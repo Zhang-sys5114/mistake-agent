@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use crate::kernel::agent::dispatch::ToolCallContext;
 use crate::kernel::context::PluginContext;
 use crate::kernel::contract::{CallerPolicy, Info, PluginError, ToolDef, ToolError};
-use crate::kernel::plugin::services::ServiceId;
+use crate::kernel::plugin::services::{ModelHandle, ServiceId};
 use crate::kernel::registry::{PluginDescriptor, UserPlugin};
 
 mod check;
