@@ -1,38 +1,48 @@
 # TODO
 
-## 任务书（2026 项目实战·任务 3）覆盖缺口（2026-08-09 对照检查）
+## 任务书（2026 项目实战·任务 3）落地任务（2026-08-09 设计方案已定，决策见 ADR-0039/0040/0041）
 
-对照《2026 项目实战任务书》任务 3（智能学习错题 Agent）五场景与加分项逐条核对后，以下项未完全覆盖：
+### 基础架构改造（三个场景的地基，先做）
 
-### 场景 3：多周期学习复盘（缺口最大）
+- [ ] **错题本目录化 + 事件流**（ADR-0039）：`mistakes/<id>/mistake.json + events.jsonl + schedule.json`；`graded`/`mastery_changed` 事件纯追加（带 subject/knowledge_point 冗余 + duration_seconds 可选）；bootstrap 迁移旧 `mistakes.json`（逐题原子拆 + 幂等 + `.bak` + backfill 事件）。
+- [ ] **掌握度调度与裁决**（ADR-0040）：Anki 式 schedule.json（interval/ease/due_at，错 1 次重置 7 天 / 答对 ×2）；连错 2 次打回 is_correct；`grading::update` 升级 UserAndModel Tool 只限内容字段（前端 trigger_command 零改动）；删除/管理字段保持 UserOnly。
 
-- [ ] **复盘维度不全**：当前只有 `report::weekly`（近 N 天周复盘），任务书要求按 日 / 周 / 单元 / 月考 / 学期 多维度生成报告——缺 daily/unit/monthly/semester 四档（可做成通用 `report::overview` 带 period 参数，weekly 兼容保留）。
-- [ ] **统计指标缺**：现只统计总数/正确率/新增错题/最薄弱知识点；任务书还要求「答题时长、正确率变化、持续薄弱考点」——答题时长当前无任何采集点（上传→判分链路未记时），需先埋点再统计。
-- [ ] **复习清单导出**：任务书要求自动生成专属复习清单并导出 PDF 或 Markdown——前端无导出入口，后端无清单生成。
+### 场景 3：多周期学习复盘
+
+- [ ] `report::weekly` 加 `period` 参数（daily/weekly/monthly/semester；不传=旧行为）；semester 支持 `start_at/end_at` 可选参数（模型会话式问用户学期起止）。
+- [ ] 持续薄弱考点：近 N 天错 ≥3 次 且连续两期上榜（硬编码），`weakest_points[]` 加 `persistent` 标记。
+- [ ] 答题时长采集：exam 计时器自动记 + 上传批改学生自述（模型填 duration_seconds）；practice::check 不采集；提示词让模型告知用户"作答计时"。
+- [ ] 复习清单：report 输出 Markdown，前端「导出」= Blob 下载 .md + window.print() 打印 PDF。
+- [ ] ECharts 按需打包 + `ReportChart.vue`（后端出结构化 JSON，前端只渲染）。
 
 ### 场景 4：阶段性考核验证
 
-- [ ] **考核闭环不完整**：`exam::compose` 只输出题目 + 答案规格（限时分钟数参数），「限时作答 → 自动判分 → 掌握度判定」未接通——判分可复用 practice::check/grading 管线，需端到端串起来。
-- [ ] **达标情况可视化**：知识点「达标 / 待巩固」状态无前端展示（错题本页仅有搜索/排序/置顶/软删除）。
+- [ ] `exam::compose` 加 `paper_type`（quiz/unit/midterm/final/gaokao）映射难度配置，复用 practice 出题核心（模板三档 + 真题池 + LLM 兜底）。
+- [ ] 限时作答：前端计时器，到点提醒 + 自愿提交 + 真实用时记录（超时如实统计）。
+- [ ] 判分：模型逐题调 `practice::check`（不新建批量入口）。
+- [ ] 达标判定：卷内该知识点题数 ≥2 且得分率 ≥80% → 自动置 true + `mastery_changed(source=exam_pass)`；前端达标/待巩固可视化（ECharts 上色）。
 
 ### 场景 5：长效查漏补缺追踪
 
-- [ ] **知识掌握图谱未落地**：任务书要求「节点 = 知识点，边 = 关联关系」的动态知识图谱——当前 `tracking::checkin` 只是手动触发的掌握度快照 + 重测计划（7/14/30 天），非实时图谱；知识点间关联关系无数据模型。
-- [ ] **反复丢分考点**：checkin 快照可支撑但无长期跟踪聚合视图（如连续 N 次快照间反复丢分的考点列表）。
+- [ ] 每学科 `mistakes/graph/<学科>.json`（sanitize + 路径校验）；先验边（模板依赖表人工标注）+ 共现边（判分批次增量）事件驱动更新；跨学科边存发起学科文件。
+- [ ] `tracking::graph_query` 工具（UserAndModel）：知识点 → 掌握度/邻居/关联错题/近期事件（Agentic RAG 落地，不做向量）。
+- [ ] 主动重测回合（ADR-0041）：30 分钟 tokio 定时器扫 due → InterruptBus 排队 / 空闲发起 proactive 回合；每知识点每天提醒 ≤1 次；拒绝则 24h 冷却。
+- [ ] 知识图谱力导向图：ECharts graph 渲染（数据源 graph.json）。
 
 ### 加分项
 
-- [ ] **错题本导出 Anki 卡组 / PDF**：完全未落地。
-- [ ] **知识图谱交互式可视化（力导向图）**：未落地（依赖上面知识图谱数据模型）。
-- [ ] **语音提问 + 拍照讲解**：未落地（走现有 vision::read → 讲解管线即可，需 WebView 麦克风权限）。
-- [ ] **家长端报表订阅**：未落地（PROJECT.md §14 已列后续优化）。
-- [ ] **手写公式 / 图形 OCR 鲁棒识别**：依赖 Qwen3-VL 能力，无专项评测集验证（可建 10~20 张手写卷小评测集评估识别率，作为答辩素材）。
+- [x] **知识图谱力导向图**：方案已定（ECharts graph + graph.json，见场景 5）。
+- [ ] **错题本导出 Anki 卡组**：前端导出 tab 分隔文本（问题\t答案\t知识点标签\t错因），Anki「文件→导入」直接成卡组；PDF 复用复习清单打印。
+- [ ] **语音提问**：MediaRecorder 录音 → SiliconFlow `audio/transcriptions`（SenseVoice）→ 文本回填输入框（用户确认后发送）；**拍照讲解**：getUserMedia 进附件管线（vision::read）。
+- [ ] **手写 OCR 评测**：🔬 待测——vision::read 功能已覆盖，鲁棒性后续用现有 3 套样例轻量验证，暂不建评测集。
+- [ ] **家长端报表订阅**：⏸ 挂起——候选形态为设置页 PIN 家长模式 + 学情总览视图（复用 ReportChart），未排期。
 
 ### 交付物缺口（任务书必交）
 
 - [ ] **演示视频**：5 个场景各 1-2 分钟，未产出。
 - [ ] **Prompt 人工评测报告**：docs/prompts.md 有 prompt 记录但无正式人工评测报告（任务书要求"人工评测若干题"）。
 - [ ] **答辩要点：LangChain/LangGraph 取舍说明**：任务书"强烈建议"LangGraph，本项目为自研 Rust kernel（PROJECT.md §2 有理由），需在技术文档/答辩中明确对比说明。
+
 
 ## Agent core 剥离为 so-lite-agent（计划，未落地）
 

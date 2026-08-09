@@ -177,3 +177,22 @@ _Avoid_: 直接把 chemfig 当 KaTeX 宏包引入（会静默渲染失败）、�
 
 **Mistake management state（错题管理状态）**:
 错题本记录的轻量管理字段：`is_correct` 表示已掌握（复用原有字段），`pinned` 表示置顶，`deleted_at` 非空表示软删除；`grading::list` 默认隐藏已删除记录，`grading::remove` / `grading::remove_many` 只写 `deleted_at`，不物理删除。_Avoid_: 硬删除错题、为已掌握另建 `mastered` 字段
+
+**Mistake edit boundary（错题编辑边界）**:
+错题修改的权限语义：模型可经 `grading::update` 改**内容字段**（subject/knowledge_point/question/student_answer/reference_answer/analysis），不可改**管理字段**（is_correct/pinned/deleted_at）；删除（remove/remove_many）与已掌握标记仅用户可做（UserOnly）。模型是错题本主要写入者（判分归档、练习回写），编辑能力保证幻觉内容可自愈；管理字段只由用户维护，避免模型污染掌握度统计。_Avoid_: 模型可删题、模型标已掌握
+
+**Mistake event log（错题事件流）**:
+追加式 JSONL（错题条目内 `events.jsonl`），逐条记录每道错题的判分与掌握度变更，是「正确率变化 / 反复丢分 / 掌握度」等时间线统计的唯一业务真相；与审计（Audit，操作事实记录、10MB 轮转）不同，事件流不轮转、只追加，`mistake.json` 快照中的 `is_correct` 只是其最新状态。_Avoid_: 审计、日志、Attempt 数组内嵌错题记录（快照与时间线分离，事件不进 mistake.json）
+
+**Mistake entry（错题条目）**:
+错题本的一个存储单元：`mistakes/<id>/` 目录，内含 `mistake.json`（当前快照）、`events.jsonl`（该题事件流）、`schedule.json`（该题掌握度调度）——错题以目录为领域对象，与 `sessions/<key>.jsonl` 每会话一文件的哲学一致；旧单文件 `mistakes.json` 由 bootstrap 一次性迁移。_Avoid_: mistakes.json 单文件全量重写、把事件内嵌进错题记录
+
+**Mastery schedule（掌握度调度）**:
+每道错题的 Anki 式调度状态（`schedule.json`：interval/ease/due_at/last_result），由判分事件折叠更新——调度层「错 1 次即重置间隔回 7 天」（again 语义，节奏惩罚），状态层「连错 2 次才打回已掌握」（掌握裁决，避免偶然失误误伤）；exam 达标（题数≥2 且得分率≥80%）是可信证据可自动置已掌握。调度与裁决分离，事件流为证据、调度为折叠状态。_Avoid_: 固定 7/14/30 天硬编码、已掌握凭用户自报永不过期
+
+**Proactive turn（主动回合）**:
+kernel 侧定时器（约 30 分钟）检测到期重测后主动发起的回合——无用户新消息，模型输入为到期清单+提醒指令，产出带 `proactive` 标记的 assistant 消息入当前会话树；当前回合运行中则经 InterruptBus 在回合边界排队，不抢占。每知识点每天最多提醒 1 次（防骚扰）。_Avoid_: 推送通知（无服务器）、后台任务抢占当前回合
+
+**Knowledge graph（知识图谱）**:
+知识点及其关联的结构化表示：每学科一个 `mistakes/graph/<学科>.json`（文件名 sanitize），节点全局 ID = `学科::知识点`，边分先验层（模板依赖表，人工标注）、共现层（同一判分批次知识点对，事件驱动增量）、LLM 抽取层（后续）；跨学科边存于发起学科文件。图谱同时是可视化数据源（ECharts 力导向图）与 Agentic 检索索引（`tracking::graph_query`）。_Avoid_: 图数据库（违反本地单二进制红线）、向量检索（结构化精确过滤优先，语义检索列后续）
+

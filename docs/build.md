@@ -150,7 +150,7 @@ cargo tauri build --bundles dmg           # macOS
 | **Linux** | `target/release/mistake-agent` | `target/release/bundle/deb/*.deb`<br>`target/release/bundle/appimage/*.AppImage` |
 | **macOS** | `target/release/mistake-agent` | `target/release/bundle/macos/*.dmg` |
 
-可执行文件是**单二进制**（包含 web 资源 + Pyodide 运行时 + 离线 wheel），无 sidecar 依赖。
+可执行文件是**单二进制**（包含 web 资源 + Pyodide 运行时 + 离线 wheel），无 sidecar 依赖。Windows 打包已实测通过（2026-08-09）：NSIS `错题 Agent_0.1.0_x64-setup.exe` 安装、启动、运行全流程验证。
 
 ## 等效手动命令（排查 Makefile 失败时用）
 
