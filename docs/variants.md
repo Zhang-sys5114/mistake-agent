@@ -59,8 +59,16 @@
 
 后续扩展：角度弧自动小/大弧判定（已实现）、平行箭头标记、填充多边形（已支持 fill）、按模板参数化的标注密度、图与解析并排。
 
-## 5. 落地状态（2026-08-04）
+## 5. 落地状态（2026-08-09）
 
-`practice::generate` 已按本文档实现（practice 插件 + 3 个内置模板 + diagram_spec 输出，与前端 geometry.js 渲染器同源协议）：三角形全等（几何图）、绝对值（代数）、一般现在时三单（填空）。当前为确定性模板生成（不依赖 LLM），分层难度 basic/variant/advanced 通过参数槽控制；`practice::gaps` 已实现薄弱点定位（聚合错题本近 N 天错题、按错误次数排序、给出建议起点难度 basic/variant/advanced），供「定位漏洞 → 出题」链路使用；`practice::check` 已实现练习答案即时批改（参考答案可对拍直接判分，否则主模型判分，答错自动回写错题本），为防重复刷题积累数据。
+practice::generate 全链路已按本文档实现：
 
-**未落地（后续）**：compute::verify 对 diagram_spec 的可解性对拍管线（模板参数自洽校验）、模板库扩充、高考真题池、图与解析并排 UI。
+- **确定性模板（优先路径）**：模板库 15 个初高中高频知识点（三角形全等判定、相似三角形、勾股定理、一元一次/二次方程、一次/二次/反比例函数、绝对值、有理数运算、因式分解、一般现在时三单、一般过去时、现在进行时、一般将来时），每知识点 3 个难度参数槽；几何模板带 diagram_spec（与前端 geometry.js 渲染器同源协议）。
+- **高考真题池（exam 难度）**：随包发布结构化题库（data/gaokao_pool.json，include_str! 编译期嵌入），按学科/知识点/来源标注；difficulty=exam 走池内抽取（随机、标注来源），不走模板与 LLM 生成，保证真实可溯。
+- **LLM 自由出题（P1 智能出题）**：模板未命中时主模型按 json_schema 强约束生成 {knowledge_point, question_text, answer_spec, diagram_spec}（src/kernel/prompt.rs 的 practice_generate_system_prompt）；生成失败回退未命中提示，工具始终可用。
+- **几何可解性对拍**：LLM 生成的 diagram_spec 经 compute::verify（GUI Pyodide 沙箱，src/plugin/practice/verify_geometry.py）做存在性/自洽性数值校验（坐标合法、线段/半径为正、多边形不共线不退化、三角不等式、直角标记垂直自洽）；失败把原因注入 prompt 重出，连续 3 次停；执行端不可用/超时降级放行（geometry_checked=false）。代数/填空（无图形）直接上线。
+- **防重复**：practice::check 无论对错都把练习记录（item/知识点/对错/时间）落 memory（practice/history）；practice::generate 出题前读取近 30 天已掌握集合，模板命中但已掌握 → 走 LLM 出新题、真题池过滤已做条目、LLM prompt 注入避开清单。
+
+practice::gaps 已实现薄弱点定位（聚合错题本近 N 天错题、按错误次数排序、给出建议起点难度），供「定位漏洞 → 出题」链路使用；practice::check 已实现练习答案即时批改（参考答案可对拍直接判分，否则主模型判分，答错自动回写错题本）。
+
+**未落地（后续）**：一致性对拍（按 answer_spec 解析断言题面数值，当前为图形层面存在性/自洽性）、高考真题池扩充与分档、compute 校验结果的 UI 展示（geometry_checked 字段已就绪）、图与解析并排 UI。
