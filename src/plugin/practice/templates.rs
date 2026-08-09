@@ -66,7 +66,7 @@ pub const SUPPORTED_POINTS: &[&str] = &[
 pub fn build_item(knowledge_point: &str, difficulty: Difficulty) -> Option<PracticeItem> {
     // 真题层：只走池内抽取（真实来源），不走模板与 LLM 生成。
     if difficulty == Difficulty::Exam {
-        return crate::plugin::practice::exam_pool::draw_from_pool(knowledge_point);
+        return crate::plugin::practice::exam_pool::draw_from_pool(knowledge_point, &[]);
     }
     let kp = knowledge_point.trim();
     if contains_any(kp, &["三角形全等", "全等"]) {

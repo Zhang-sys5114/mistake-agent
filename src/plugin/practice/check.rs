@@ -129,7 +129,7 @@ pub async fn check_handler(
     // 无论对错都记录练习历史（防重复出题的数据源）；无 item_id 时用题目哈希兜底。
     let item_id = p.item_id.clone().unwrap_or_else(|| {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        use std::hash::Hasher;
+        use std::hash::{Hash, Hasher};
         p.question.hash(&mut h);
         format!("custom:{:016x}", h.finish())
     });
