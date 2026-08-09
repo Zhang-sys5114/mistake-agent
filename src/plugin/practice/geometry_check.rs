@@ -58,9 +58,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
-    struct FakeCompute {
+    pub(crate) struct FakeCompute {
         /// 依次弹出的校验结果：None=通过，Some=失败原因，Err=执行端错误。
-        results: Mutex<Vec<Result<Option<String>, ComputeError>>>,
+        pub(crate) results: Mutex<Vec<Result<Option<String>, ComputeError>>>,
     }
 
     #[async_trait::async_trait]
