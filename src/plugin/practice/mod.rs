@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use crate::kernel::agent::dispatch::ToolCallContext;
 use crate::kernel::context::PluginContext;
 use crate::kernel::contract::{CallerPolicy, Info, PluginError, ToolDef, ToolError};
-use crate::kernel::plugin::services::{ModelHandle, ServiceId};
+use crate::kernel::plugin::services::{MemoryHandle, ModelHandle, ServiceId};
 use crate::kernel::registry::{PluginDescriptor, UserPlugin};
 
 mod check;
@@ -273,13 +273,13 @@ mod tests {
     #[tokio::test]
     async fn generate_llm_fallback_returns_item() {
         let (model, memory) = fake_handle(
-            r#"{"knowledge_point":"一元二次方程","question_text":"解方程 $x^2-3x+2=0$。","answer_spec":"$x=1$ 或 $x=2$","diagram_spec":null}"#,
+            r#"{"knowledge_point":"数列","question_text":"求等差数列 $1,4,7,\\ldots$ 的第 10 项。","answer_spec":"$a_{10}=28$","diagram_spec":null}"#,
         );
         let out = generate_handler(
             model,
             memory,
             json!({
-                "knowledge_point": "一元二次方程",
+                "knowledge_point": "数列",
                 "difficulty": "variant",
             }),
         )
@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(out["source"], "llm");
         assert_eq!(out["item"]["template_id"], "llm_freeform");
         assert_eq!(out["item"]["difficulty"], "variant");
-        assert_eq!(out["item"]["question_text"], "解方程 $x^2-3x+2=0$。");
+        assert_eq!(out["item"]["question_text"], "求等差数列 $1,4,7,\\ldots$ 的第 10 项。");
     }
 
     #[tokio::test]

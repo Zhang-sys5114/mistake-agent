@@ -14,7 +14,8 @@ pub struct ExamItem {
     pub item_id: String,
     /// 试卷来源标注，如"2021 新高考Ⅰ卷（数学）"。
     pub source: String,
-    pub subject: String,
+    // 数据文件中的 subject（学科）标注保留用于人工筛选与未来扩展，
+    // 结构体不读取（serde 忽略未知字段），避免死代码。
     pub knowledge_point: String,
     pub question_text: String,
     pub answer_spec: String,

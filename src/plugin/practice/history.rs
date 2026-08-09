@@ -99,7 +99,7 @@ pub async fn recent_mastered(memory: &MemoryHandle) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::kernel::plugin::services::MemoryService;
     use std::collections::HashMap;
