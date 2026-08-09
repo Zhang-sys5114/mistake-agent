@@ -10,11 +10,13 @@ use serde_json::Value;
 use crate::kernel::contract::ToolError;
 use crate::kernel::message::Message;
 use crate::kernel::plugin::services::{
-    AbortSignal, ModelHandle, ModelKind, ModelRequest, ResponseFormat,
+    AbortSignal, ComputeError, ComputeHandle, ModelHandle, ModelKind, ModelRequest,
+    ResponseFormat,
 };
 use crate::kernel::prompt::practice_generate_system_prompt;
 use crate::plugin::vision::map_model_error;
 
+use super::geometry_check::verify_diagram;
 use super::templates::{Difficulty, PracticeItem};
 
 /// 模型自由出题结果：沿用 docs/variants.md 的结构化规格（不包含 template_id，
@@ -45,12 +47,17 @@ pub async fn model_generate(
     knowledge_point: &str,
     difficulty: Difficulty,
     mastered: &[String],
+    geometry_feedback: Option<&str>,
 ) -> Result<PracticeItem, ToolError> {
     let system = Message::system(practice_generate_system_prompt());
     let mut lines = vec![
         format!("知识点：{}", knowledge_point.trim()),
         format!("难度：{}", difficulty_label(difficulty)),
     ];
+    // 几何校验失败重试：把上一版失败原因注入 prompt，要求模型修正图形数据。
+    if let Some(feedback) = geometry_feedback {
+        lines.push(feedback.to_string());
+    }
     // 防重复：近期已掌握清单注入 prompt，要求模型避开相同/相似题。
     if !mastered.is_empty() {
         lines.push(format!(
@@ -79,6 +86,56 @@ pub async fn model_generate(
         diagram_spec: item.diagram_spec,
         source: None,
     })
+}
+
+/// 几何校验最大重试次数（variants.md §3：失败换参数重出，连续失败即停）。
+pub const MAX_GEOMETRY_ATTEMPTS: u32 = 3;
+
+/// LLM 出题 + 几何可解性对拍：
+/// - 代数/填空（无 diagram_spec）直接放行（先上线路径）；
+/// - 有图形走 compute 校验，失败带原因重出（最多 MAX_GEOMETRY_ATTEMPTS 次）；
+/// - 执行端不可用/超时降级放行（图形未校验，由前端渲染兜底）。
+///
+/// 返回 (条目, 是否已通过几何校验)。
+pub async fn generate_with_check(
+    compute: &ComputeHandle,
+    model: &ModelHandle,
+    knowledge_point: &str,
+    difficulty: Difficulty,
+    mastered: &[String],
+) -> Result<(PracticeItem, bool), ToolError> {
+    let mut feedback: Option<String> = None;
+    for attempt in 0..MAX_GEOMETRY_ATTEMPTS {
+        let item = model_generate(
+            model,
+            knowledge_point,
+            difficulty,
+            mastered,
+            feedback.as_deref(),
+        )
+        .await?;
+        let Some(spec) = item.diagram_spec.as_ref() else {
+            // 代数/填空：无图形规格，直接放行。
+            return Ok((item, false));
+        };
+        match verify_diagram(compute, spec, &AbortSignal::new()).await {
+            Ok(None) => return Ok((item, true)),
+            Ok(Some(reason)) => {
+                feedback = Some(format!(
+                    "上一版几何图形未通过可解性校验（第 {} 次）：{reason}。请修正点坐标/线段/圆/直角标记等图形数据后重新出题",
+                    attempt + 1
+                ));
+            }
+            Err(ComputeError::BackendUnavailable) | Err(ComputeError::Timeout) => {
+                // 执行端未连接/超时：降级放行（图形未校验，前端渲染兜底）。
+                return Ok((item, false));
+            }
+            Err(e) => return Err(ToolError::handler(format!("几何校验执行失败：{e}"))),
+        }
+    }
+    Err(ToolError::handler(format!(
+        "几何图形连续 {MAX_GEOMETRY_ATTEMPTS} 次未通过可解性校验，请调整题目表述或更换知识点后重试"
+    )))
 }
 
 /// 容灾解析：先整段解析，失败则截取第一个 { 到最后一个 }（模型偶尔带前后缀）。
