@@ -12,10 +12,13 @@ use crate::kernel::contract::ToolError;
 use crate::kernel::message::Message;
 use crate::kernel::plugin::services::{
     AbortSignal, Mistake, MistakeId, ModelHandle, ModelKind, ModelRequest, ResponseFormat,
-    StorageHandle,
+    MemoryHandle, StorageHandle,
 };
 use crate::kernel::prompt::practice_check_system_prompt;
 use crate::plugin::vision::map_model_error;
+
+use super::history::record_attempt;
+use super::templates::Difficulty;
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct CheckParams {
@@ -31,6 +34,11 @@ pub struct CheckParams {
     pub knowledge_point: Option<String>,
     /// 题型提示（可选：填空/选择/解答/计算等，帮助模型判分）。
     pub kind: Option<String>,
+    /// 题目标识（可选；practice::generate 返回的 item.template_id，用于防重复记录；
+    /// 缺省用题目文本哈希兜底）。
+    pub item_id: Option<String>,
+    /// 难度（可选，练习历史记录用；缺省 basic）。
+    pub difficulty: Option<Difficulty>,
 }
 
 /// 模型判分结果：严格 JSON 对象。
@@ -62,6 +70,7 @@ fn exact_match(student: &str, reference: &str) -> bool {
 pub async fn check_handler(
     model: ModelHandle,
     storage: StorageHandle,
+    memory: MemoryHandle,
     params: Value,
 ) -> Result<Value, ToolError> {
     let p: CheckParams =
@@ -116,6 +125,21 @@ pub async fn check_handler(
     } else {
         false
     };
+
+    // 无论对错都记录练习历史（防重复出题的数据源）；无 item_id 时用题目哈希兜底。
+    let item_id = p.item_id.clone().unwrap_or_else(|| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        use std::hash::{Hash, Hasher};
+        p.question.hash(&mut h);
+        format!("custom:{:016x}", h.finish())
+    });
+    let knowledge_point = p
+        .knowledge_point
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "未标注".into());
+    let difficulty = p.difficulty.unwrap_or_default();
+    record_attempt(&memory, &item_id, &knowledge_point, difficulty, result.correct).await;
 
     Ok(check_output(
         result.correct,
@@ -196,6 +220,7 @@ mod tests {
         Mistake, MistakeFilter, MistakeId, MistakePatch, MistakeStore, ModelError, ModelRequest,
         ModelResponse, ModelService, ModelStream, StorageError,
     };
+    use crate::plugin::practice::history::tests::FakeMemory;
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
@@ -271,7 +296,10 @@ mod tests {
         }
     }
 
-    fn handles(reply: &str, store: Arc<FakeStore>) -> (ModelHandle, StorageHandle) {
+    fn handles(
+        reply: &str,
+        store: Arc<FakeStore>,
+    ) -> (ModelHandle, StorageHandle, MemoryHandle) {
         let model: Arc<dyn ModelService> = Arc::new(FakeModel {
             reply: Mutex::new(reply.into()),
         });
@@ -279,6 +307,7 @@ mod tests {
         (
             ModelHandle::new(model, std::time::Duration::from_secs(5), auditor),
             StorageHandle::new(store),
+            MemoryHandle::new(Arc::new(FakeMemory::default())),
         )
     }
 
@@ -293,13 +322,14 @@ mod tests {
     #[tokio::test]
     async fn check_exact_match_skips_model_and_archives_nothing() {
         let store = Arc::new(FakeStore::default());
-        let (model, storage) = handles(
+        let (model, storage, memory) = handles(
             r#"{"correct":false,"analysis":"不应走到模型判分"}"#,
             store.clone(),
         );
         let out = check_handler(
             model,
             storage,
+            memory,
             json!({
                 "question": "|-3| = ?",
                 "student_answer": " 3 ",
@@ -319,13 +349,14 @@ mod tests {
     #[tokio::test]
     async fn check_wrong_answer_goes_model_and_archives() {
         let store = Arc::new(FakeStore::default());
-        let (model, storage) = handles(
+        let (model, storage, memory) = handles(
             r#"{"correct":false,"score":0,"total":5,"analysis":"正确答案是 3，负数的绝对值应为正数"}"#,
             store.clone(),
         );
         let out = check_handler(
             model,
             storage,
+            memory,
             json!({
                 "question": "|-3| = ?",
                 "student_answer": "-3",
@@ -350,13 +381,14 @@ mod tests {
     #[tokio::test]
     async fn check_correct_free_form_archives_nothing() {
         let store = Arc::new(FakeStore::default());
-        let (model, storage) = handles(
+        let (model, storage, memory) = handles(
             r#"{"correct":true,"analysis":"SAS 判定正确"}"#,
             store.clone(),
         );
         let out = check_handler(
             model,
             storage,
+            memory,
             json!({
                 "question": "证明 △ABC ≅ △DEF",
                 "student_answer": "由 AB=DE、∠B=∠E、BC=EF，SAS 判定全等",
@@ -373,10 +405,55 @@ mod tests {
     #[tokio::test]
     async fn check_rejects_empty_question_or_answer() {
         let store = Arc::new(FakeStore::default());
-        let (model, storage) = handles("", store);
-        let err = check_handler(model, storage, json!({ "question": "1+1=?", "student_answer": "" }))
-            .await
-            .unwrap_err();
+        let (model, storage, memory) = handles("", store);
+        let err = check_handler(
+            model,
+            storage,
+            memory,
+            json!({ "question": "1+1=?", "student_answer": "" }),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, ToolErrorCode::InvalidParams);
+    }
+
+    #[tokio::test]
+    async fn check_records_history_with_item_id() {
+        let store = Arc::new(FakeStore::default());
+        let (model, storage, memory) = handles(
+            r#"{"correct":false,"analysis":"绝对值应为正数"}"#,
+            store.clone(),
+        );
+        let out = check_handler(
+            model,
+            storage,
+            memory.clone(),
+            json!({
+                "question": "|-3| = ?",
+                "student_answer": "-3",
+                "reference_answer": "3",
+                "subject": "数学",
+                "knowledge_point": "绝对值",
+                "item_id": "abs_evaluate",
+                "difficulty": "basic",
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["archived_mistake"], true);
+        // 练习历史已落 memory：读回并断言记录了对错与标识。
+        let mastered = crate::plugin::practice::history::recent_mastered(&memory).await;
+        assert!(mastered.is_empty()); // 答错不算已掌握
+        let path = crate::kernel::plugin::services::MemoryPath::parse(
+            crate::plugin::practice::history::HISTORY_PATH,
+        )
+        .unwrap();
+        let view = memory.show(Some(&path)).await.unwrap();
+        let content = match view {
+            crate::kernel::plugin::services::MemoryView::Entry { content, .. } => content,
+            _ => panic!("练习历史应以单键 Entry 落盘"),
+        };
+        assert!(content.contains("abs_evaluate"));
+        assert!(content.contains("false"));
     }
 }
