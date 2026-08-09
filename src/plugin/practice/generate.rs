@@ -103,6 +103,7 @@ pub async fn generate_with_check(
     knowledge_point: &str,
     difficulty: Difficulty,
     mastered: &[String],
+    signal: &AbortSignal,
 ) -> Result<(PracticeItem, bool), ToolError> {
     let mut feedback: Option<String> = None;
     for attempt in 0..MAX_GEOMETRY_ATTEMPTS {
@@ -118,7 +119,7 @@ pub async fn generate_with_check(
             // 代数/填空：无图形规格，直接放行。
             return Ok((item, false));
         };
-        match verify_diagram(compute, spec, &AbortSignal::new()).await {
+        match verify_diagram(compute, spec, signal).await {
             Ok(None) => return Ok((item, true)),
             Ok(Some(reason)) => {
                 feedback = Some(format!(
