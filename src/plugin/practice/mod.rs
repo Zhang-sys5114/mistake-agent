@@ -13,6 +13,7 @@ use crate::kernel::plugin::services::{ModelHandle, ServiceId};
 use crate::kernel::registry::{PluginDescriptor, UserPlugin};
 
 mod check;
+mod exam_pool;
 mod generate;
 mod gaps;
 mod templates;
@@ -36,7 +37,7 @@ impl UserPlugin for PracticePlugin {
                 title: Some("生成变式练习".into()),
                 group: Some("学习".into()),
                 description:
-                    "按知识点生成分层变式练习（基础/同类变式/综合拔高），几何题附带图纸规格。用法：practice::generate <知识点> [难度]".into(),
+                    "按知识点生成分层变式练习（基础/同类变式/综合拔高），几何题附带图纸规格；难度传 exam 时从高考真题池抽取（随包题库、标注来源）。用法：practice::generate <知识点> [难度]".into(),
                 params: schemars::schema_for!(GenerateParams),
                 policy: CallerPolicy::UserAndModel,
                 timeout: None,
@@ -125,6 +126,16 @@ async fn generate_handler(model: ModelHandle, params: Value) -> Result<Value, To
         return Err(ToolError::invalid_params("knowledge_point 不能为空"));
     }
     let difficulty = p.difficulty.unwrap_or_default();
+    // 真题层：只走池内抽取（真实来源），不走模板与 LLM 生成。
+    if difficulty == Difficulty::Exam {
+        return match build_item(knowledge_point, difficulty) {
+            Some(item) => Ok(json!({ "matched": true, "source": "exam_pool", "item": item })),
+            None => Ok(json!({
+                "matched": false,
+                "message": "真题池暂未收录该知识点的题目；可改用基础/同类变式/综合拔高难度，或换用支持的知识点。",
+            })),
+        };
+    }
     match build_item(knowledge_point, difficulty) {
         Some(item) => Ok(json!({ "matched": true, "item": item })),
         // P1 智能出题：模板未命中时走 LLM 生成（结构化 schema，见 generate.rs）；
@@ -251,8 +262,41 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(out["matched"], false);
-        assert_eq!(out["supported"].as_array().unwrap().len(), 3);
+        assert_eq!(out["supported"].as_array().unwrap().len(), 15);
         assert!(out["message"].as_str().unwrap().contains("模型生成失败"));
+    }
+
+    #[tokio::test]
+    async fn generate_exam_pool_draws_item() {
+        let out = generate_handler(
+            fake_handle("不应走到模型生成"),
+            json!({
+                "knowledge_point": "集合运算",
+                "difficulty": "exam",
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["matched"], true);
+        assert_eq!(out["source"], "exam_pool");
+        assert_eq!(out["item"]["difficulty"], "exam");
+        assert!(out["item"]["template_id"].as_str().unwrap().starts_with("exam:"));
+        assert!(out["item"]["source"].as_str().unwrap().contains("卷"));
+    }
+
+    #[tokio::test]
+    async fn generate_exam_pool_miss_returns_message() {
+        let out = generate_handler(
+            fake_handle("不应走到模型生成"),
+            json!({
+                "knowledge_point": "量子力学",
+                "difficulty": "exam",
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["matched"], false);
+        assert!(out["message"].as_str().unwrap().contains("真题池"));
     }
 
     #[test]

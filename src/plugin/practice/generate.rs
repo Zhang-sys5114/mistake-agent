@@ -34,6 +34,8 @@ fn difficulty_label(difficulty: Difficulty) -> &'static str {
         Difficulty::Basic => "basic（基础：直接套用公式/定理）",
         Difficulty::Variant => "variant（同类变式：条件隐藏或逆用）",
         Difficulty::Advanced => "advanced（综合拔高：多步组合、辅助线、跨知识点联动）",
+        // 真题层由 exam_pool 处理，model_generate 不会收到 Exam；此处仅为 match 穷尽。
+        Difficulty::Exam => "exam（高考真题：池内抽取，非模型生成）",
     }
 }
 
@@ -67,6 +69,7 @@ pub async fn model_generate(
         question_text: item.question_text,
         answer_spec: item.answer_spec,
         diagram_spec: item.diagram_spec,
+        source: None,
     })
 }
 
