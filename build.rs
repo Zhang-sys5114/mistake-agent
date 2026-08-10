@@ -30,6 +30,9 @@ fn generate_manifest(root: &str, out_dir: &str, file_name: &str, user: bool) -> 
     // 目录内任何变化（新增/改名/删除/放 disabled 文件）都触发重扫。
     println!("cargo:rerun-if-changed={root}");
 
+    // 契约目录例外：services/ 是内核插件公共契约聚合（非插件），跳过收录。
+    let skip_dirs: &[&str] = if user { &[] } else { &["services"] };
+
     let root_path = Path::new(root);
     let mut plugins: Vec<String> = Vec::new();
     if root_path.is_dir() {
@@ -44,6 +47,9 @@ fn generate_manifest(root: &str, out_dir: &str, file_name: &str, user: bool) -> 
                 continue;
             }
             let name = entry.file_name().to_string_lossy().into_owned();
+            if skip_dirs.contains(&name.as_str()) {
+                continue;
+            }
             // 禁用：整目录跳过，连编译都不参与（WIP 半成品可安全放这里）。
             if path.join("disabled").is_file() {
                 continue;
