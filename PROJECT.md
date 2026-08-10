@@ -192,6 +192,8 @@ mistake-agent/
 
 **边界约束**：单 crate 内没有 Cargo 依赖图边界，能力边界靠两层纪律保证：可见性（kernel 只公开 trait 与句柄类型，服务实现与内核内部用 pub(crate) 隐藏）+ 运行时调度（CallerPolicy、句柄注入、注册校验）。用户插件只允许经公开 API 面与内核交互。
 
+**文件组织（开发约定）**：职责先于实现规划；新功能预计存在两个及以上职责时，直接创建同名文件夹与 `mod.rs`，不先堆成单文件再拆。`mod.rs` 只负责公共面、装配与 `pub use` 重导出，职责实现放子模块；子模块间共享的私有项经父模块 `pub(crate) use` 桥接。~400 行只是审查预警线，不是拆分触发条件。已按此拆分的：`agent/session/`（guard/summarize/interrupt/scheduler/clock）、`agent/rpc/`（protocol/handlers）、`agent/loop_mod/`（turn）、`plugin/services/`（model/storage/memory/compute）、`plugin/storage/file/`（mistakes/io/tmp）、`plugin/storage/core/`（chain）、`registry/`（entry）、`plugin/memory/`（store/inmem）、`plugin/practice/templates/`（geometry/algebra/english）、`plugin/grading/`（tests.rs 拆出）。
+
 ## 9. 当前状态
 
 - **M1–M6 全部完成**（含 Windows 打包实测：`错题 Agent_0.1.0_x64-setup.exe` 在 Windows 环境安装运行通过），设计文档 42 条 ADR（0001–0042）+ 术语表（CONTEXT.md）。

@@ -60,6 +60,7 @@ cargo fmt --check
 - 提交信息用简洁中文描述（如 `feat(kernel): 注册表与 CallerPolicy 校验`）
 - 改动必须通过 `cargo test` 与 `cargo clippy -- -D warnings`
 - 改设计不留痕 = 没改：必须同步 CONTEXT.md 或新增 docs/adr/
+- **职责先行的模块组织**：开发新功能时先按职责规划模块边界；预计存在两个及以上职责时，直接创建同名文件夹与 `mod.rs`，不要先堆进单文件、超过 ~400 行后再被动拆分。`mod.rs` 只负责公共面、装配与 `pub use` 重导出；职责实现放子模块；子模块间共享的私有项经父模块 `pub(crate) use` 桥接；`use super::*` 只继承父模块的 pub 面，子模块自己的 imports 要显式写。~400 行只是审查预警线，不是拆分触发条件。拆分必须保持外部引用稳定、零行为变化，并通过全量测试 + live_api 复验。
 
 ## Agent skills
 
