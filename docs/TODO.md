@@ -12,7 +12,7 @@
 
 ### 场景 3：多周期学习复盘
 
-- [ ] `report::weekly` 加 `period` 参数（daily/weekly/monthly/semester；不传=旧行为）；semester 支持 `start_at/end_at` 可选参数（模型会话式问用户学期起止）。
+- [ ] **`report::weekly` 重写为 `report::overview`**（改名决策：`weekly` 名不副实——支持 daily/weekly/monthly/semester 四档后名字误导；新名绑定周期语义，将来加档位不用再改名）：加 `period` 参数（daily/weekly/monthly/semester；不传=旧行为）；semester 支持 `start_at/end_at` 可选参数（模型会话式问用户学期起止）；同步改 PROJECT.md / docs/api.md / prompts.md 工具名引用 + 前端 trigger_command 调用处，MVP 阶段直接断旧名不留兼容别名。
 - [ ] 持续薄弱考点：近 N 天错 ≥3 次 且连续两期上榜（硬编码），`weakest_points[]` 加 `persistent` 标记。
 - [ ] 答题时长采集：exam 计时器自动记 + 上传批改学生自述（模型填 duration_seconds）；practice::check 不采集；提示词让模型告知用户"作答计时"。
 - [ ] 复习清单：report 输出 Markdown，前端「导出」= Blob 下载 .md + window.print() 打印 PDF。
