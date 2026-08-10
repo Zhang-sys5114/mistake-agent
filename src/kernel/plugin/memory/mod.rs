@@ -5,7 +5,6 @@
 //! - `FileMemoryService`：数据根目录 memory/ 下的文件持久化（M2 生产实现）。
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -17,10 +16,10 @@ use crate::kernel::agent::dispatch::ToolCallContext;
 use crate::kernel::context::KernelContext;
 use crate::kernel::contract::{CallerPolicy, Info, PluginError, ToolDef, ToolError};
 use crate::kernel::plugin::services::{
-    MemoryError, MemoryHandle, MemoryPath, MemoryService, MemoryView, ServiceId,
+    Domain, DomainIo, MemoryError, MemoryHandle, MemoryPath, MemoryService, MemoryView, RelPath,
+    ServiceId,
 };
 use crate::kernel::registry::{KernelDescriptor, KernelPlugin};
-use crate::kernel::settings::Settings;
 
 #[derive(Default, Clone)]
 pub struct InMemoryMemory {
@@ -79,100 +78,159 @@ impl MemoryService for InMemoryMemory {
     }
 }
 
-/// 文件版记忆服务：条目落盘为 `memory/<路径>.md`。
+/// 文件版记忆服务：条目落盘为 `memory/<路径>.md`（ADR-0042 磁盘 IO 铁律：
+/// 全部经 DomainIo(memory 域)，本服务不持有任何文件句柄）。
 ///
 /// 目录语义：
 /// - `show(None)` = 递归列出全部条目（不带 `.md` 后缀，按路径排序）；
 /// - `show(Some(p))` = 读取单个条目；
 /// - `remove(p)` = 删除该条目及其子树（路径前缀匹配，`数学` 会删掉 `数学/…` 全部）。
+///
+/// 路径编码：记忆路径是中文（`数学/函数`），而 RelPath 白名单是 ASCII——
+/// 每段经 base64url（URL_SAFE_NO_PAD）编码后落盘（ASCII 安全、可逆、确定性），
+/// 列出时再解码回原文。
 pub struct FileMemoryService {
-    root: PathBuf,
+    io: Arc<dyn DomainIo>,
 }
 
 impl FileMemoryService {
-    pub fn new(root: PathBuf) -> Self {
-        Self { root }
+    pub fn new(io: Arc<dyn DomainIo>) -> Self {
+        Self { io }
     }
 
-    pub fn open_default() -> Result<Self, MemoryError> {
+    pub fn open_default(io: Arc<dyn DomainIo>) -> Result<Self, MemoryError> {
         // memory/ 目录已由 bootstrap::init_data_root（Kernel::new 引导）创建。
-        Ok(Self::new(Settings::data_root().join("memory")))
+        Ok(Self::new(io))
     }
 
-    fn entry_file(&self, path: &MemoryPath) -> PathBuf {
-        let mut file = self.root.clone();
-        for seg in path.segments() {
-            file.push(seg);
-        }
-        file.set_extension("md");
-        file
-    }
-
-    fn subtree_dir(&self, path: &MemoryPath) -> PathBuf {
-        let mut dir = self.root.clone();
-        for seg in path.segments() {
-            dir.push(seg);
-        }
-        dir
-    }
-
-    fn list_entries(&self) -> Result<Vec<String>, MemoryError> {
-        let mut out = Vec::new();
-        Self::walk(&self.root, &self.root, &mut out)?;
-        out.sort();
-        Ok(out)
-    }
-
-    fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), MemoryError> {
-        for entry in std::fs::read_dir(dir)
-            .map_err(|e| MemoryError::Io(format!("读取记忆目录失败 {dir:?}：{e}")))?
-        {
-            let entry = entry.map_err(|e| MemoryError::Io(format!("读取目录项失败：{e}")))?;
-            let path = entry.path();
-            let file_type = entry
-                .file_type()
-                .map_err(|e| MemoryError::Io(format!("读取文件类型失败：{e}")))?;
-            if file_type.is_dir() {
-                Self::walk(root, &path, out)?;
-            } else if file_type.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md")
-            {
-                let rel = path
-                    .strip_prefix(root)
-                    .map_err(|_| MemoryError::Io("记忆路径越界".into()))?;
-                let mut name = rel.to_string_lossy().replace('\\', "/");
-                if let Some(stripped) = name.strip_suffix(".md") {
-                    name = stripped.to_string();
-                }
-                out.push(name);
+    /// 旧存储布局迁移（ADR-0042 数据运行时化连坐）：v1 的 memory 条目以
+    /// 中文路径直接落盘（`memory/测试/记忆条目.md`），新布局为 base64url 段编码
+    /// （`memory/<enc>/<enc>.md`）。启动时把旧条目读入→按新布局写出→删旧文件。
+    /// 幂等：新布局条目（段可解码）原样保留；旧布局条目（段含非 base64 字符）迁移。
+    pub async fn migrate_legacy_layout(&self) -> Result<(), MemoryError> {
+        let rels = self
+            .io
+            .list(Domain::Memory)
+            .await
+            .map_err(|e| MemoryError::Io(format!("迁移扫描失败：{e}")))?;
+        for rel in rels {
+            if rel_to_memory_name(&rel).is_some() {
+                continue; // 已是新布局（每段可解码）。
             }
+            // 旧布局：每段剥掉尾部 .md（那是文件系统扩展名）后原样编码为新段。
+            let mut encoded = Vec::new();
+            for seg in rel.split('/') {
+                if seg.is_empty() {
+                    continue;
+                }
+                encoded.push(encode_segment(seg.strip_suffix(".md").unwrap_or(seg)));
+            }
+            if encoded.is_empty() {
+                continue;
+            }
+            let new_rel = RelPath::parse(&format!("{}.md", encoded.join("/")))
+                .map_err(|e| MemoryError::Io(format!("迁移编码异常：{e}")))?;
+            let bytes = self
+                .io
+                .read_legacy(Domain::Memory, &rel)
+                .await
+                .map_err(|e| MemoryError::Io(format!("迁移读取旧条目失败 {rel}：{e}")))?;
+            self.io
+                .write(Domain::Memory, &new_rel, &bytes)
+                .await
+                .map_err(|e| MemoryError::Io(format!("迁移写入新条目失败 {}：{e}", new_rel.as_str())))?;
+            self.io
+                .remove_legacy(Domain::Memory, &rel)
+                .await
+                .map_err(|e| MemoryError::Io(format!("迁移删除旧条目失败 {rel}：{e}")))?;
         }
         Ok(())
     }
+
+    fn entry_rel(path: &MemoryPath) -> String {
+        let encoded: Vec<String> = path
+            .segments()
+            .iter()
+            .map(|s| encode_segment(s))
+            .collect();
+        format!("{}.md", encoded.join("/"))
+    }
+
+    fn subtree_rel(path: &MemoryPath) -> String {
+        let encoded: Vec<String> = path
+            .segments()
+            .iter()
+            .map(|s| encode_segment(s))
+            .collect();
+        encoded.join("/")
+    }
+}
+
+/// 段编码：base64url（URL_SAFE_NO_PAD），字符集 [A-Za-z0-9_-]，首尾均为字母数字，
+/// 天然满足 RelPath 白名单（段以字母数字开头结尾，中间仅 [a-zA-Z0-9._-]）。
+fn encode_segment(seg: &str) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(seg.as_bytes())
+}
+
+fn decode_segment(seg: &str) -> Result<String, MemoryError> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(seg)
+        .map_err(|e| MemoryError::Io(format!("记忆路径解码失败：{e}")))?;
+    String::from_utf8(bytes).map_err(|e| MemoryError::Io(format!("记忆路径非 UTF-8：{e}")))
+}
+
+fn rel_to_memory_name(rel: &str) -> Option<String> {
+    // rel 形如 "BASE64/BASE64.md"；去掉 .md 后缀后逐段解码。
+    let no_ext = rel.strip_suffix(".md")?;
+    let mut out = Vec::new();
+    for seg in no_ext.split('/') {
+        out.push(decode_segment(seg).ok()?);
+    }
+    Some(out.join("/"))
 }
 
 #[async_trait]
 impl MemoryService for FileMemoryService {
     async fn save(&self, path: &MemoryPath, content: &str) -> Result<(), MemoryError> {
-        let file = self.entry_file(path);
-        if let Some(parent) = file.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| MemoryError::Io(format!("创建记忆目录失败：{e}")))?;
-        }
-        let tmp = file.with_extension("md.tmp");
-        std::fs::write(&tmp, content)
-            .map_err(|e| MemoryError::Io(format!("写记忆条目失败：{e}")))?;
-        std::fs::rename(&tmp, &file)
-            .map_err(|e| MemoryError::Io(format!("记忆条目改名失败：{e}")))?;
-        Ok(())
+        let rel = Self::entry_rel(path);
+        let rel = RelPath::parse(&rel)
+            .map_err(|e| MemoryError::Io(format!("记忆路径编码异常：{e}")))?;
+        self.io
+            .write(Domain::Memory, &rel, content.as_bytes())
+            .await
+            .map_err(|e| MemoryError::Io(format!("写记忆条目失败：{e}")))
     }
 
     async fn show(&self, path: Option<&MemoryPath>) -> Result<MemoryView, MemoryError> {
         match path {
-            None => Ok(MemoryView::Listing(self.list_entries()?)),
+            None => {
+                let rels = self
+                    .io
+                    .list(Domain::Memory)
+                    .await
+                    .map_err(|e| MemoryError::Io(format!("列出记忆失败：{e}")))?;
+                let mut names = Vec::new();
+                for rel in rels {
+                    if let Some(name) = rel_to_memory_name(&rel) {
+                        names.push(name);
+                    }
+                }
+                names.sort();
+                Ok(MemoryView::Listing(names))
+            }
             Some(p) => {
-                let file = self.entry_file(p);
-                let content = std::fs::read_to_string(&file)
+                let rel = Self::entry_rel(p);
+                let rel = RelPath::parse(&rel)
+                    .map_err(|e| MemoryError::Io(format!("记忆路径编码异常：{e}")))?;
+                let bytes = self
+                    .io
+                    .read(Domain::Memory, &rel)
+                    .await
                     .map_err(|_| MemoryError::NotFound(p.as_str()))?;
+                let content = String::from_utf8(bytes)
+                    .map_err(|e| MemoryError::Io(format!("记忆内容非 UTF-8：{e}")))?;
                 Ok(MemoryView::Entry {
                     path: p.clone(),
                     content,
@@ -183,22 +241,21 @@ impl MemoryService for FileMemoryService {
 
     async fn remove(&self, path: &MemoryPath) -> Result<(), MemoryError> {
         let name = path.as_str();
-        let file = self.entry_file(path);
-        let dir = self.subtree_dir(path);
         let mut removed_any = false;
 
-        if file.is_file() {
-            std::fs::remove_file(&file)
-                .map_err(|e| MemoryError::Io(format!("删除记忆条目失败：{e}")))?;
+        // 先删单条目文件（不存在不报错）。
+        let entry = Self::entry_rel(path);
+        if let Ok(rel) = RelPath::parse(&entry)
+            && self.io.remove(Domain::Memory, &rel).await.is_ok()
+        {
             removed_any = true;
         }
-        if dir.is_dir() {
-            // 只删该子树，绝不碰根目录本身。
-            if dir != self.root {
-                std::fs::remove_dir_all(&dir)
-                    .map_err(|e| MemoryError::Io(format!("删除记忆子树失败：{e}")))?;
-                removed_any = true;
-            }
+        // 再删子树（目录；指向域根时拒绝）。
+        let sub = Self::subtree_rel(path);
+        if let Ok(rel) = RelPath::parse(&sub)
+            && self.io.remove_tree(Domain::Memory, &rel).await.is_ok()
+        {
+            removed_any = true;
         }
         if !removed_any {
             return Err(MemoryError::NotFound(name));
@@ -382,6 +439,7 @@ fn map_memory_error(e: MemoryError) -> ToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::plugin::storage::FileStorage;
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
@@ -418,18 +476,21 @@ mod tests {
         assert!(MemoryPath::parse("数学/函数/二次函数").is_ok());
     }
 
-    fn temp_memory() -> (FileMemoryService, PathBuf) {
+    fn temp_memory() -> (FileMemoryService, Arc<FileStorage>) {
+        // 文件版走真实文件后端（临时数据根），验证编码/落盘/跨实例恢复。
         let dir = std::env::temp_dir().join(format!(
             "mistake-agent-memory-test-{}",
             uuid::Uuid::new_v4()
         ));
-        let root = dir.join("memory");
-        (FileMemoryService::new(root.clone()), root)
+        std::fs::create_dir_all(dir.join("memory")).unwrap();
+        let store = Arc::new(FileStorage::open(&dir).unwrap());
+        let io: Arc<dyn DomainIo> = store.clone();
+        (FileMemoryService::new(io), store)
     }
 
     #[tokio::test]
     async fn file_memory_crud_and_subtree_remove() {
-        let (mem, root) = temp_memory();
+        let (mem, _store) = temp_memory();
         let p1 = MemoryPath::parse("数学/函数/二次函数").unwrap();
         let p2 = MemoryPath::parse("数学/几何").unwrap();
         mem.save(&p1, "顶点公式").await.unwrap();
@@ -464,34 +525,65 @@ mod tests {
             _ => panic!("应为空清单"),
         }
         assert!(mem.show(Some(&p1)).await.is_err());
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
     async fn file_memory_persists_across_instances() {
-        let (mem, root) = temp_memory();
+        let (mem, store) = temp_memory();
         let p = MemoryPath::parse("英语/时态/一般现在时").unwrap();
         mem.save(&p, "第三人称单数加 s").await.unwrap();
         drop(mem);
 
-        // 新实例从磁盘恢复
-        let mem2 = FileMemoryService::new(root.clone());
+        // 新实例从磁盘恢复（同一文件后端）。
+        let io: Arc<dyn DomainIo> = store.clone();
+        let mem2 = FileMemoryService::new(io);
         match mem2.show(Some(&p)).await.unwrap() {
             MemoryView::Entry { content, .. } => assert_eq!(content, "第三人称单数加 s"),
             _ => panic!("应为条目详情"),
         }
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
     async fn file_memory_remove_missing_returns_not_found() {
-        let (mem, root) = temp_memory();
+        let (mem, _store) = temp_memory();
         let err = mem
             .remove(&MemoryPath::parse("不存在/条目").unwrap())
             .await
             .unwrap_err();
         assert!(matches!(err, MemoryError::NotFound(_)));
-        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn migrate_legacy_layout_moves_chinese_paths_to_encoded() {
+        let (_mem, store) = temp_memory();
+        // 模拟旧布局：中文路径直接落盘。
+        let io: Arc<dyn DomainIo> = store.clone();
+        io.write(Domain::Memory, &RelPath::parse("seed.md").unwrap(), b"").await.unwrap();
+        // 直接经文件系统写旧布局文件。
+        let root = std::env::temp_dir()
+            .join(format!("mistake-agent-memory-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("memory").join("测试")).unwrap();
+        std::fs::write(root.join("memory/测试/记忆条目.md"), "顶点公式").unwrap();
+        let store2: Arc<FileStorage> = Arc::new(FileStorage::open(&root).unwrap());
+        let mem2 = FileMemoryService::new(store2.clone());
+        let io2: Arc<dyn DomainIo> = store2.clone();
+
+        mem2.migrate_legacy_layout().await.unwrap();
+        // 旧文件已删、新编码文件可读、内容一致。
+        let rels = io2.list(Domain::Memory).await.unwrap();
+        assert!(!rels.iter().any(|r| r == "测试/记忆条目.md"), "旧布局文件应被迁移删除");
+        let mut found = false;
+        for rel in rels {
+            if let Some(name) = rel_to_memory_name(&rel)
+                && name == "测试/记忆条目"
+            {
+                found = true;
+                let bytes = io2.read(Domain::Memory, &RelPath::parse(&rel).unwrap()).await.unwrap();
+                assert_eq!(String::from_utf8(bytes).unwrap(), "顶点公式");
+            }
+        }
+        assert!(found, "新布局应能读到迁移后的条目");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // ---------- 入口 handler 测试（原 plugin/memory 迁移，ADR-0035） ----------

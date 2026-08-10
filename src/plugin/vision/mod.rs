@@ -2,7 +2,8 @@
 //!
 //! 上传图片/PDF 后，模型先调 `vision::read` 理解内容（作业/试卷转写文字，
 //! 角色/照片等描述内容），再按用户意图决定：直接讲解/描述，或调 `grading::upload` 判分归档。
-//! 插件信息：namespace = vision，requires = [Model]；tools = [read]
+//! 插件信息：namespace = vision，requires = [Model, Storage]；tools = [read]
+//! （Storage 用于附件暂存读取——ADR-0042 磁盘 IO 铁律：用户插件不持有文件句柄）
 
 use std::sync::Arc;
 
@@ -24,7 +25,7 @@ impl UserPlugin for VisionPlugin {
     fn info() -> Info {
         Info {
             namespace: "vision".into(),
-            requires: vec![ServiceId::Model],
+            requires: vec![ServiceId::Model, ServiceId::Storage],
             tools: vec![ToolDef {
                 name: "read".into(),
                 user_visible: true,
@@ -48,11 +49,17 @@ impl UserPlugin for VisionPlugin {
             .model()
             .cloned()
             .ok_or_else(|| PluginError::Internal("缺少 Model 句柄".into()))?;
+        let storage = ctx
+            .handles
+            .storage()
+            .cloned()
+            .ok_or_else(|| PluginError::Internal("缺少 Storage 句柄".into()))?;
         ctx.registrar.tool(
             "read",
             Arc::new(move |call_ctx: &ToolCallContext, params: Value| {
                 let model = model.clone();
-                Box::pin(async move { core::read_handler(call_ctx, params, model).await })
+                let storage = storage.clone();
+                Box::pin(async move { core::read_handler(call_ctx, params, model, storage).await })
             }),
         )
     }

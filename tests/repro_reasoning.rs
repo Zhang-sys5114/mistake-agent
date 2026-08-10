@@ -2,6 +2,7 @@
 //! 真实 API 验证「thinking 开启 + 工具调用」的历史回传能被接受。
 //! - REPRO_MODE=per_call：每个 function_call 前都有 reasoning（主修序列化后的形态，应直接通过）；
 //! - REPRO_MODE=none/between_calls：异常历史，应触发兜底（剥离 reasoning + effort=none）后通过。
+//!
 //! 运行：cargo test --test repro_reasoning -- --ignored --nocapture
 
 use futures_util::StreamExt;

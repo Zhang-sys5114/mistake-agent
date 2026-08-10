@@ -10,8 +10,8 @@ use crate::kernel::agent::session::{Goal, SessionKey, SessionMeta, SessionStatus
 use crate::kernel::audit::{AuditRecord, AuditSink};
 use crate::kernel::message::{Message, MessageId};
 use crate::kernel::plugin::services::{
-    Mistake, MistakeFilter, MistakeId, MistakePatch, MistakeStore, SessionStore, StorageError,
-    StorageService,
+    Domain, DomainIo, Mistake, MistakeFilter, MistakeId, MistakePatch, MistakeStore, RelPath,
+    SessionStore, StorageError, StorageService, TmpIo,
 };
 
 #[derive(Clone)]
@@ -144,8 +144,9 @@ impl MistakeStore for AnyStorage {
     }
     async fn list(&self, filter: &MistakeFilter) -> Result<Vec<Mistake>, StorageError> {
         match self {
-            AnyStorage::File(s) => s.list(filter).await,
-            AnyStorage::Mem(s) => s.list(filter).await,
+            // UFCS：消除与 DomainIo::list 的方法名冲突。
+            AnyStorage::File(s) => MistakeStore::list(s, filter).await,
+            AnyStorage::Mem(s) => MistakeStore::list(s, filter).await,
         }
     }
     async fn update(&self, id: &MistakeId, patch: &MistakePatch) -> Result<(), StorageError> {
@@ -156,8 +157,9 @@ impl MistakeStore for AnyStorage {
     }
     async fn remove(&self, id: &MistakeId) -> Result<(), StorageError> {
         match self {
-            AnyStorage::File(s) => s.remove(id).await,
-            AnyStorage::Mem(s) => s.remove(id).await,
+            // UFCS：消除与 DomainIo::remove 的方法名冲突。
+            AnyStorage::File(s) => MistakeStore::remove(s, id).await,
+            AnyStorage::Mem(s) => MistakeStore::remove(s, id).await,
         }
     }
     async fn remove_many(&self, ids: &[MistakeId]) -> Result<usize, StorageError> {
@@ -173,6 +175,70 @@ impl AuditSink for AnyStorage {
         match self {
             AnyStorage::File(s) => s.append(record),
             AnyStorage::Mem(s) => s.append(record),
+        }
+    }
+}
+
+#[async_trait]
+impl DomainIo for AnyStorage {
+    async fn read(&self, domain: Domain, rel: &RelPath) -> Result<Vec<u8>, StorageError> {
+        match self {
+            AnyStorage::File(s) => s.read(domain, rel).await,
+            AnyStorage::Mem(s) => s.read(domain, rel).await,
+        }
+    }
+    async fn write(&self, domain: Domain, rel: &RelPath, bytes: &[u8]) -> Result<(), StorageError> {
+        match self {
+            AnyStorage::File(s) => s.write(domain, rel, bytes).await,
+            AnyStorage::Mem(s) => s.write(domain, rel, bytes).await,
+        }
+    }
+    async fn remove(&self, domain: Domain, rel: &RelPath) -> Result<(), StorageError> {
+        match self {
+            // UFCS：消除与 MistakeStore::remove 的方法名冲突。
+            AnyStorage::File(s) => DomainIo::remove(s, domain, rel).await,
+            AnyStorage::Mem(s) => DomainIo::remove(s, domain, rel).await,
+        }
+    }
+    async fn remove_tree(&self, domain: Domain, rel: &RelPath) -> Result<(), StorageError> {
+        match self {
+            AnyStorage::File(s) => DomainIo::remove_tree(s, domain, rel).await,
+            AnyStorage::Mem(s) => DomainIo::remove_tree(s, domain, rel).await,
+        }
+    }
+    async fn list(&self, domain: Domain) -> Result<Vec<String>, StorageError> {
+        match self {
+            // UFCS：消除与 MistakeStore::list 的方法名冲突。
+            AnyStorage::File(s) => DomainIo::list(s, domain).await,
+            AnyStorage::Mem(s) => DomainIo::list(s, domain).await,
+        }
+    }
+    async fn read_legacy(&self, domain: Domain, legacy_rel: &str) -> Result<Vec<u8>, StorageError> {
+        match self {
+            AnyStorage::File(s) => DomainIo::read_legacy(s, domain, legacy_rel).await,
+            AnyStorage::Mem(s) => DomainIo::read_legacy(s, domain, legacy_rel).await,
+        }
+    }
+    async fn remove_legacy(&self, domain: Domain, legacy_rel: &str) -> Result<(), StorageError> {
+        match self {
+            AnyStorage::File(s) => DomainIo::remove_legacy(s, domain, legacy_rel).await,
+            AnyStorage::Mem(s) => DomainIo::remove_legacy(s, domain, legacy_rel).await,
+        }
+    }
+}
+
+#[async_trait]
+impl TmpIo for AnyStorage {
+    async fn read_staged(&self, path: &str) -> Result<Vec<u8>, StorageError> {
+        match self {
+            AnyStorage::File(s) => s.read_staged(path).await,
+            AnyStorage::Mem(s) => s.read_staged(path).await,
+        }
+    }
+    async fn remove_staged(&self, path: &str) -> Result<(), StorageError> {
+        match self {
+            AnyStorage::File(s) => s.remove_staged(path).await,
+            AnyStorage::Mem(s) => s.remove_staged(path).await,
         }
     }
 }
@@ -219,10 +285,11 @@ pub fn active_chain(messages: &[Message], active_path: Option<MessageId>) -> Vec
 mod tests {
     use super::*;
     use crate::kernel::message::MessageKind;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn mistake_crud_roundtrip() {
-        let store = MemoryStorage::new();
+        let store: Arc<dyn MistakeStore> = Arc::new(MemoryStorage::new());
         let m = Mistake {
             id: MistakeId(uuid::Uuid::new_v4()),
             subject: "数学".into(),
@@ -253,7 +320,7 @@ mod tests {
 
     #[tokio::test]
     async fn mistake_soft_delete_pin_and_batch_remove() {
-        let store = MemoryStorage::new();
+        let store: Arc<dyn MistakeStore> = Arc::new(MemoryStorage::new());
         let m1 = Mistake {
             id: MistakeId(uuid::Uuid::new_v4()),
             subject: "数学".into(),

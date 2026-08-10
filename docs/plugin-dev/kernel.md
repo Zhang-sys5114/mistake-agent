@@ -45,6 +45,21 @@ pub fn descriptor() -> KernelDescriptor {
 
 服务实例本身**不**由 register 构造：storage/memory/model/compute 的实例在 `Kernel::new` 引导阶段按依赖顺序组装（数据根目录、settings 热更新、启动回退），注册表只负责身份、元数据与入口校验。你的内核插件若提供新服务，需要在 `services.rs` 增加契约/句柄，并在 `Kernel::new` 装配（这是目前唯一的手工接线点）。
 
+## 4.5 磁盘 IO 铁律（ADR-0042）
+
+**用户插件的一切磁盘读写只经 StorageHandle，不持有文件句柄**；内核插件（信任边界内）自管持久化目录，但**必须**经 storage 引出的文件能力，不直接裸 `std::fs`：
+
+| 能力 | 位置 | 用途 |
+|---|---|---|
+| `DomainIo`（`read/write/remove/remove_tree/list`） | `services.rs`，经构造注入（如 `FileMemoryService::new(io)`） | 数据根目录域内文件（`Domain` 枚举：mistakes/sessions/memory/data/uploads）；域根校验 + canonicalize 兜底 + 原子写 + 审计全在 storage 实现内 |
+| `TmpIo`（`read_staged/remove_staged`） | `services.rs`，经构造注入 | 系统 temp 暂存（`mistake-agent-` 前缀白名单，硬编码 `temp_dir()`）；读删都记审计 |
+
+- **路径安全靠类型**：`RelPath::parse` 构造即校验（段白名单 `[a-zA-Z0-9._-]`、首尾必须字母数字、拒绝 `.`/`..`/`\`/`:`/非 ASCII），**不做任何规范化**，fail-closed——类型上不可能表示目录遍历。用户插件连 `RelPath` 都不用碰，只见 `StorageHandle` 语义方法（`read_staged/remove_staged/read_data_file/write_data_file`）。
+- **存储布局迁移**：旧布局（中文路径落盘）→ 新布局（base64url 段编码）经 `DomainIo::read_legacy/remove_legacy` 通道迁移（仅启动引导用，允许非 ASCII 段但拒绝遍历向量 + canonicalize 兜底），样例见 `FileMemoryService::migrate_legacy_layout`。
+- **审计**：每次域内/暂存 IO 都记 `AuditRecord::FileIo` / `StagedFileIo`（调 trait = 自动审计，无逃逸点）。
+- **样例**：memory 的 `FileMemoryService` 已收编（`memory/mod.rs`）——中文记忆路径经 base64url 段编码落盘（RelPath 白名单是 ASCII，编码后天然满足），列出时解码还原。
+- **例外**：`verify_geometry.py` 是执行代码不是数据，维持编译期 include_str!；GUI 壳（main.rs）不是插件，保留自有 canonicalize 白名单。
+
 ## 5. 真实示例
 
 - `memory`：`save/show/remove` 工具入口（服务实现在同一文件夹）；

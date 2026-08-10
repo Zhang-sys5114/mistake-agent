@@ -377,22 +377,35 @@ async fn memory_tools_roundtrip() {
         .expect("memory::show 详情失败");
     assert!(detail.to_string().contains("顶点公式"), "详情应含记忆内容");
 
-    // 文件确实落盘（跨实例持久化）。
+    // 文件确实落盘（跨实例持久化，新布局：base64url 段编码，ADR-0042）。
     let memory_dir = Settings::data_root().join("memory");
-    let entry_file = memory_dir.join("测试").join("记忆条目.md");
-    assert!(entry_file.exists(), "记忆条目应落盘：{entry_file:?}");
+    assert!(
+        std::fs::read_dir(&memory_dir)
+            .map(|it| it.flatten().any(|e| e.path().is_dir()))
+            .unwrap_or(false),
+        "记忆目录应有编码目录"
+    );
+    let listing2 = dispatch
+        .call_tool("memory::show", json!({}), Caller::User)
+        .await
+        .expect("memory::show 清单失败");
+    assert!(
+        listing2["entries"]
+            .as_array()
+            .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some(path))),
+        "落盘后清单仍应包含 {path}"
+    );
 
     dispatch
         .call_tool("memory::remove", json!({"filename": "测试"}), Caller::User)
         .await
         .expect("memory::remove 失败");
-    assert!(!entry_file.exists(), "删除子树后条目应消失");
-    let listing = dispatch
+    let listing3 = dispatch
         .call_tool("memory::show", json!({}), Caller::User)
         .await
         .expect("memory::show 清单失败");
     assert!(
-        !listing["entries"]
+        !listing3["entries"]
             .as_array()
             .unwrap()
             .iter()
@@ -595,10 +608,8 @@ async fn switch_tool_call_not_polluting_next_context() {
         "回合 2 120s 内未结束"
     );
 
-    let count_before = session_count(&kernel).await;
-    assert!(count_before >= 2, "切换后应至少 2 个会话：{count_before}");
-
-    // 读取活动会话：不得含 session::switch 控制消息，且切换后的回答应落在新会话。
+    // 树内分叉（ADR-0030）：switch 不新建 SessionKey，会话仍是 1 个，
+    // 但活跃路径应出现「上一会话梗概」摘要节点 = 分叉完成的标志。
     let list_frame = kernel
         .handle(rpc(32, Method::ListSessions))
         .await
@@ -632,6 +643,13 @@ async fn switch_tool_call_not_polluting_next_context() {
     };
     let msgs = detail["messages"].as_array().unwrap();
     assert!(
+        msgs.iter().any(|m| m["kind"]["kind"] == "system"
+            && m["kind"]["text"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("上一会话梗概："))),
+        "切换后应出现「上一会话梗概」摘要节点（树内分叉标志）"
+    );
+    assert!(
         msgs.iter()
             .all(|m| m["kind"]["kind"] != "tool_call" || m["kind"]["entry"] != "session::switch"),
         "新会话不应携带切换控制消息：{msgs:?}"
@@ -653,8 +671,8 @@ async fn switch_tool_call_not_polluting_next_context() {
     );
     let count_after = session_count(&kernel).await;
     assert_eq!(
-        count_after, count_before,
-        "后续回合不应再次切换会话：{count_before} → {count_after}"
+        count_after, 1,
+        "树内分叉不新建会话（ADR-0030），应始终 1 个会话：{count_after}"
     );
     eprintln!(
         "session::switch 防污染真实链路通过：活动会话 {} 条消息，无切换控制消息，后续回合不再切换",

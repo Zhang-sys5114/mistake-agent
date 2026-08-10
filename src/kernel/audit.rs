@@ -41,6 +41,17 @@ pub enum AuditRecord {
     MemoryRemove {
         path: String,
     },
+    /// 域内文件 IO（ADR-0042 DomainIo）。
+    FileIo {
+        domain: String,
+        rel: String,
+        op: String,
+    },
+    /// 附件暂存文件 IO（ADR-0042 TmpIo）。
+    StagedFileIo {
+        path: String,
+        op: String,
+    },
     SettingsChanged,
     BalanceChecked {
         main_ok: bool,

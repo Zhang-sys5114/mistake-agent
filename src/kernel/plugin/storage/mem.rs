@@ -372,3 +372,108 @@ impl AuditSink for MemoryStorage {
 }
 
 impl StorageService for MemoryStorage {}
+
+// ---------- 域内文件 IO / 暂存 IO（ADR-0042，内存模拟供测试与回退） ----------
+
+use crate::kernel::plugin::services::{Domain, DomainIo, RelPath, TmpIo};
+
+#[async_trait]
+impl DomainIo for MemoryStorage {
+    async fn read(&self, domain: Domain, rel: &RelPath) -> Result<Vec<u8>, StorageError> {
+        let inner = self.inner.lock().expect("storage poisoned");
+        let key = format!("{}/{}", domain.as_dir(), rel.as_str());
+        inner
+            .files
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| StorageError::Io(format!("内存文件不存在：{key}")))
+    }
+
+    async fn write(&self, domain: Domain, rel: &RelPath, bytes: &[u8]) -> Result<(), StorageError> {
+        let mut inner = self.inner.lock().expect("storage poisoned");
+        let key = format!("{}/{}", domain.as_dir(), rel.as_str());
+        inner.files.insert(key, bytes.to_vec());
+        Ok(())
+    }
+
+    async fn remove(&self, domain: Domain, rel: &RelPath) -> Result<(), StorageError> {
+        let mut inner = self.inner.lock().expect("storage poisoned");
+        let key = format!("{}/{}", domain.as_dir(), rel.as_str());
+        if inner.files.remove(&key).is_none() {
+            return Err(StorageError::Io(format!("内存文件不存在：{key}")));
+        }
+        Ok(())
+    }
+
+    async fn remove_tree(&self, domain: Domain, rel: &RelPath) -> Result<(), StorageError> {
+        let mut inner = self.inner.lock().expect("storage poisoned");
+        let prefix = format!("{}/{}/", domain.as_dir(), rel.as_str());
+        let exact = format!("{}/{}", domain.as_dir(), rel.as_str());
+        let keys: Vec<String> = inner
+            .files
+            .keys()
+            .filter(|k| **k == exact || k.starts_with(&prefix))
+            .cloned()
+            .collect();
+        if keys.is_empty() {
+            return Err(StorageError::Io("内存子树不存在".into()));
+        }
+        for k in keys {
+            inner.files.remove(&k);
+        }
+        Ok(())
+    }
+
+    async fn list(&self, domain: Domain) -> Result<Vec<String>, StorageError> {
+        let inner = self.inner.lock().expect("storage poisoned");
+        let prefix = format!("{}/", domain.as_dir());
+        let mut out: Vec<String> = inner
+            .files
+            .keys()
+            .filter(|k| k.starts_with(&prefix))
+            .map(|k| k[prefix.len()..].to_string())
+            .collect();
+        out.sort();
+        Ok(out)
+    }
+
+    async fn read_legacy(&self, domain: Domain, legacy_rel: &str) -> Result<Vec<u8>, StorageError> {
+        // 内存模拟：历史路径直接作 key（`domain/legacy_rel`）。
+        let inner = self.inner.lock().expect("storage poisoned");
+        let key = format!("{}/{}", domain.as_dir(), legacy_rel);
+        inner
+            .files
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| StorageError::Io(format!("内存历史文件不存在：{key}")))
+    }
+
+    async fn remove_legacy(&self, domain: Domain, legacy_rel: &str) -> Result<(), StorageError> {
+        let mut inner = self.inner.lock().expect("storage poisoned");
+        let key = format!("{}/{}", domain.as_dir(), legacy_rel);
+        if inner.files.remove(&key).is_none() {
+            return Err(StorageError::Io(format!("内存历史文件不存在：{key}")));
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl TmpIo for MemoryStorage {
+    async fn read_staged(&self, path: &str) -> Result<Vec<u8>, StorageError> {
+        let inner = self.inner.lock().expect("storage poisoned");
+        inner
+            .files
+            .get(path)
+            .cloned()
+            .ok_or_else(|| StorageError::Io(format!("内存暂存不存在：{path}")))
+    }
+
+    async fn remove_staged(&self, path: &str) -> Result<(), StorageError> {
+        let mut inner = self.inner.lock().expect("storage poisoned");
+        if inner.files.remove(path).is_none() {
+            return Err(StorageError::Io(format!("内存暂存不存在：{path}")));
+        }
+        Ok(())
+    }
+}

@@ -65,8 +65,14 @@ pub const SUPPORTED_POINTS: &[&str] = &[
 /// 按知识点 + 难度确定性生成练习条目（供 practice::generate 与 exam::compose 共用）。
 pub fn build_item(knowledge_point: &str, difficulty: Difficulty) -> Option<PracticeItem> {
     // 真题层：只走池内抽取（真实来源），不走模板与 LLM 生成。
+    // 同步路径无 storage：用内置种子兜底（主入口 practice::generate 的 Exam 分支
+    // 经 read_pool_json 读运行时数据文件，见 exam_pool.rs）。
     if difficulty == Difficulty::Exam {
-        return crate::plugin::practice::exam_pool::draw_from_pool(knowledge_point, &[]);
+        return crate::plugin::practice::exam_pool::draw_from_pool(
+            crate::plugin::practice::exam_pool::DEFAULT_POOL_JSON,
+            knowledge_point,
+            &[],
+        );
     }
     let kp = knowledge_point.trim();
     if contains_any(kp, &["三角形全等", "全等"]) {

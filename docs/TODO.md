@@ -6,6 +6,9 @@
 
 - [ ] **错题本目录化 + 事件流**（ADR-0039）：`mistakes/<id>/mistake.json + events.jsonl + schedule.json`；`graded`/`mastery_changed` 事件纯追加（带 subject/knowledge_point 冗余 + duration_seconds 可选）；bootstrap 迁移旧 `mistakes.json`（逐题原子拆 + 幂等 + `.bak` + backfill 事件）。
 - [ ] **掌握度调度与裁决**（ADR-0040）：Anki 式 schedule.json（interval/ease/due_at，错 1 次重置 7 天 / 答对 ×2）；连错 2 次打回 is_correct；`grading::update` 升级 UserAndModel Tool 只限内容字段（前端 trigger_command 零改动）；删除/管理字段保持 UserOnly。
+- [ ] **scheduler 内核插件**（ADR-0042）：`ServiceId::Scheduler` + `SchedulerHandle`（注册定时配置：interval/载荷文本/fire_on_start）；scheduler 只存配置、到点请求 kernel 核心由内核特权发起 Interrupt::Timer；kernel 核心加 pending proactive 回合队列（空闲消费）+ 白名单缺省为空 + 全局频率硬护栏。
+- [x] **数据运行时化**（ADR-0042）：数据根目录 `data/` + bootstrap 种子写入（AGENTS.md 同款幂等）；`gaokao_pool.json` 真题池从 include_str! 改运行时读取（practice 连坐）；`point_deps.json` 先验依赖表启动时模型生成一次落盘固化。✅ 已落地（2026-08-10）：真题池文件优先/种子兜底 + 真实链路测试；依赖表待场景 5 落地。
+- [x] **磁盘 IO 铁律**（ADR-0042）：`DomainIo`（域内文件，域枚举 + canonicalize 兜底 + 原子写 + 审计）+ `TmpIo`（temp 暂存白名单）+ `RelPath`（类型层无遍历）；memory 收编（中文路径 base64url 段编码）+ 旧布局启动迁移（`read_legacy/remove_legacy` 通道，幂等）；vision/grading 附件读写、practice 真题池全经 StorageHandle 语义方法；verify_geometry.py 维持 include_str!（代码非数据）。✅ 已落地（2026-08-10，live_api 9/9 真实链路复验）。
 
 ### 场景 3：多周期学习复盘
 
@@ -24,15 +27,15 @@
 
 ### 场景 5：长效查漏补缺追踪
 
-- [ ] 每学科 `mistakes/graph/<学科>.json`（sanitize + 路径校验）；先验边（模板依赖表人工标注）+ 共现边（判分批次增量）事件驱动更新；跨学科边存发起学科文件。
-- [ ] `tracking::graph_query` 工具（UserAndModel）：知识点 → 掌握度/邻居/关联错题/近期事件（Agentic RAG 落地，不做向量）。
-- [ ] 主动重测回合（ADR-0041）：30 分钟 tokio 定时器扫 due → InterruptBus 排队 / 空闲发起 proactive 回合；每知识点每天提醒 ≤1 次；拒绝则 24h 冷却。
+- [ ] 每学科 `mistakes/graph/<学科>.json`（sanitize + 路径校验；storage 持有文件、tracking 持有语义，全经 StorageHandle）；纯拓扑（节点 + 边 + 权重）可重建；共现层 = graded 事件带 batch_id（一次判分调用一批），同批知识点两两成边、权重 = 共现批次数（批内去重）、双层剪枝（写入宽松/查询严格）、无时间衰减；按学科隔离（无跨学科边）。
+- [ ] `tracking::graph_query` 工具（UserAndModel）：输入 学科 + 知识点 → 输出 mastery/neighbors（含前置方向）/related_mistakes/recent_events（属性实时聚合自 schedule/事件流，不给结论；Agentic RAG 落地，不做向量）。
+- [ ] 主动重测回合（ADR-0041/0042）：tracking 注册定时配置（30 分钟 + 载荷 + fire_on_start）→ scheduler 请求 kernel 核心 → 内核特权发起中断（回合边界排队）→ 空闲时独立 proactive 回合（不并入用户回合）；白名单缺省为空 + 模型经 `tracking::due_list` 自查（防骚扰内存态：每运行期每知识点 ≤1 次）；`tracking::dismiss` 记 24h 内存冷却；合成 user 消息（proactive 标记 + display_text 通知气泡）落当前聊天树，无活跃会话建专属提醒会话。
 - [ ] 反复丢分考点聚合视图：跨快照/跨事件统计「连续两期以上均丢分」的知识点清单（数据源：事件流时间线 + schedule），供 report/tracking 输出与图谱高亮。
-- [ ] 知识图谱力导向图：ECharts graph 渲染（数据源 graph.json）。
+- [ ] 知识图谱力导向图：`tracking::graph`（UserOnly Command）→ trigger_command 拉全图拓扑 → ECharts graph 渲染。
 
 ### 加分项
 
-- [ ] **知识图谱力导向图**：方案已定（ECharts graph + graph.json，实现见场景 5 对应项）。
+- [ ] **知识图谱力导向图**：方案已定（`tracking::graph` Command → trigger_command → ECharts graph，实现见场景 5 对应项）。
 - [ ] **错题本导出 Anki 卡组**：前端导出 tab 分隔文本（问题\t答案\t知识点标签\t错因），Anki「文件→导入」直接成卡组；PDF 复用复习清单打印。
 - [ ] **语音提问**：MediaRecorder 录音 → SiliconFlow `audio/transcriptions`（SenseVoice）→ 文本回填输入框（用户确认后发送）；**拍照讲解**：getUserMedia 进附件管线（vision::read）。
 - [ ] **手写 OCR 评测**：🔬 待测——vision::read 功能已覆盖；答辩兜底：用现有 3 套样例（含 1 真实手写）端到端跑通结果整理进 docs/testing.md 作鲁棒性证据，暂不建评测集。

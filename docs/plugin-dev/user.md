@@ -57,12 +57,23 @@ Arc::new(|call_ctx: &ToolCallContext, params: Value| Box::pin(async move { ... }
 
 | 句柄 | 可见能力 | 用途示例 |
 |---|---|---|
-| `StorageHandle` | 错题本五操作（save/get/list/update/remove） | grading 归档 |
+| `StorageHandle` | 错题本五操作（save/get/list/update/remove）**+ 附件暂存读写 + 教学数据文件读写**（见下） | grading 归档、vision 读图、practice 真题池 |
 | `ModelHandle` | 带超时/abort/审计的 `complete` | OCR、判分、组卷 |
 | `MemoryHandle` | 记忆 save/show/remove | 跨会话记忆 |
 | `ComputeHandle` | Python 验算 `run` | 数学验算 |
 
 句柄过滤是结构性的：没在 `requires` 声明就**拿不到**，运行时没有检查可绕。
+
+### 磁盘 IO 铁律（ADR-0042）
+
+**插件不持有任何文件句柄**——需要读写文件时，只能在 `requires` 里声明 `ServiceId::Storage`，经 `StorageHandle` 的语义方法调用（白名单校验、原子写、审计都在 storage 实现内，插件不可绕过）：
+
+| 方法 | 对应能力 | 用途 |
+|---|---|---|
+| `read_staged(path)` / `remove_staged(path)` | 系统 temp 附件暂存（`mistake-agent-` 前缀白名单） | vision 读图、grading 判分后清理暂存 |
+| `read_data_file(name)` / `write_data_file(name, content)` | 数据根目录 `data/` 教学数据文件（原子写） | 真题池 `gaokao_pool.json`、先验依赖表 |
+
+路径安全由 storage 保证（`RelPath` 类型校验 + canonicalize 兜底），插件传的是**文件名/暂存路径字符串**，永远不拼接真实路径、不触碰文件系统 API。不要试图用 `std::fs` 自己读文件——那正是铁律禁止的，且会被评审拦下。
 
 ## 5. 入口点与 CallerPolicy
 

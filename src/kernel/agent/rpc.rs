@@ -229,8 +229,15 @@ impl Kernel {
                 AnyStorage::Mem(crate::kernel::plugin::storage::MemoryStorage::new())
             }
         });
-        let memory: Arc<dyn MemoryService> = match FileMemoryService::open_default() {
-            Ok(file_memory) => Arc::new(file_memory),
+        let memory: Arc<dyn MemoryService> = match FileMemoryService::open_default(storage.clone())
+        {
+            Ok(file_memory) => {
+                // 旧存储布局迁移（ADR-0042）：中文路径 → base64url 段编码；失败不阻塞启动。
+                if let Err(e) = file_memory.migrate_legacy_layout().await {
+                    eprintln!("[kernel] 记忆布局迁移失败（继续启动）：{e}");
+                }
+                Arc::new(file_memory)
+            }
             Err(e) => {
                 eprintln!("[kernel] 记忆目录打开失败，回退内存记忆：{e}");
                 Arc::new(InMemoryMemory::new())
@@ -253,7 +260,9 @@ impl Kernel {
             vision_service.clone() as Arc<dyn crate::kernel::plugin::services::ModelService>,
         ));
         let handles = ServiceHandles::default()
-            .with_storage(StorageHandle::new(storage.clone()))
+            .with_storage(
+                StorageHandle::new(storage.clone()).with_io(storage.clone(), storage.clone()),
+            )
             .with_memory(MemoryHandle::with_observability(
                 memory.clone(),
                 events.clone(),
