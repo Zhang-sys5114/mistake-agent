@@ -14,7 +14,7 @@
 
 ### 落地形态（双 trait + 类型安全路径）
 
-- **`DomainIo`**（`services.rs`）：数据根目录域内文件能力（`read/write/remove/remove_tree/list`，域 = `Domain` 枚举：mistakes/sessions/memory/data/uploads）；实现（storage）内部负责域根拼接 + `dunce::canonicalize` 兜底（防符号链接逃逸、Windows `\\?\` verbatim）+ 原子写（tmp + rename）+ 审计（`AuditRecord::FileIo`）。用户插件永不持有本 trait——只见 `StorageHandle` 语义方法（`read_staged/remove_staged/read_data_file/write_data_file`，均记审计）。
+- **`DomainIo`**（`plugin/services/storage.rs`）：数据根目录域内文件能力（`read/write/remove/remove_tree/list`，域 = `Domain` 枚举：mistakes/sessions/memory/data/uploads）；实现（storage）内部负责域根拼接 + `dunce::canonicalize` 兜底（防符号链接逃逸、Windows `\\?\` verbatim）+ 原子写（tmp + rename）+ 审计（`AuditRecord::FileIo`）。用户插件永不持有本 trait——只见 `StorageHandle` 语义方法（`read_staged/remove_staged/read_data_file/write_data_file`，均记审计）。
 - **`TmpIo`**：系统 temp 暂存文件能力（`read_staged/remove_staged`），硬编码 `std::env::temp_dir()` + `mistake-agent-` 前缀白名单，与 DomainIo 解耦、不做目录管理；读删记 `AuditRecord::StagedFileIo`。附件暂存（vision 读、grading 删）从插件直读文件改为经本 trait（原 `stage_path_allowed` 白名单逻辑搬入实现，唯一实现点）。
 - **`RelPath`**（类型安全路径）：构造即校验——段必须以 `[a-zA-Z0-9]` 开头结尾、中间仅 `[a-zA-Z0-9._-]`；空段、`.`、`..`、尾点/首点、`\`、`:`、非 ASCII（同形字符攻击面）全部拒绝。**不做任何路径语义解析/规范化**（规范化即攻击面），fail-closed：parse 失败即调用失败。类型上不可能表示目录遍历。
 - **用户插件零文件句柄**：vision/grading/practice 全部经 StorageHandle 语义方法；practice 真题池改运行时（见 §3）；main.rs GUI 壳非插件、保留自有 canonicalize 白名单。

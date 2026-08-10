@@ -12,7 +12,7 @@
 
 ## 2. 目录形态与规则
 
-- 一个插件一个文件夹：`src/plugin/<name>/`，入口必须是 `mod.rs`；内部可拆子模块（如 `grading/core.rs`、`practice/templates.rs`）。
+- 一个插件一个文件夹：`src/plugin/<name>/`，入口必须是 `mod.rs`；内部可拆子模块（如 `grading/core.rs`、`practice/templates/mod.rs`）。
 - **职责先行**：开发时先规划职责；预计有两个及以上职责时，直接创建对应子模块或同名文件夹，不要先把不同职责堆进 `mod.rs` 再被动拆分。入口 `mod.rs` 只负责插件契约、装配和公共重导出；~400 行只是审查预警线，不是拆分触发条件。
 - **目录即插件**：build.rs 扫描一层子目录里存在 `mod.rs` 的文件夹即收录，字母序生成清单。
 - **禁用/WIP**：目录根部放一个空文件 `disabled`，整个目录**不参与编译、不注册**；删掉即恢复。写一半的代码可以安全放这里。
@@ -97,4 +97,4 @@ Arc::new(|call_ctx: &ToolCallContext, params: Value| Box::pin(async move { ... }
 
 - 参考模板：[reference/user-plugin/](./reference/user-plugin/mod.rs)（有编译锚定测试保证与契约同步）；
 - 内核插件（特权子系统）写法：[kernel.md](./kernel.md)；
-- 契约与 RPC 细节：docs/api.md；服务契约：src/kernel/plugin/services.rs。
+- 契约与 RPC 细节：[docs/api.md](../api.md)；服务契约：`src/kernel/plugin/services/`。
