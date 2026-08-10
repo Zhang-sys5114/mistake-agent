@@ -54,7 +54,9 @@ cargo run --bin mistake-agent
 | settings.json | 模型配置与 key（用户独占写） |
 | sessions/<key>.jsonl | 会话消息树（首行元数据） |
 | mistakes/mistakes.json | 错题本 |
-| memory/ | 记忆条目（文件持久化，路径即层级） |
+| memory/ | 记忆条目（文件持久化；中文路径编码落盘，应用层路径不变） |
+| uploads/ | 作业附件持久副本 |
+| data/ | 运行时教学数据（真题池等） |
 | audit/audit.jsonl | 审计（10MB 轮转） |
 | logs/ | 分级诊断日志（10MB 轮转） |
 

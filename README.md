@@ -14,6 +14,7 @@
 
 ## 插件开发
 
+- Kernel 开发手册：[docs/kernel-dev.md](docs/kernel-dev.md)
 - 用户插件手册：[docs/plugin-dev/user.md](docs/plugin-dev/user.md)
 - 内核插件手册：[docs/plugin-dev/kernel.md](docs/plugin-dev/kernel.md)
 - 参考模板（复制即开工，构建期自动发现）：[docs/plugin-dev/reference/](docs/plugin-dev/reference/)
@@ -137,6 +138,7 @@ cd web && node scripts/katex-check.mjs      # LaTeX 渲染链路自检
 | `mistakes/` | 错题本 |
 | `memory/` | 跨会话记忆 |
 | `uploads/` | 作业附件持久副本（图片/PDF 展示用） |
+| `data/` | 运行时教学数据（真题池、依赖表等） |
 | `audit/` | 审计（10MB 轮转） |
 | `logs/` | 分级诊断日志 |
 
@@ -144,6 +146,7 @@ cd web && node scripts/katex-check.mjs      # LaTeX 渲染链路自检
 
 - [PROJECT.md](PROJECT.md) — 项目总览（唯一入门文档）
 - [CONTEXT.md](CONTEXT.md) — 术语表
+- [docs/kernel-dev.md](docs/kernel-dev.md) — Kernel 生命周期、模块职责与扩展边界
 - [docs/api.md](docs/api.md) — GUI ↔ kernel RPC 协议与真实模型对接
 - [docs/build.md](docs/build.md) — 构建流程与 Pyodide 离线包步骤
 - [docs/adr/](docs/adr/) — 架构决策记录（42 条）

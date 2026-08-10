@@ -40,7 +40,7 @@
 2. 一致性：按 answer_spec 求出的答案与题目宣称一致。
 3. 自洽性：角度和、边长三角不等式、特殊位置关系（切线垂直半径等）。
 
-校验失败 → 换参数重出；连续失败 N 次即停（复用工具护栏语义）。ComputeService 契约已在 services.rs 就位（UnavailableCompute 占位，M4 接 GUI Pyodide）。
+校验失败 → 换参数重出；连续失败 N 次即停（复用工具护栏语义）。`ComputeService` 契约位于 `src/kernel/plugin/services/compute.rs`（UnavailableCompute 占位，生产实现接 GUI Pyodide）。
 
 ## 4. UI 渲染（怎么画图）
 

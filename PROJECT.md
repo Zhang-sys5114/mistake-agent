@@ -174,15 +174,17 @@ mistake-agent/
 │   ├── lib.rs                    ← 库出口（kernel 公开面 + plugin 注册聚合）
 │   ├── main.rs                   ← Tauri GUI 入口（进程内 kernel，standalone）
 │   ├── kernel.rs                 ← kernel 模块入口（mod kernel;）
-│   ├── kernel/                   ← 内核（Rust 2018 布局，目录即模块）
+│   ├── kernel/                   ← 内核（目录即模块，职责先行）
 │   │   ├── agent/                ← Agent 核心调度层
-│   │   │   ├── loop_mod.rs       ← agent loop（护栏/压缩/中断消费）
-│   │   │   ├── session.rs        ← 会话调度（Goal/切换决策/树内分叉 + 摘要边界）
-│   │   │   ├── dispatch.rs  rpc.rs  balance.rs  cache.rs
+│   │   │   ├── loop_mod/         ← agent loop（主循环/回合类型/测试）
+│   │   │   ├── session/          ← 会话调度（guard/summarize/interrupt/scheduler）
+│   │   │   ├── rpc/              ← RPC（协议/处理器/组装）
+│   │   │   └── dispatch.rs  balance.rs  cache.rs
 │   │   ├── plugin/               ← 内核插件层（一插件一文件夹，mod.rs 承载插件 info）
-│   │   │   ├── services.rs       ← 内核插件公共契约（服务 trait + 受控句柄）
+│   │   │   ├── services/         ← 公共契约（model/storage/memory/compute）
 │   │   │   └── storage/  memory/  compute/  model/  session/
-│   │   ├── registry.rs  contract.rs  context.rs
+│   │   ├── registry/             ← 注册表（entry/mod/tests）
+│   │   ├── contract.rs  context.rs
 │   │   └── events.rs  audit.rs  logger.rs  message.rs  prompt.rs  settings.rs
 │   └── plugin.rs                 ← 用户插件入口（mod plugin;）
 │       └── plugin/               ← 用户插件（hello/ vision/ grading/ practice/ report/ exam/ tracking/）
