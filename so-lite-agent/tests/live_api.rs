@@ -3,12 +3,13 @@
 
 use so_lite_agent::message::Message;
 use so_lite_agent::model::build_provider;
-use so_lite_agent::services::{AbortSignal, ModelKind, ModelRequest, ModelService};
+use so_lite_agent::services::{AbortSignal, ModelKind, ModelRequest};
 
 #[tokio::test]
 #[ignore]
 async fn deepseek_responses_turn() {
-    let url = std::env::var("SO_LITE_API_URL").unwrap_or_else(|_| "https://api.deepseek.com".into());
+    let url =
+        std::env::var("SO_LITE_API_URL").unwrap_or_else(|_| "https://api.deepseek.com".into());
     let key = std::env::var("SO_LITE_API_KEY").expect("缺少 SO_LITE_API_KEY");
     let model = std::env::var("SO_LITE_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".into());
     let svc = build_provider("responses", &url, &key, &model).expect("responses provider 构建失败");

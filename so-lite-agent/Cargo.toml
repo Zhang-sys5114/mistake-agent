@@ -3,6 +3,11 @@ name = "so-lite-agent"
 version = "0.1.0"
 edition = "2024"
 description = "通用轻量 Agent 运行时：agent loop / 工具注册 / 会话 / 模型 Provider 抽象 / 通用 RPC，cargo add 即用"
+license = "AGPL-3.0"
+readme = "README.md"
+documentation = "https://docs.rs/so-lite-agent"
+keywords = ["agent", "llm", "rpc", "runtime", "tool-calling"]
+categories = ["development-tools", "web-programming"]
 
 [dependencies]
 async-trait = "0.1.91"

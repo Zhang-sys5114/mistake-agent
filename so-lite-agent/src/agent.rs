@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::audit::{AuditRecord, Auditor};
 use crate::contract::{ToolError, ToolErrorCode};
@@ -258,7 +258,8 @@ impl AgentLoop {
                 }
                 let wire_name = acc.name.clone();
                 let full_name = self.dispatch.resolve_wire(&wire_name).unwrap_or_default();
-                let params: Value = serde_json::from_str(&acc.arguments).unwrap_or(Value::Null);
+                let params: Value =
+                    serde_json::from_str(&acc.arguments).unwrap_or_else(|_| json!({}));
                 self.events.emit(Event::ToolStart {
                     entry: full_name.clone(),
                     icon: self.dispatch.entry_icon(&full_name),

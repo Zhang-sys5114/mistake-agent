@@ -19,8 +19,7 @@ use crate::services::{
     ModelStream, ResponseFormat, TokenUsage, ToolCallSpec, ToolChoice, ToolSchema,
 };
 
-pub type ProviderFactory =
-    Arc<dyn Fn(&str, &str, &str) -> Arc<dyn ModelService> + Send + Sync>;
+pub type ProviderFactory = Arc<dyn Fn(&str, &str, &str) -> Arc<dyn ModelService> + Send + Sync>;
 
 static PROVIDERS: OnceLock<RwLock<HashMap<String, ProviderFactory>>> = OnceLock::new();
 
@@ -240,9 +239,7 @@ impl AnthropicModelService {
             .messages
             .iter()
             .filter_map(|m| match &m.kind {
-                MessageKind::User { text, .. } => {
-                    Some(json!({"role": "user", "content": text}))
-                }
+                MessageKind::User { text, .. } => Some(json!({"role": "user", "content": text})),
                 MessageKind::Assistant { text } => {
                     Some(json!({"role": "assistant", "content": text}))
                 }
@@ -700,8 +697,9 @@ fn messages_to_cc(messages: &[Message]) -> Vec<Value> {
                 }));
                 let output = match result {
                     Ok(v) => serde_json::to_string(v).unwrap_or_else(|_| "{}".into()),
-                    Err(e) => serde_json::to_string(&json!({"error": e}))
-                        .unwrap_or_else(|_| "{}".into()),
+                    Err(e) => {
+                        serde_json::to_string(&json!({"error": e})).unwrap_or_else(|_| "{}".into())
+                    }
                 };
                 out.push(json!({
                     "role": "tool",
@@ -786,19 +784,21 @@ mod tests {
     #[tokio::test]
     async fn provider_registry_builds_builtins() {
         let svc = build_provider("openai", "http://localhost", "k", "m").unwrap();
-        assert!(svc.complete(
-            &ModelRequest {
-                model: crate::services::ModelKind::Main,
-                messages: vec![Message::user("hi")],
-                tools: None,
-                reasoning_effort: None,
-                response_format: None,
-                tool_choice: None,
-            },
-            &AbortSignal::new(),
-        )
-        .await
-        .is_err());
+        assert!(
+            svc.complete(
+                &ModelRequest {
+                    model: crate::services::ModelKind::Main,
+                    messages: vec![Message::user("hi")],
+                    tools: None,
+                    reasoning_effort: None,
+                    response_format: None,
+                    tool_choice: None,
+                },
+                &AbortSignal::new(),
+            )
+            .await
+            .is_err()
+        );
     }
 
     #[tokio::test]

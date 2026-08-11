@@ -202,7 +202,7 @@ mistake-agent/
 - **磁盘 IO 铁律 + 数据运行时化落地**（2026-08-10，ADR-0042）：`DomainIo`（数据根目录域内文件：域枚举 + canonicalize 兜底 + 原子写 + 审计）+ `TmpIo`（系统 temp 暂存：`mistake-agent-` 前缀白名单）+ `RelPath`（类型层无目录遍历，fail-closed）；memory 收编（中文路径 base64url 段编码经 DomainIo 落盘）；vision/grading 附件读写、practice 真题池全经 StorageHandle 语义方法（插件零文件句柄）；`data/` 子目录 + 真题池运行时化（`gaokao_pool.json` 文件优先、内置种子兜底，`read_pool_json` 真实链路测试）；verify_geometry.py 维持 include_str!（执行代码非数据）。
 - kernel：注册表/两段式契约（用户插件 UserPlugin + 内核插件 KernelPlugin，ADR-0035）/dispatch/loop/RPC/session 调度全链路；四服务全部生产实现——storage（文件持久化：会话 JSONL/错题 JSON/审计 JSONL 轮转）、memory（文件持久化 + MemoryHandle 事件/审计）、model（Responses API + Chat Completions，LiveSettingsModelService 热更新）、compute（BridgeCompute → GUI Pyodide）。
 - 构建期插件自动发现（ADR-0036）：插件目录 `mod.rs` 即插件描述、`disabled` 标记即禁用（不编译不注册）；插件开发手册 + 参考模板（docs/plugin-dev/，复制即开工，include! 编译锚定测试保证与契约同步）。
-- **ADR-0037 剥离落地中**：M1（本仓库解耦：system_prompt 注入、ConfigChanged、错题领域移到 `src/mistake.rs`、RPC 通用子集 + KernelBuilder）与 M2（本地独立 crate `so-lite-agent/` + MockModelService/InMemorySessionStore + hello 示例）已落地；M3-M5（Provider 适配器/真实 API、插件手册迁移、crates.io 发布与 mistake-agent 切换）待办，详见 [docs/plan/so-lite-agent.md](plan/so-lite-agent.md)。
+- **ADR-0037 剥离落地中**：M1（本仓库解耦）与 M2（本地独立 crate `so-lite-agent/`）已落地；M3 Provider 层（`register_provider` + 内置适配器）与 M4 插件手册/双插件验收已落地；M5（crates.io 发布与 mistake-agent 切换）待办，详见 [docs/plan/so-lite-agent.md](plan/so-lite-agent.md)。
 - DeepSeek thinking 回传修复：并行工具调用回放按调用复制 reasoning item（实测 DeepSeek 要求每个 function_call 前都有 reasoning），仍被拒时兜底剥离 reasoning + `effort=none` 重试；真实 API 复验通过。
 - 会话切换决策归主模型（ADR-0030/0032）：新消息先判断是否切换上下文、回合内 session::switch、回合末 LlmTurnDecider；消息树编辑/切分支（derive_branch/switch_branch）、上下文压缩（75% 阈值、最近 15 条保留）、InterruptBus 回合边界消费全部落地；审计记录点补齐（含 SessionSwitched/Memory*/SettingsChanged/Interrupt/MessageEdited/BranchSwitched）。
 - 聊天页上下文缓存命中率（ADR-0033）：get_cache_stats 按会话 + 全局聚合主模型回合 usage（Responses `cached_tokens` / Chat Completions `prompt_cache_*`）；真实链路实测命中率 97.3%（命中 4864 / 未命中 190 tokens）。
@@ -228,7 +228,7 @@ mistake-agent/
 | M5 | 消息树 / 记忆路由 / 设置向导 / 审计日志 | ✅ 完成：编辑/切分支、memory 工具、设置页、审计补全 |
 | M6 | Windows 打包 + 测试 + 文档 | ✅ 完成：121 单测 + 真实 API 链路 + 文档同步；Windows setup.exe 安装运行实测通过（2026-08-09） |
 
-后续计划：**M7 = Agent core 剥离为 `so-lite-agent` crate**（ADR-0037，进行中）——M1/M2 已落地，M3-M5 待办；参考 Pi 分层，开箱即用，内核/用户插件由使用方编写；实施顺序见 [docs/plan/so-lite-agent.md](plan/so-lite-agent.md)。
+后续计划：**M7 = Agent core 剥离为 `so-lite-agent` crate**（ADR-0037，进行中）——M1-M4 已落地，M5 待办；参考 Pi 分层，开箱即用，内核/用户插件由使用方编写；实施顺序见 [docs/plan/so-lite-agent.md](plan/so-lite-agent.md)。
 
 产品路线图（规划中，未排期）：
 

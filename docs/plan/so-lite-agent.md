@@ -1,6 +1,6 @@
 # 后续计划：Agent core 剥离为 `so-lite-agent` crate
 
-> 状态：M1/M2 已落地（2026-08-11），M3-M5 待办。决策记录见 [ADR-0037](../adr/0037-so-lite-agent-crate-extraction.md)。
+> 状态：M1-M4 已落地（2026-08-11），M5 待办。决策记录见 [ADR-0037](../adr/0037-so-lite-agent-crate-extraction.md)。
 
 ## 目标
 
@@ -63,9 +63,9 @@ let kernel = KernelBuilder::new()
 |---|---|---|
 | M1 | 本仓库解耦准备（上表清单） | ✅ 已落地：行为不变，123 单测 + clippy -D warnings 全绿（live_api 为 ignored，未跑真实 API） |
 | M2 | 新仓库骨架：搬通用模块 + 默认服务 | ✅ 已落地：`so-lite-agent/` 独立 crate，`cargo test` 1 个集成测试 + `cargo run --example hello` 跑通 mock 回合 |
-| M3 | Provider 层：内置适配器 + register_provider | DeepSeek 真实 API 回合通过 |
-| M4 | 通用 RPC + KernelBuilder 定型；插件手册/参考模板迁移到新仓库 | 使用方按手册写一个内核插件 + 一个用户插件并注册跑通 |
-| M5 | 发布 crates.io（0.x）；mistake-agent 切到新 crate 消费，删除本仓库重复代码 | 双端回归通过 |
+| M3 | Provider 层：内置适配器 + register_provider | ✅ 已落地：`register_provider()` + `openai/responses/anthropic` 适配器；本地 SSE 测试通过；真实 API 测试为 ignored（需 `SO_LITE_API_*`） |
+| M4 | 通用 RPC + KernelBuilder 定型；插件手册/参考模板迁移到新仓库 | ✅ 已落地：插件手册随 crate（`so-lite-agent/docs/plugin-dev/`）；内核 + 用户插件双注册跑通测试 |
+| M5 | 发布 crates.io（0.x）；mistake-agent 切到新 crate 消费，删除本仓库重复代码 | ⏳ 待办：`cargo package` 已通过；crates.io 上传需网络/凭据，mistake-agent 切换是大手术，需单独排期 |
 
 ## 风险与约定
 
