@@ -18,13 +18,15 @@ use crate::kernel::plugin::services::{
     AbortSignal, ItemKind, ModelChunk, ModelKind, ModelRequest, ModelService, TokenUsage,
     ToolChoice, ToolSchema,
 };
-use crate::kernel::prompt::agent_system_prompt;
+
+/// 系统提示提供者：人格/教学规则注入点，替代 loop 直接调用静态 prompt。
+pub type SystemPromptProvider = Arc<dyn Fn() -> String + Send + Sync>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InterruptReason {
     ModelUnavailable,
-    SettingsChanged,
+    ConfigChanged,
     AuditFailure,
     PluginRequested(String),
 }
@@ -121,6 +123,7 @@ pub struct AgentLoop {
     max_consecutive_failures: usize,
     summarizer: Arc<dyn Summarizer>,
     bus: InterruptBus,
+    system_prompt: SystemPromptProvider,
     /// 压缩阈值（按 token 粗估：字符数/2；达 75% 触发）。
     context_limit_tokens: usize,
     /// 压缩时保留的最近消息条数。
@@ -137,6 +140,7 @@ impl AgentLoop {
         events: Arc<dyn EventSink>,
         summarizer: Arc<dyn Summarizer>,
         bus: InterruptBus,
+        system_prompt: SystemPromptProvider,
         switcher: Option<Arc<dyn SessionSwitch>>,
     ) -> Self {
         Self {
@@ -148,6 +152,7 @@ impl AgentLoop {
             max_consecutive_failures: 3,
             summarizer,
             bus,
+            system_prompt,
             context_limit_tokens: 131_072,
             compaction_keep_last: 15,
             switcher,
@@ -198,7 +203,7 @@ impl AgentLoop {
             }
 
             // 系统提示每次请求注入（不落消息树），保证无状态 API 拿到完整人格设定。
-            let mut req_messages = vec![Message::system(agent_system_prompt())];
+            let mut req_messages = vec![Message::system((self.system_prompt)())];
             req_messages.extend(conversation.iter().cloned());
             let mut request = ModelRequest {
                 model: ModelKind::Main,
@@ -586,7 +591,7 @@ fn interrupt_name(interrupt: &crate::kernel::agent::session::Interrupt) -> Strin
     match interrupt {
         crate::kernel::agent::session::Interrupt::SessionSwitched { .. } => "session_switched",
         crate::kernel::agent::session::Interrupt::GoalUpdated { .. } => "goal_updated",
-        crate::kernel::agent::session::Interrupt::SettingsChanged => "settings_changed",
+        crate::kernel::agent::session::Interrupt::ConfigChanged => "config_changed",
         crate::kernel::agent::session::Interrupt::MemoryChanged { .. } => "memory_changed",
         crate::kernel::agent::session::Interrupt::CompactionDone { .. } => "compaction_done",
     }
@@ -681,6 +686,7 @@ mod tests {
                 events.clone(),
                 Arc::new(StubSummarizer),
                 bus,
+                Arc::new(|| "你是测试 Agent".to_string()),
                 None,
             )
             .with_compaction_limits(context_limit, 2),
@@ -740,7 +746,7 @@ mod tests {
     #[tokio::test]
     async fn turn_boundary_consumes_interrupts_and_audits() {
         let bus = InterruptBus::new();
-        bus.send(Interrupt::SettingsChanged);
+        bus.send(Interrupt::ConfigChanged);
         bus.send(Interrupt::MemoryChanged {
             path: "数学/函数".into(),
         });
@@ -761,7 +767,7 @@ mod tests {
         assert_eq!(interrupts.len(), 2);
         assert!(records.iter().any(|r| matches!(
             r,
-            AuditRecord::Interrupt { name, .. } if name == "settings_changed"
+            AuditRecord::Interrupt { name, .. } if name == "config_changed"
         )));
     }
 }

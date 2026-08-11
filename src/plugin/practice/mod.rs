@@ -326,7 +326,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_llm_fallback_returns_item() {
-        let (model, memory, compute) = fake_handle(
+        let (model, memory, _) = fake_handle(
             r#"{"knowledge_point":"数列","question_text":"求等差数列 $1,4,7,\\ldots$ 的第 10 项。","answer_spec":"$a_{10}=28$","diagram_spec":null}"#,
         );
         let out = generate_handler(
@@ -412,7 +412,7 @@ mod tests {
     #[tokio::test]
     async fn generate_skips_mastered_template_via_llm() {
         // 预置：triangle_sss 近期已答对（已掌握）。
-        let (model, memory, compute) = fake_handle(
+        let (model, memory, _) = fake_handle(
             r#"{"knowledge_point":"三角形全等判定","question_text":"如图，在 △ABC 与 △DEF 中，AB=DE，∠A=∠D，AC=DF，请判断全等并说明依据。","answer_spec":"全等（SAS）","diagram_spec":null}"#,
         );
         record_attempt(
@@ -444,7 +444,7 @@ mod tests {
     #[tokio::test]
     async fn generate_llm_geometry_checked_ok() {
         // LLM 返回带图形规格的题，compute 校验通过 → geometry_checked=true。
-        let (model, memory, compute) = fake_handle(
+        let (model, memory, _) = fake_handle(
             r#"{"knowledge_point":"圆与切线","question_text":"如图，PA 是圆 O 的切线。","answer_spec":"PA⊥OA","diagram_spec":{"points":{"O":[0,0],"A":[3,0],"P":[3,4]},"objects":[{"type":"circle","center":"O","radius":3},{"type":"segment","ends":["O","A"]},{"type":"segment","ends":["A","P"]}],"labels":["O","A","P"]}}"#,
         );
         let out = generate_handler(

@@ -1,14 +1,16 @@
-//! RPC（ADR-0013 / Q15）：stdio JSONL，JSON-RPC 2.0 风格（id + notification）。
+﻿//! RPC（ADR-0013 / Q15）：stdio JSONL，JSON-RPC 2.0 风格（id + notification）。
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use crate::kernel::agent::cache::CacheTracker;
 use crate::kernel::agent::dispatch::Dispatch;
-use crate::kernel::agent::loop_mod::{AgentLoop, TurnInput, TurnOutcome};
+use crate::kernel::agent::loop_mod::{AgentLoop, SystemPromptProvider, TurnInput, TurnOutcome};
 use crate::kernel::agent::session::{
     Interrupt, InterruptBus, LlmSummarizer, LlmTurnDecider, SessionKey, SessionScheduler,
     SessionStatus, SessionSwitch, SystemClock, scope_session_context,
@@ -26,12 +28,13 @@ use crate::kernel::plugin::services::{
     ModelService, ServiceHandles, SessionStore, StorageHandle,
 };
 use crate::kernel::plugin::storage::{AnyStorage, FileStorage};
-use crate::kernel::registry::Registry;
+use crate::kernel::registry::{KernelDescriptor, PluginDescriptor, Registry};
 use crate::kernel::settings::Settings;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum Method {
+    /// 通用子集：新 Agent 直接可用，不依赖使用方业务。
     SendUserMessage {
         text: String,
         /// 显式工具调用：强制 LLM 首轮调用指定工具（不绕过 LLM）。
@@ -57,19 +60,6 @@ pub enum Method {
     },
     Abort,
     GetState,
-    GetSettings,
-    SetSettings {
-        patch: crate::kernel::settings::SettingsPatch,
-    },
-    /// GUI 验算执行端回执（compute 桥接）。
-    ComputeResult {
-        /// 与 RPC 请求帧顶层 id 区分，前端按 compute_id 回执。
-        #[serde(rename = "compute_id")]
-        id: u64,
-        stdout: String,
-        stderr: String,
-        duration_ms: u64,
-    },
     /// 会话列表（GUI 会话历史页）。
     ListSessions,
     /// 读取指定会话完整消息树（GUI 历史浏览/分支回放）。
@@ -78,25 +68,58 @@ pub enum Method {
     },
     /// 用户可调工具/命令清单（GUI 工具面板）。
     ListTools,
-    /// 连通性自检：主/视觉模型轻量调用（OOBE 引导"测试连接"用）。
-    /// 可携带表单中的临时 api_key（不落盘，仅本次请求生效）；model 取 "main"/"vision"。
-    TestConnection {
-        #[serde(default)]
-        api_key: Option<String>,
-        #[serde(default)]
-        model: Option<String>,
-    },
-    /// 账户余额查询：DeepSeek /user/balance + SiliconFlow /user/info（只读，不落盘 key）。
-    CheckBalance,
-    /// 聊天上下文缓存命中统计（主模型回合调用累计，按会话 + 全局）。
-    GetCacheStats,
+}
+
+/// 自定义方法兜底：未知 method 名连同 params 与其余字段一起交给 `RpcExtension`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomMethod {
+    pub method: String,
+    #[serde(default)]
+    pub params: Value,
+    /// 前端可能直接把方法字段平铺在请求顶层（如 compute_result 的 compute_id），
+    /// 这里保留全部多余字段，供扩展实现按原 wire 形状解析。
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// RPC 请求承载：通用子集优先匹配，其余走自定义兜底（保持既有 wire 兼容）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WireMethod {
+    Generic(Method),
+    Custom(CustomMethod),
+}
+
+impl From<Method> for WireMethod {
+    fn from(method: Method) -> Self {
+        Self::Generic(method)
+    }
+}
+
+impl WireMethod {
+    pub fn custom(method: impl Into<String>, params: Value) -> Self {
+        Self::Custom(CustomMethod {
+            method: method.into(),
+            params,
+            extra: BTreeMap::new(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RpcRequest {
     pub id: u64,
     #[serde(flatten)]
-    pub method: Method,
+    pub method: WireMethod,
+}
+
+impl RpcRequest {
+    pub fn custom(id: u64, method: impl Into<String>, params: Value) -> Self {
+        Self {
+            id,
+            method: WireMethod::custom(method, params),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +135,32 @@ impl RpcError {
             message: message.into(),
         }
     }
+}
+
+/// 自定义 RPC 扩展：通用子集之外的方法由使用方注册，返回 `Ok(None)` 表示不处理。
+#[async_trait]
+pub trait RpcExtension: Send + Sync {
+    async fn handle(&self, method: &str, params: Value) -> Result<Option<Value>, RpcError>;
+}
+
+/// 把自定义请求的 `params` 与平铺多余字段合并，兼容新旧两种 wire 形状。
+fn custom_params(c: &CustomMethod) -> Value {
+    if c.extra.is_empty() {
+        return c.params.clone();
+    }
+    let mut map = match &c.params {
+        Value::Object(obj) => obj.clone(),
+        Value::Null => serde_json::Map::new(),
+        other => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("params".into(), other.clone());
+            obj
+        }
+    };
+    for (k, v) in &c.extra {
+        map.insert(k.clone(), v.clone());
+    }
+    Value::Object(map)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,16 +250,352 @@ pub struct Kernel {
     store: Arc<dyn SessionStore>,
     auditor: Auditor,
     events: Arc<dyn EventSink>,
-    compute: Arc<BridgeCompute>,
-    settings: Arc<std::sync::RwLock<Settings>>,
-    main_service: Arc<LiveSettingsModelService>,
-    vision_service: Arc<LiveSettingsModelService>,
     state: Arc<Mutex<KernelState>>,
     cache: Arc<CacheTracker>,
+    extensions: Vec<Arc<dyn RpcExtension>>,
+}
+
+/// 通用 Kernel 装配入口：事件、句柄、插件、系统提示与 RPC 扩展都经 builder 注入，
+/// 应用专属服务（FileStorage/LiveSettingsModelService/AppRpc…）由使用方在 `Kernel::new`
+/// 或自己的装配函数中构造后传入。
+pub struct KernelBuilder {
+    events: Arc<dyn EventSink>,
+    system_prompt: SystemPromptProvider,
+    handles: ServiceHandles,
+    store: Option<Arc<dyn SessionStore>>,
+    main_model: Option<Arc<dyn ModelService>>,
+    auditor: Option<Auditor>,
+    cache: Option<Arc<CacheTracker>>,
+    interrupt_bus: InterruptBus,
+    kernel_plugins: Vec<KernelDescriptor>,
+    user_plugins: Vec<PluginDescriptor>,
+    extensions: Vec<Arc<dyn RpcExtension>>,
+}
+
+impl Default for KernelBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl KernelBuilder {
+    pub fn new() -> Self {
+        Self {
+            events: Arc::new(crate::kernel::events::MemoryEventSink::default()),
+            system_prompt: Arc::new(String::new),
+            handles: ServiceHandles::default(),
+            store: None,
+            main_model: None,
+            auditor: None,
+            cache: None,
+            interrupt_bus: InterruptBus::new(),
+            kernel_plugins: Vec::new(),
+            user_plugins: Vec::new(),
+            extensions: Vec::new(),
+        }
+    }
+
+    pub fn event_sink(mut self, events: Arc<dyn EventSink>) -> Self {
+        self.events = events;
+        self
+    }
+
+    pub fn system_prompt(mut self, provider: SystemPromptProvider) -> Self {
+        self.system_prompt = provider;
+        self
+    }
+
+    pub fn service_handles(mut self, handles: ServiceHandles) -> Self {
+        self.handles = handles;
+        self
+    }
+
+    pub fn session_store(mut self, store: Arc<dyn SessionStore>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    pub fn main_model(mut self, model: Arc<dyn ModelService>) -> Self {
+        self.main_model = Some(model);
+        self
+    }
+
+    pub fn auditor(mut self, auditor: Auditor) -> Self {
+        self.auditor = Some(auditor);
+        self
+    }
+
+    pub fn cache(mut self, cache: Arc<CacheTracker>) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+
+    pub fn interrupt_bus(mut self, bus: InterruptBus) -> Self {
+        self.interrupt_bus = bus;
+        self
+    }
+
+    pub fn register_kernel_plugin(mut self, desc: KernelDescriptor) -> Self {
+        self.kernel_plugins.push(desc);
+        self
+    }
+
+    pub fn register_plugin(mut self, desc: PluginDescriptor) -> Self {
+        self.user_plugins.push(desc);
+        self
+    }
+
+    pub fn register_kernel_plugins(mut self, descs: Vec<KernelDescriptor>) -> Self {
+        self.kernel_plugins.extend(descs);
+        self
+    }
+
+    pub fn register_plugins(mut self, descs: Vec<PluginDescriptor>) -> Self {
+        self.user_plugins.extend(descs);
+        self
+    }
+
+    pub fn extension(mut self, ext: Arc<dyn RpcExtension>) -> Self {
+        self.extensions.push(ext);
+        self
+    }
+
+    pub async fn build(self) -> Result<Arc<Kernel>, String> {
+        let store = self
+            .store
+            .ok_or_else(|| "KernelBuilder 缺少 session_store".to_string())?;
+        let main_model = self
+            .main_model
+            .ok_or_else(|| "KernelBuilder 缺少 main_model".to_string())?;
+        let auditor = self
+            .auditor
+            .ok_or_else(|| "KernelBuilder 缺少 auditor".to_string())?;
+        let cache = self.cache.unwrap_or_default();
+
+        let logger: LoggerHandle = Arc::new(Logger);
+        let registry = Arc::new(Registry::new(self.handles, logger));
+        for desc in self.kernel_plugins {
+            registry
+                .register_kernel_plugin(desc)
+                .map_err(|e| format!("内核插件注册失败：{e}"))?;
+        }
+        for desc in self.user_plugins {
+            registry
+                .register_plugin(desc)
+                .map_err(|e| format!("插件注册失败：{e}"))?;
+        }
+
+        let dispatch = Arc::new(Dispatch::new(
+            registry.clone(),
+            auditor.clone(),
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(10 * 60),
+            self.events.clone(),
+        ));
+        // 中断总线必须由 scheduler 与 loop 共享：scheduler 发环境变更，loop 回合边界消费。
+        let scheduler = Arc::new(SessionScheduler::new(
+            store.clone(),
+            Arc::new(LlmTurnDecider::new(main_model.clone())),
+            Arc::new(SystemClock),
+            Arc::new(LlmSummarizer::new(main_model.clone())),
+            self.interrupt_bus.clone(),
+        ));
+        let loop_model = main_model.clone();
+        let loop_engine = Arc::new(AgentLoop::new(
+            loop_model,
+            dispatch.clone(),
+            auditor.clone(),
+            self.events.clone(),
+            Arc::new(LlmSummarizer::new(main_model)),
+            self.interrupt_bus,
+            self.system_prompt,
+            Some(scheduler.clone() as Arc<dyn SessionSwitch>),
+        ));
+
+        Ok(Arc::new(Kernel {
+            registry,
+            dispatch,
+            loop_engine,
+            scheduler,
+            store,
+            auditor,
+            events: self.events,
+            state: Arc::new(Mutex::new(KernelState { turn: None })),
+            cache,
+            extensions: self.extensions,
+        }))
+    }
+}
+
+/// mistake-agent 应用专属 RPC 扩展：settings/balance/cache/compute 方法走 custom 兜底，
+/// 不占通用 `Method` 子集（M1 解耦，提取 so-lite-agent 时留在使用方）。
+struct AppRpc {
+    settings: Arc<std::sync::RwLock<Settings>>,
+    store: Arc<dyn SessionStore>,
+    main_service: Arc<LiveSettingsModelService>,
+    vision_service: Arc<LiveSettingsModelService>,
+    compute: Arc<BridgeCompute>,
+    cache: Arc<CacheTracker>,
+    interrupt_bus: InterruptBus,
+    auditor: Auditor,
+}
+
+#[async_trait]
+impl RpcExtension for AppRpc {
+    async fn handle(&self, method: &str, params: Value) -> Result<Option<Value>, RpcError> {
+        match method {
+            "get_settings" => Ok(Some(
+                self.settings
+                    .read()
+                    .expect("settings poisoned")
+                    .public_view(),
+            )),
+            "set_settings" => {
+                let patch: crate::kernel::settings::SettingsPatch = serde_json::from_value(
+                    params.get("patch").cloned().unwrap_or(Value::Null),
+                )
+                .map_err(|e| RpcError::new("invalid_settings", e.to_string()))?;
+                let view = {
+                    let mut settings = self.settings.write().expect("settings poisoned");
+                    settings
+                        .apply_patch(&patch)
+                        .map_err(|e| RpcError::new("invalid_settings", e))?;
+                    settings
+                        .save()
+                        .map_err(|e| RpcError::new("save_failed", e))?;
+                    if let Some(level) = patch.log_level {
+                        Logger::set_level(level);
+                    }
+                    settings.public_view()
+                };
+                log::info!(
+                    "设置已保存并热更新：main_key_set={} vision_key_set={}",
+                    view["main_model"]["key_set"],
+                    view["vision_model"]["key_set"]
+                );
+                self.main_service.refresh();
+                self.vision_service.refresh();
+                self.interrupt_bus.send(Interrupt::ConfigChanged);
+                self.auditor.record(AuditRecord::SettingsChanged);
+                crate::kernel::bootstrap::init_data_root(
+                    &crate::kernel::settings::Settings::data_root(),
+                )
+                .map_err(|e| RpcError::new("bootstrap_failed", e))?;
+                Ok(Some(view))
+            }
+            "compute_result" => {
+                let id = params
+                    .get("compute_id")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| RpcError::new("invalid_params", "缺少 compute_id"))?;
+                let result = crate::kernel::plugin::services::ComputeResult {
+                    stdout: params
+                        .get("stdout")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    stderr: params
+                        .get("stderr")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    duration_ms: params.get("duration_ms").and_then(Value::as_u64).unwrap_or(0),
+                };
+                let delivered = self.compute.deliver(id, result);
+                Ok(Some(json!({ "delivered": delivered })))
+            }
+            "test_connection" => {
+                let started = std::time::Instant::now();
+                let is_vision = params.get("model").and_then(Value::as_str) == Some("vision");
+                let model_req = ModelRequest {
+                    model: ModelKind::Main,
+                    messages: vec![Message::user("回复：ok")],
+                    tools: None,
+                    reasoning_effort: Some("none".into()),
+                    tool_choice: None,
+                    response_format: None,
+                };
+                let api_key = params.get("api_key").and_then(Value::as_str);
+                let result = if let Some(key) = api_key
+                    && !key.trim().is_empty()
+                {
+                    let snapshot = self.settings.read().expect("settings poisoned").clone();
+                    let mut model_cfg = if is_vision {
+                        snapshot.vision_model.clone()
+                    } else {
+                        snapshot.main_model.clone()
+                    };
+                    model_cfg.api_key = key.trim().to_string();
+                    let temp_settings = if is_vision {
+                        crate::kernel::settings::Settings {
+                            log_level: snapshot.log_level,
+                            main_model: snapshot.main_model.clone(),
+                            vision_model: model_cfg,
+                        }
+                    } else {
+                        crate::kernel::settings::Settings {
+                            log_level: snapshot.log_level,
+                            main_model: model_cfg,
+                            vision_model: snapshot.vision_model.clone(),
+                        }
+                    };
+                    if is_vision {
+                        crate::kernel::plugin::model::build_vision_service(&temp_settings)
+                            .complete(&model_req, &AbortSignal::new())
+                            .await
+                    } else {
+                        crate::kernel::plugin::model::build_main_service(&temp_settings)
+                            .complete(&model_req, &AbortSignal::new())
+                            .await
+                    }
+                } else if is_vision {
+                    self.vision_service
+                        .complete(&model_req, &AbortSignal::new())
+                        .await
+                } else {
+                    self.main_service
+                        .complete(&model_req, &AbortSignal::new())
+                        .await
+                };
+                match result {
+                    Ok(_) => Ok(Some(json!({
+                        "ok": true,
+                        "latency_ms": started.elapsed().as_millis() as u64,
+                    }))),
+                    Err(e) => Err(RpcError::new("connection_failed", e.to_string())),
+                }
+            }
+            "check_balance" => {
+                let settings = self.settings.read().expect("settings poisoned").clone();
+                let report = crate::kernel::agent::balance::check_balance(&settings).await;
+                self.auditor.record(AuditRecord::BalanceChecked {
+                    main_ok: report.main.ok,
+                    vision_ok: report.vision.ok,
+                });
+                Ok(Some(
+                    serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({})),
+                ))
+            }
+            "get_cache_stats" => {
+                let metas = self
+                    .store
+                    .list_sessions()
+                    .await
+                    .map_err(|e| RpcError::new("storage_error", e.to_string()))?;
+                let active = metas
+                    .iter()
+                    .find(|m| m.status == SessionStatus::Active)
+                    .map(|m| m.key);
+                Ok(Some(self.cache.snapshot(active)))
+            }
+            _ => Ok(None),
+        }
+    }
 }
 
 impl Kernel {
-    /// 组装内核（M1 全内存 + 真模型适配器）。
+    /// mistake-agent 便捷装配：应用专属服务 + 通用 KernelBuilder。
     pub async fn new(events: Arc<dyn EventSink>) -> Result<Arc<Self>, String> {
         let settings = Arc::new(std::sync::RwLock::new(Settings::load()?));
         let data_root = Settings::data_root();
@@ -220,8 +605,6 @@ impl Kernel {
             settings.read().expect("settings poisoned").log_level,
             &data_root.join("logs"),
         )?;
-        let logger: LoggerHandle = Arc::new(Logger);
-
         let storage = Arc::new(match FileStorage::open(&data_root) {
             Ok(file) => AnyStorage::File(file),
             Err(e) => {
@@ -266,60 +649,32 @@ impl Kernel {
                 auditor.clone(),
             ));
 
-        let registry = Arc::new(Registry::new(handles, logger));
-        for desc in crate::kernel::plugin::builtin_kernel_plugins() {
-            registry
-                .register_kernel_plugin(desc)
-                .map_err(|e| format!("内核插件注册失败：{e}"))?;
-        }
-        for desc in crate::plugin::builtin_plugins() {
-            registry
-                .register_plugin(desc)
-                .map_err(|e| format!("插件注册失败：{e}"))?;
-        }
-
-        let dispatch = Arc::new(Dispatch::new(
-            registry.clone(),
-            auditor.clone(),
-            std::time::Duration::from_secs(30),
-            std::time::Duration::from_secs(5),
-            std::time::Duration::from_secs(10 * 60),
-            events.clone(),
-        ));
-        // 中断总线必须由 scheduler 与 loop 共享：scheduler 发环境变更，loop 回合边界消费。
         let interrupt_bus = InterruptBus::new();
-        let scheduler = Arc::new(SessionScheduler::new(
-            storage.clone(),
-            Arc::new(LlmTurnDecider::new(main_service.clone())),
-            Arc::new(SystemClock),
-            Arc::new(LlmSummarizer::new(main_service.clone())),
-            interrupt_bus.clone(),
-        ));
-        let loop_engine = Arc::new(AgentLoop::new(
-            main_service.clone(),
-            dispatch.clone(),
-            auditor.clone(),
-            events.clone(),
-            Arc::new(LlmSummarizer::new(main_service.clone())),
-            interrupt_bus.clone(),
-            Some(scheduler.clone() as Arc<dyn SessionSwitch>),
-        ));
-
-        Ok(Arc::new(Self {
-            registry,
-            dispatch,
-            loop_engine,
-            scheduler,
+        let app_rpc = AppRpc {
+            settings: settings.clone(),
             store: storage.clone(),
-            auditor,
-            events,
-            compute,
-            settings,
-            main_service,
-            vision_service,
-            state: Arc::new(Mutex::new(KernelState { turn: None })),
-            cache,
-        }))
+            main_service: main_service.clone(),
+            vision_service: vision_service.clone(),
+            compute: compute.clone(),
+            cache: cache.clone(),
+            interrupt_bus: interrupt_bus.clone(),
+            auditor: auditor.clone(),
+        };
+
+        KernelBuilder::new()
+            .event_sink(events)
+            .system_prompt(Arc::new(crate::kernel::prompt::agent_system_prompt))
+            .service_handles(handles)
+            .session_store(storage.clone())
+            .main_model(main_service.clone())
+            .auditor(auditor)
+            .cache(cache.clone())
+            .interrupt_bus(interrupt_bus)
+            .extension(Arc::new(app_rpc))
+            .register_kernel_plugins(crate::kernel::plugin::builtin_kernel_plugins())
+            .register_plugins(crate::plugin::builtin_plugins())
+            .build()
+            .await
     }
 
     pub fn registry(&self) -> &Arc<Registry> {
@@ -492,6 +847,32 @@ impl Kernel {
     /// 处理一个请求；返回需要写回 GUI 的响应帧（事件经 EventSink 另发）。
     pub async fn handle(&self, request: RpcRequest) -> Result<Option<RpcFrame>, RpcError> {
         match request.method {
+            WireMethod::Generic(method) => self.handle_generic(request.id, method).await,
+            WireMethod::Custom(custom) => {
+                let params = custom_params(&custom);
+                for ext in &self.extensions {
+                    if let Some(result) = ext.handle(&custom.method, params.clone()).await? {
+                        return Ok(Some(RpcFrame::Response {
+                            id: request.id,
+                            result: Some(result),
+                            error: None,
+                        }));
+                    }
+                }
+                Err(RpcError::new(
+                    "unknown_method",
+                    format!("未知方法：{}", custom.method),
+                ))
+            }
+        }
+    }
+
+    async fn handle_generic(
+        &self,
+        id: u64,
+        method: Method,
+    ) -> Result<Option<RpcFrame>, RpcError> {
+        match method {
             Method::SendUserMessage {
                 text,
                 force_tool,
@@ -565,7 +946,7 @@ impl Kernel {
                 self.start_turn(key, ctx.messages, forced_wire).await?;
 
                 Ok(Some(RpcFrame::Response {
-                    id: request.id,
+                    id,
                     result: Some(json!({"accepted": true})),
                     error: None,
                 }))
@@ -574,12 +955,12 @@ impl Kernel {
                 let result = self.dispatch.call_command(&entry, params).await;
                 let frame = match result {
                     Ok(v) => RpcFrame::Response {
-                        id: request.id,
+                        id,
                         result: Some(v),
                         error: None,
                     },
                     Err(e) => RpcFrame::Response {
-                        id: request.id,
+                        id,
                         result: None,
                         error: Some(RpcError::new("tool_error", e.message)),
                     },
@@ -595,7 +976,7 @@ impl Kernel {
                     false
                 };
                 Ok(Some(RpcFrame::Response {
-                    id: request.id,
+                    id,
                     result: Some(json!({"aborted": aborted})),
                     error: None,
                 }))
@@ -607,7 +988,7 @@ impl Kernel {
                     None => ("idle", None),
                 };
                 Ok(Some(RpcFrame::Response {
-                    id: request.id,
+                    id,
                     result: Some(json!({"status": status, "session_key": session_key})),
                     error: None,
                 }))
@@ -619,7 +1000,7 @@ impl Kernel {
                     .await
                     .map_err(|e| RpcError::new("storage_error", e.to_string()))?;
                 Ok(Some(RpcFrame::Response {
-                    id: request.id,
+                    id,
                     result: Some(json!({
                         "sessions": serde_json::to_value(&metas).unwrap_or_default(),
                     })),
@@ -638,7 +1019,7 @@ impl Kernel {
                     .await
                     .map_err(|e| RpcError::new("storage_error", e.to_string()))?;
                 Ok(Some(RpcFrame::Response {
-                    id: request.id,
+                    id,
                     result: Some(json!({
                         "meta": serde_json::to_value(&meta).unwrap_or_default(),
                         "messages": serde_json::to_value(&messages).unwrap_or_default(),
@@ -649,101 +1030,8 @@ impl Kernel {
             Method::ListTools => {
                 let tools = self.registry.user_entries();
                 Ok(Some(RpcFrame::Response {
-                    id: request.id,
+                    id,
                     result: Some(json!({ "tools": tools })),
-                    error: None,
-                }))
-            }
-            Method::TestConnection { api_key, model } => {
-                let started = std::time::Instant::now();
-                let is_vision = model.as_deref() == Some("vision");
-                let model_req = ModelRequest {
-                    model: ModelKind::Main,
-                    messages: vec![Message::user("回复：ok")],
-                    tools: None,
-                    reasoning_effort: Some("none".into()),
-                    tool_choice: None,
-                    response_format: None,
-                };
-                let result = if let Some(key) = api_key
-                    && !key.trim().is_empty()
-                {
-                    // 临时 key：仅本次请求生效（不落盘、不改 settings）。
-                    let snapshot = self.settings.read().expect("settings poisoned").clone();
-                    let mut model_cfg = if is_vision {
-                        snapshot.vision_model.clone()
-                    } else {
-                        snapshot.main_model.clone()
-                    };
-                    model_cfg.api_key = key.trim().to_string();
-                    let temp_settings = if is_vision {
-                        crate::kernel::settings::Settings {
-                            log_level: snapshot.log_level,
-                            main_model: snapshot.main_model.clone(),
-                            vision_model: model_cfg,
-                        }
-                    } else {
-                        crate::kernel::settings::Settings {
-                            log_level: snapshot.log_level,
-                            main_model: model_cfg,
-                            vision_model: snapshot.vision_model.clone(),
-                        }
-                    };
-                    if is_vision {
-                        crate::kernel::plugin::model::build_vision_service(&temp_settings)
-                            .complete(&model_req, &AbortSignal::new())
-                            .await
-                    } else {
-                        crate::kernel::plugin::model::build_main_service(&temp_settings)
-                            .complete(&model_req, &AbortSignal::new())
-                            .await
-                    }
-                } else if is_vision {
-                    self.vision_service
-                        .complete(&model_req, &AbortSignal::new())
-                        .await
-                } else {
-                    self.main_service
-                        .complete(&model_req, &AbortSignal::new())
-                        .await
-                };
-                match result {
-                    Ok(_) => Ok(Some(RpcFrame::Response {
-                        id: request.id,
-                        result: Some(json!({
-                            "ok": true,
-                            "latency_ms": started.elapsed().as_millis() as u64,
-                        })),
-                        error: None,
-                    })),
-                    Err(e) => Ok(Some(RpcFrame::Response {
-                        id: request.id,
-                        result: None,
-                        error: Some(RpcError::new("connection_failed", e.to_string())),
-                    })),
-                }
-            }
-            Method::CheckBalance => {
-                let settings = self.settings.read().expect("settings poisoned").clone();
-                let report = crate::kernel::agent::balance::check_balance(&settings).await;
-                self.auditor.record(AuditRecord::BalanceChecked {
-                    main_ok: report.main.ok,
-                    vision_ok: report.vision.ok,
-                });
-                Ok(Some(RpcFrame::Response {
-                    id: request.id,
-                    result: Some(
-                        serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({})),
-                    ),
-                    error: None,
-                }))
-            }
-            Method::GetCacheStats => {
-                let active = self.active_session_key().await.ok();
-                let snapshot = self.cache.snapshot(active);
-                Ok(Some(RpcFrame::Response {
-                    id: request.id,
-                    result: Some(snapshot),
                     error: None,
                 }))
             }
@@ -763,7 +1051,7 @@ impl Kernel {
                 });
                 self.start_turn(key, path.clone(), None).await?;
                 Ok(Some(RpcFrame::Response {
-                    id: request.id,
+                    id,
                     result: Some(json!({
                         "session_key": key,
                         "messages": serde_json::to_value(&path).unwrap_or_default(),
@@ -781,80 +1069,11 @@ impl Kernel {
                 self.auditor
                     .record(AuditRecord::BranchSwitched { message_id });
                 Ok(Some(RpcFrame::Response {
-                    id: request.id,
+                    id,
                     result: Some(json!({
                         "session_key": key,
                         "messages": serde_json::to_value(&path).unwrap_or_default(),
                     })),
-                    error: None,
-                }))
-            }
-            Method::GetSettings => {
-                let view = self
-                    .settings
-                    .read()
-                    .expect("settings poisoned")
-                    .public_view();
-                Ok(Some(RpcFrame::Response {
-                    id: request.id,
-                    result: Some(view),
-                    error: None,
-                }))
-            }
-            Method::SetSettings { patch } => {
-                let view = {
-                    let mut settings = self.settings.write().expect("settings poisoned");
-                    settings
-                        .apply_patch(&patch)
-                        .map_err(|e| RpcError::new("invalid_settings", e))?;
-                    settings
-                        .save()
-                        .map_err(|e| RpcError::new("save_failed", e))?;
-                    if let Some(level) = patch.log_level {
-                        Logger::set_level(level);
-                    }
-                    settings.public_view()
-                };
-                log::info!(
-                    "设置已保存并热更新：main_key_set={} vision_key_set={}",
-                    view["main_model"]["key_set"],
-                    view["vision_model"]["key_set"]
-                );
-                // 模型配置热更新：下一次模型调用即用新端点/模型/key。
-                self.main_service.refresh();
-                self.vision_service.refresh();
-                self.scheduler
-                    .interrupt_bus()
-                    .send(Interrupt::SettingsChanged);
-                self.auditor.record(AuditRecord::SettingsChanged);
-                // OOBE 完成路径兜底：目录与 AGENTS.md 初始化（幂等，Kernel::new 已做过一次）。
-                crate::kernel::bootstrap::init_data_root(
-                    &crate::kernel::settings::Settings::data_root(),
-                )
-                .map_err(|e| RpcError::new("bootstrap_failed", e))?;
-                Ok(Some(RpcFrame::Response {
-                    id: request.id,
-                    result: Some(view),
-                    error: None,
-                }))
-            }
-            Method::ComputeResult {
-                id,
-                stdout,
-                stderr,
-                duration_ms,
-            } => {
-                let delivered = self.compute.deliver(
-                    id,
-                    crate::kernel::plugin::services::ComputeResult {
-                        stdout,
-                        stderr,
-                        duration_ms,
-                    },
-                );
-                Ok(Some(RpcFrame::Response {
-                    id: request.id,
-                    result: Some(json!({ "delivered": delivered })),
                     error: None,
                 }))
             }
@@ -866,7 +1085,97 @@ impl Kernel {
 mod tests {
     use super::*;
     use crate::kernel::agent::session::SessionMeta;
+    use crate::kernel::audit::{Auditor, MemoryAuditSink};
+    use crate::kernel::plugin::services::{
+        AbortSignal, ModelChunk, ModelError, ModelResponse, ModelStream,
+    };
     use crate::kernel::plugin::storage::MemoryStorage;
+
+    #[test]
+    fn rpc_wire_parses_generic_and_custom_methods() {
+        let generic: RpcRequest =
+            serde_json::from_str(r#"{"id":1,"method":"get_state"}"#).unwrap();
+        assert!(matches!(generic.method, WireMethod::Generic(Method::GetState)));
+
+        let custom: RpcRequest =
+            serde_json::from_str(r#"{"id":2,"method":"check_balance"}"#).unwrap();
+        let WireMethod::Custom(custom) = custom.method else {
+            panic!("未知方法应落入 custom 兜底");
+        };
+        assert_eq!(custom.method, "check_balance");
+
+        let compute: RpcRequest = serde_json::from_str(
+            r#"{"id":3,"method":"compute_result","compute_id":9,"stdout":"ok","stderr":"","duration_ms":1}"#,
+        )
+        .unwrap();
+        let WireMethod::Custom(compute) = compute.method else {
+            panic!("compute_result 应落入 custom 兜底");
+        };
+        assert_eq!(compute.extra["compute_id"], 9);
+        let merged = custom_params(&compute);
+        assert_eq!(merged["compute_id"], 9);
+        assert_eq!(merged["stdout"], "ok");
+    }
+
+    struct StubBuilderModel;
+
+    #[async_trait]
+    impl ModelService for StubBuilderModel {
+        async fn stream(
+            &self,
+            _request: &ModelRequest,
+            _signal: &AbortSignal,
+        ) -> Result<ModelStream, ModelError> {
+            Ok(Box::new(futures_util::stream::empty::<
+                Result<ModelChunk, ModelError>,
+            >()))
+        }
+
+        async fn complete(
+            &self,
+            _request: &ModelRequest,
+            _signal: &AbortSignal,
+        ) -> Result<ModelResponse, ModelError> {
+            Err(ModelError::Transport("stub".into()))
+        }
+    }
+
+    struct PingExtension;
+
+    #[async_trait]
+    impl RpcExtension for PingExtension {
+        async fn handle(
+            &self,
+            method: &str,
+            _params: Value,
+        ) -> Result<Option<Value>, RpcError> {
+            if method == "ping" {
+                Ok(Some(json!({"pong": true})))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn kernel_builder_assembles_and_routes_custom_method() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStorage::new());
+        let auditor = Auditor::new(Arc::new(MemoryAuditSink::default()));
+        let kernel = KernelBuilder::new()
+            .session_store(store)
+            .main_model(Arc::new(StubBuilderModel))
+            .auditor(auditor)
+            .extension(Arc::new(PingExtension))
+            .build()
+            .await
+            .unwrap();
+        let frame = kernel
+            .handle(RpcRequest::custom(1, "ping", json!({})))
+            .await
+            .unwrap()
+            .expect("应有响应帧");
+        assert!(serde_json::to_string(&frame).unwrap().contains("\"pong\":true"));
+    }
 
     #[tokio::test]
     async fn switch_tool_call_not_persisted_and_children_reparented() {
