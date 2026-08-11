@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { Icon } from "@iconify/vue";
 import MessageBubble from "./MessageBubble.vue";
 import AttachmentViewer from "./AttachmentViewer.vue";
@@ -11,13 +11,13 @@ import {
   navigateBranch,
   renderPath,
 } from "../lib/messages";
-import { loadToolCatalog, toolIcon, toolList } from "../lib/tools";
+import { loadToolCatalog, toolIcon, toolList, toolTitle } from "../lib/tools";
 
 const props = defineProps({
   kernel: { type: Object, required: true },
   ready: { type: Boolean, default: false },
 });
-const emit = defineEmits(["status"]);
+const emit = defineEmits(["status", "navigate"]);
 
 const inputText = ref("");
 const busy = ref(false);
@@ -27,6 +27,7 @@ const editingId = ref(null);
 const currentStreamId = ref(null);
 const sessionViews = ref({}); // sessionKey -> buildSessionView（含逐节点版本指针）
 const activeSessionKey = ref(null);
+const historyRefreshGen = ref(0); // 防重入：每次 refreshAllHistory 递增，仅最新世代生效
 const tools = ref([]); // 用户可见工具（list_tools，供输入候选）
 const suggestions = ref([]);
 const activeSuggestion = ref(-1);
@@ -35,6 +36,118 @@ const pendingAttachments = ref([]); // 选完未发送的附件列表（可多�
 const cacheStats = ref(null); // 上下文缓存命中统计（get_cache_stats）
 const inputEl = ref(null);
 const overflowOpen = ref(false);
+
+/* ──── 跨页面追问跳转 ──── */
+const navigateToChatMessage = inject("navigateToChatMessage", ref(""));
+
+/* ──── 工具交互（薄弱点→出题→批改） ──── */
+async function onToolInteract(payload) {
+  if (payload.action === "generate") {
+    addBubble({ type: "user", text: `薄弱点练习：${payload.knowledge_point}` });
+    busy.value = true;
+    setStatus(true, "正在出题…");
+    try {
+      const result = await props.kernel.triggerCommand("practice::generate", {
+        knowledge_point: payload.knowledge_point,
+        difficulty: payload.difficulty || "basic",
+      });
+      addBubble({
+        type: "tool",
+        entry: "practice::generate",
+        title: toolTitle("practice::generate") || "分层出题",
+        toolOk: result.matched,
+        toolIcon: toolIcon("practice::generate"),
+        params: { knowledge_point: payload.knowledge_point, difficulty: payload.difficulty },
+        result,
+      });
+    } catch (e) {
+      addBubble({ type: "error", text: `出题失败：${e.message}` });
+    } finally {
+      busy.value = false;
+      setStatus(false, "就绪");
+      scrollBottom();
+    }
+    return;
+  }
+
+  if (payload.action === "practice-again") {
+    if (payload.samePoint) {
+      addBubble({ type: "user", text: `再来一题：${payload.knowledge_point}` });
+      busy.value = true;
+      setStatus(true, "正在出题…");
+      try {
+        const result = await props.kernel.triggerCommand("practice::generate", {
+          knowledge_point: payload.knowledge_point,
+          difficulty: payload.difficulty || "basic",
+        });
+        addBubble({
+          type: "tool",
+          entry: "practice::generate",
+          title: toolTitle("practice::generate") || "分层出题",
+          toolOk: result.matched,
+          toolIcon: toolIcon("practice::generate"),
+          params: { knowledge_point: payload.knowledge_point, difficulty: payload.difficulty },
+          result,
+        });
+      } catch (e) {
+        addBubble({ type: "error", text: `出题失败：${e.message}` });
+      } finally {
+        busy.value = false;
+        setStatus(false, "就绪");
+        scrollBottom();
+      }
+    } else {
+      // 换知识点 → 重新分析薄弱点
+      addBubble({ type: "user", text: "分析我的薄弱知识点" });
+      busy.value = true;
+      setStatus(true, "正在分析薄弱点…");
+      try {
+        const result = await props.kernel.triggerCommand("practice::gaps", {});
+        addBubble({
+          type: "tool",
+          entry: "practice::gaps",
+          title: toolTitle("practice::gaps") || "薄弱点定位",
+          toolOk: true,
+          toolIcon: toolIcon("practice::gaps"),
+          params: {},
+          result,
+        });
+      } catch (e) {
+        addBubble({ type: "error", text: `薄弱点分析失败：${e.message}` });
+      } finally {
+        busy.value = false;
+        setStatus(false, "就绪");
+        scrollBottom();
+      }
+    }
+  }
+}
+
+/** 处理从其他页面导航过来的结构化指令 */
+async function handleNavigatePayload(payload) {
+  if (payload.action === "variant-practice") {
+    // 错题本抽屉"变式练习"：直接调用 practice::generate
+    await onToolInteract({
+      action: "generate",
+      knowledge_point: payload.knowledge_point,
+      difficulty: payload.difficulty || "variant",
+    });
+  } else if (payload.action === "ask-question") {
+    // 错题本右键"追问"：发送聊天消息
+    inputText.value = payload.text || "";
+    await nextTick();
+    sendMessage();
+  }
+}
+
+/** 记录会话最近活动时间到 localStorage，供 SessionsPage 读取 */
+const LS_ACTIVITY_PREFIX = "ma:last-activity:";
+function recordSessionActivity(key) {
+  if (!key) return;
+  try {
+    localStorage.setItem(LS_ACTIVITY_PREFIX + key, new Date().toISOString());
+  } catch { /* quota 满时静默 */ }
+}
 
 let unsubscribe = null;
 let assistantIndex = -1;
@@ -232,7 +345,7 @@ function autoResize() {
 }
 
 function addBubble(b) {
-  bubbles.value.push(b);
+  bubbles.value.push({ ...b, createdAt: b.createdAt || new Date().toISOString() });
   scrollBottom();
 }
 
@@ -285,7 +398,7 @@ function renderMergedBubbles() {
     }
   }
   all.sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0));
-  if (!all.length) return;
+  console.log("[renderMergedBubbles] all:", all.length, "bubbles:", bubbles.value.length); if (!all.length) { console.warn("[renderMergedBubbles] all empty, skip"); return; }
 
   // 合并策略：后端已有的按 ID/文本匹配更新；本地独有的保留不丢
   const backendIds = new Set(all.map((b) => String(b.messageId)));
@@ -317,7 +430,7 @@ function renderMergedBubbles() {
   }
 
   // 第二遍：追加后端独有的气泡（本次回合新增的 assistant / tool / reasoning 等）
-  const existingIds = new Set(bubbles.value.map((b) => (b.messageId ? String(b.messageId) : null)).filter(Boolean));
+  console.log("[renderMergedBubbles] pass1 done, bubbles:", bubbles.value.map(b => `${b.type}:${b.messageId ? String(b.messageId).slice(-8) : "no-id"}:${(b.text||"").slice(0,20)}`)); const existingIds = new Set(bubbles.value.map((b) => (b.messageId ? String(b.messageId) : null)).filter(Boolean));
   for (const b of all) {
     if (!existingIds.has(String(b.messageId))) {
       bubbles.value.push(b);
@@ -333,6 +446,7 @@ function renderMergedBubbles() {
 
 /** 全量历史：每个会话建消息树视图（DeepSeek 式逐节点版本指针），只渲染活跃链。 */
 async function refreshAllHistory() {
+	  const gen = ++historyRefreshGen.value;
   try {
     const list = await props.kernel.call("list_sessions", {}, 8000);
     const arr = list.sessions || [];
@@ -342,7 +456,7 @@ async function refreshAllHistory() {
     for (const s of arr) {
       try {
         const detail = await props.kernel.call("read_session", { key: s.key }, 8000);
-        views[s.key] = buildSessionView(
+        console.log("[refreshAllHistory] session", s.key, "status", s.status, "msgs:", detail.messages.length, "active_path:", detail.meta?.active_path); views[s.key] = buildSessionView(
           detail.messages,
           detail.meta?.active_path || null,
         );
@@ -350,8 +464,11 @@ async function refreshAllHistory() {
         // 单个会话读取失败不阻断整体历史。
       }
     }
-    sessionViews.value = views;
+    if (gen !== historyRefreshGen.value) { console.warn("[refreshAllHistory] stale gen=", gen, "current=", historyRefreshGen.value, "- discarding"); return; }
+	    sessionViews.value = views;
     renderMergedBubbles();
+    // 同步活跃会话的活动时间到 localStorage
+    if (activeSessionKey.value) recordSessionActivity(activeSessionKey.value);
   } catch (e) {
     // list_sessions/read_session 尚未接通时，聊天仍可用，只是没有分支/编辑入口。
     if (e.code !== "not_implemented") console.warn("会话回读失败：", e);
@@ -447,6 +564,8 @@ async function sendMessage() {
   const text = inputText.value.trim();
   if (busy.value) return;
   if (!text && !armedTool.value && !pendingAttachments.value.length) return;
+  // 即时记录活动时间（不等 turn_end 异步回调）
+  if (activeSessionKey.value) recordSessionActivity(activeSessionKey.value);
   const attachments = pendingAttachments.value.map((a) => ({
     path: a.asset_path,
     name: a.name,
@@ -583,11 +702,26 @@ async function copyText(text) {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   unsubscribe = props.kernel.onFrame(handleFrame);
   loadTools();
-  ensureHistory();
+  await ensureHistory();
   loadCacheStats();
+
+  // 跨页面跳转：错题本"追问"带过来的消息
+  if (navigateToChatMessage.value) {
+    const payload = navigateToChatMessage.value;
+    navigateToChatMessage.value = "";
+    if (typeof payload === "object" && payload.action) {
+      // 结构化导航：直接调用工具（如变式练习）
+      await handleNavigatePayload(payload);
+    } else {
+      // 纯文本：作为聊天消息发送
+      inputText.value = String(payload);
+      await nextTick();
+      sendMessage();
+    }
+  }
 });
 watch(
   () => props.ready,
@@ -659,6 +793,7 @@ onUnmounted(() => unsubscribe?.());
           @open-attachment="openAttachment"
           @save-edit="saveEdit"
           @cancel-edit="editingId = null"
+          @tool-interact="onToolInteract"
         />
       </TransitionGroup>
     </main>
