@@ -71,7 +71,18 @@ pub struct ModelRequest {
     pub messages: Vec<Message>,
     pub tools: Option<Vec<ToolSchema>>,
     pub reasoning_effort: Option<String>,
+    pub response_format: Option<ResponseFormat>,
     pub tool_choice: Option<ToolChoice>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseFormat {
+    JsonObject,
+    JsonSchema {
+        name: String,
+        schema: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

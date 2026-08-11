@@ -12,6 +12,7 @@ pub mod defaults;
 pub mod dispatch;
 pub mod events;
 pub mod message;
+pub mod model;
 pub mod registry;
 pub mod rpc;
 pub mod services;

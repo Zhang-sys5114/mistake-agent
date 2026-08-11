@@ -118,6 +118,7 @@ impl AgentLoop {
                 } else {
                     None
                 },
+                response_format: None,
                 tool_choice: None,
             };
             if let Some(wire) = remaining_forced.take() {
