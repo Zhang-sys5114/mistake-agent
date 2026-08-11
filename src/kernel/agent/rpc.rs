@@ -1,4 +1,4 @@
-﻿//! RPC（ADR-0013 / Q15）：stdio JSONL，JSON-RPC 2.0 风格（id + notification）。
+//! RPC（ADR-0013 / Q15）：stdio JSONL，JSON-RPC 2.0 风格（id + notification）。
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -452,10 +452,9 @@ impl RpcExtension for AppRpc {
                     .public_view(),
             )),
             "set_settings" => {
-                let patch: crate::kernel::settings::SettingsPatch = serde_json::from_value(
-                    params.get("patch").cloned().unwrap_or(Value::Null),
-                )
-                .map_err(|e| RpcError::new("invalid_settings", e.to_string()))?;
+                let patch: crate::kernel::settings::SettingsPatch =
+                    serde_json::from_value(params.get("patch").cloned().unwrap_or(Value::Null))
+                        .map_err(|e| RpcError::new("invalid_settings", e.to_string()))?;
                 let view = {
                     let mut settings = self.settings.write().expect("settings poisoned");
                     settings
@@ -500,7 +499,10 @@ impl RpcExtension for AppRpc {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string(),
-                    duration_ms: params.get("duration_ms").and_then(Value::as_u64).unwrap_or(0),
+                    duration_ms: params
+                        .get("duration_ms")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
                 };
                 let delivered = self.compute.deliver(id, result);
                 Ok(Some(json!({ "delivered": delivered })))
@@ -867,11 +869,7 @@ impl Kernel {
         }
     }
 
-    async fn handle_generic(
-        &self,
-        id: u64,
-        method: Method,
-    ) -> Result<Option<RpcFrame>, RpcError> {
+    async fn handle_generic(&self, id: u64, method: Method) -> Result<Option<RpcFrame>, RpcError> {
         match method {
             Method::SendUserMessage {
                 text,
@@ -1093,9 +1091,11 @@ mod tests {
 
     #[test]
     fn rpc_wire_parses_generic_and_custom_methods() {
-        let generic: RpcRequest =
-            serde_json::from_str(r#"{"id":1,"method":"get_state"}"#).unwrap();
-        assert!(matches!(generic.method, WireMethod::Generic(Method::GetState)));
+        let generic: RpcRequest = serde_json::from_str(r#"{"id":1,"method":"get_state"}"#).unwrap();
+        assert!(matches!(
+            generic.method,
+            WireMethod::Generic(Method::GetState)
+        ));
 
         let custom: RpcRequest =
             serde_json::from_str(r#"{"id":2,"method":"check_balance"}"#).unwrap();
@@ -1144,11 +1144,7 @@ mod tests {
 
     #[async_trait]
     impl RpcExtension for PingExtension {
-        async fn handle(
-            &self,
-            method: &str,
-            _params: Value,
-        ) -> Result<Option<Value>, RpcError> {
+        async fn handle(&self, method: &str, _params: Value) -> Result<Option<Value>, RpcError> {
             if method == "ping" {
                 Ok(Some(json!({"pong": true})))
             } else {
@@ -1174,7 +1170,11 @@ mod tests {
             .await
             .unwrap()
             .expect("应有响应帧");
-        assert!(serde_json::to_string(&frame).unwrap().contains("\"pong\":true"));
+        assert!(
+            serde_json::to_string(&frame)
+                .unwrap()
+                .contains("\"pong\":true")
+        );
     }
 
     #[tokio::test]

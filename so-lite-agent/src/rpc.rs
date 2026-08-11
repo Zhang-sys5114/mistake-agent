@@ -8,17 +8,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::agent::{AgentLoop, SystemPromptProvider, TurnInput, TurnOutcome};
-use crate::audit::{AuditRecord, Auditor, MemoryAuditSink};
-use crate::contract::{CallerPolicy, PluginError, full_to_wire};
+use crate::agent::{AgentLoop, SystemPromptProvider, TurnInput};
+use crate::audit::{Auditor, MemoryAuditSink};
+use crate::contract::{CallerPolicy, PluginError};
 use crate::defaults::{InMemorySessionStore, MockModelService};
 use crate::dispatch::Dispatch;
 use crate::events::{Event, EventSink, MemoryEventSink};
 use crate::message::{Message, MessageId};
 use crate::registry::{KernelDescriptor, PluginDescriptor, Registry};
 use crate::services::{
-    AbortSignal, ModelHandle, ModelService, SessionKey, SessionStatus, SessionStore,
-    ServiceHandles,
+    AbortSignal, ModelHandle, ModelService, ServiceHandles, SessionKey, SessionStatus, SessionStore,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -273,9 +272,9 @@ impl KernelBuilder {
         let main_model = self
             .main_model
             .unwrap_or_else(|| Arc::new(MockModelService::default()) as Arc<dyn ModelService>);
-        let auditor = self.auditor.unwrap_or_else(|| {
-            Auditor::new(Arc::new(MemoryAuditSink::default()))
-        });
+        let auditor = self
+            .auditor
+            .unwrap_or_else(|| Auditor::new(Arc::new(MemoryAuditSink::default())));
         let handles = if self.handles.model().is_some() {
             self.handles
         } else {
@@ -371,11 +370,7 @@ impl Kernel {
         }
     }
 
-    async fn handle_generic(
-        &self,
-        id: u64,
-        method: Method,
-    ) -> Result<Option<RpcFrame>, RpcError> {
+    async fn handle_generic(&self, id: u64, method: Method) -> Result<Option<RpcFrame>, RpcError> {
         match method {
             Method::SendUserMessage {
                 text,

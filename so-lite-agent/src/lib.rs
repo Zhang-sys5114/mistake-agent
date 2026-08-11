@@ -6,8 +6,8 @@
 
 pub mod agent;
 pub mod audit;
-pub mod contract;
 pub mod context;
+pub mod contract;
 pub mod defaults;
 pub mod dispatch;
 pub mod events;

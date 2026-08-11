@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use futures_core::Stream;
+use futures_util::Stream;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
@@ -100,10 +100,21 @@ pub enum ItemKind {
 pub enum ModelChunk {
     TextDelta(String),
     ReasoningDelta(String),
-    ReasoningItemStart { id: String },
-    ToolCallStart { index: usize, call_id: String, name: String },
-    ToolCallDelta { index: usize, data: String },
-    ItemDone { kind: ItemKind },
+    ReasoningItemStart {
+        id: String,
+    },
+    ToolCallStart {
+        index: usize,
+        call_id: String,
+        name: String,
+    },
+    ToolCallDelta {
+        index: usize,
+        data: String,
+    },
+    ItemDone {
+        kind: ItemKind,
+    },
     Usage(TokenUsage),
     Done,
 }
@@ -157,9 +168,7 @@ impl ModelError {
     pub fn is_systemic(&self) -> bool {
         matches!(
             self,
-            ModelError::AuthFailed(_)
-                | ModelError::QuotaExceeded(_)
-                | ModelError::ModelNotFound(_)
+            ModelError::AuthFailed(_) | ModelError::QuotaExceeded(_) | ModelError::ModelNotFound(_)
         )
     }
 }

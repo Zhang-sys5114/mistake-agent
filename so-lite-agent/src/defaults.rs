@@ -3,15 +3,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
-use futures_util::StreamExt;
-
 use crate::message::{Message, MessageId};
 use crate::services::{
-    AbortSignal, ItemKind, ModelChunk, ModelError, ModelKind, ModelRequest, ModelResponse,
-    ModelService, ModelStream, SessionError, SessionKey, SessionMeta, SessionStatus, SessionStore,
-    TokenUsage, ToolCallSpec,
+    AbortSignal, ItemKind, ModelChunk, ModelError, ModelRequest, ModelResponse, ModelService,
+    ModelStream, SessionError, SessionKey, SessionMeta, SessionStatus, SessionStore, TokenUsage,
+    ToolCallSpec,
 };
+use async_trait::async_trait;
 
 #[derive(Default, Clone)]
 pub struct InMemorySessionStore {
@@ -37,7 +35,10 @@ impl SessionStore for InMemorySessionStore {
             return Err(SessionError::AlreadyExists(key.to_string()));
         }
         sessions.insert(*key, meta.clone());
-        self.messages.lock().expect("store poisoned").insert(*key, Vec::new());
+        self.messages
+            .lock()
+            .expect("store poisoned")
+            .insert(*key, Vec::new());
         Ok(())
     }
 
@@ -52,22 +53,16 @@ impl SessionStore for InMemorySessionStore {
 
     async fn append_message(&self, key: &SessionKey, msg: &Message) -> Result<(), SessionError> {
         let mut all = self.messages.lock().expect("store poisoned");
-        let list = all
-            .get_mut(key)
-            .ok_or_else(|| SessionError::NotFound(*key))?;
+        let list = all.get_mut(key).ok_or(SessionError::NotFound(*key))?;
         list.push(msg.clone());
         Ok(())
     }
 
     async fn read_path(&self, key: &SessionKey) -> Result<Vec<Message>, SessionError> {
         let sessions = self.sessions.lock().expect("store poisoned");
-        let meta = sessions
-            .get(key)
-            .ok_or_else(|| SessionError::NotFound(*key))?;
+        let meta = sessions.get(key).ok_or(SessionError::NotFound(*key))?;
         let all = self.messages.lock().expect("store poisoned");
-        let list = all
-            .get(key)
-            .ok_or_else(|| SessionError::NotFound(*key))?;
+        let list = all.get(key).ok_or(SessionError::NotFound(*key))?;
         let Some(end) = meta.active_path else {
             return Ok(list.clone());
         };
@@ -90,9 +85,7 @@ impl SessionStore for InMemorySessionStore {
         message_id: Option<MessageId>,
     ) -> Result<(), SessionError> {
         let mut sessions = self.sessions.lock().expect("store poisoned");
-        let meta = sessions
-            .get_mut(key)
-            .ok_or_else(|| SessionError::NotFound(*key))?;
+        let meta = sessions.get_mut(key).ok_or(SessionError::NotFound(*key))?;
         meta.active_path = message_id;
         Ok(())
     }
@@ -103,25 +96,25 @@ impl SessionStore for InMemorySessionStore {
         message_id: MessageId,
         text: &str,
     ) -> Result<Vec<Message>, SessionError> {
-        let mut all = self.messages.lock().expect("store poisoned");
-        let list = all
-            .get_mut(key)
-            .ok_or_else(|| SessionError::NotFound(*key))?;
-        let index = list
-            .iter()
-            .position(|m| m.id == message_id)
-            .ok_or_else(|| SessionError::Internal("消息不存在".into()))?;
-        let original = list[index].clone();
-        let mut edited = original.clone();
-        edited.id = MessageId::new();
-        edited.kind = crate::message::MessageKind::User {
-            text: text.to_string(),
-            display_text: None,
-            attachments: Vec::new(),
+        let edited = {
+            let mut all = self.messages.lock().expect("store poisoned");
+            let list = all.get_mut(key).ok_or(SessionError::NotFound(*key))?;
+            let index = list
+                .iter()
+                .position(|m| m.id == message_id)
+                .ok_or_else(|| SessionError::Internal("消息不存在".into()))?;
+            let original = list[index].clone();
+            let mut edited = original.clone();
+            edited.id = MessageId::new();
+            edited.kind = crate::message::MessageKind::User {
+                text: text.to_string(),
+                display_text: None,
+                attachments: Vec::new(),
+            };
+            list.truncate(index + 1);
+            list.push(edited.clone());
+            edited
         };
-        list.truncate(index + 1);
-        list.push(edited.clone());
-        drop(all);
         self.set_active_path(key, Some(edited.id)).await?;
         Ok(vec![edited])
     }
@@ -131,33 +124,32 @@ impl SessionStore for InMemorySessionStore {
         key: &SessionKey,
         message_id: MessageId,
     ) -> Result<Vec<Message>, SessionError> {
-        let all = self.messages.lock().expect("store poisoned");
-        let list = all
-            .get(key)
-            .ok_or_else(|| SessionError::NotFound(*key))?;
-        if !list.iter().any(|m| m.id == message_id) {
-            return Err(SessionError::Internal("消息不存在".into()));
-        }
-        let path = path_to(&message_id, list);
-        drop(all);
+        let path = {
+            let all = self.messages.lock().expect("store poisoned");
+            let list = all.get(key).ok_or(SessionError::NotFound(*key))?;
+            if !list.iter().any(|m| m.id == message_id) {
+                return Err(SessionError::Internal("消息不存在".into()));
+            }
+            path_to(&message_id, list)
+        };
         self.set_active_path(key, Some(message_id)).await?;
         Ok(path)
     }
 
-    async fn set_goal(&self, key: &SessionKey, goal: &crate::services::Goal) -> Result<(), SessionError> {
+    async fn set_goal(
+        &self,
+        key: &SessionKey,
+        goal: &crate::services::Goal,
+    ) -> Result<(), SessionError> {
         let mut sessions = self.sessions.lock().expect("store poisoned");
-        let meta = sessions
-            .get_mut(key)
-            .ok_or_else(|| SessionError::NotFound(*key))?;
+        let meta = sessions.get_mut(key).ok_or(SessionError::NotFound(*key))?;
         meta.goal = Some(goal.clone());
         Ok(())
     }
 
     async fn archive(&self, key: &SessionKey) -> Result<(), SessionError> {
         let mut sessions = self.sessions.lock().expect("store poisoned");
-        let meta = sessions
-            .get_mut(key)
-            .ok_or_else(|| SessionError::NotFound(*key))?;
+        let meta = sessions.get_mut(key).ok_or(SessionError::NotFound(*key))?;
         meta.status = SessionStatus::Archived;
         meta.archived_at = Some(chrono::Utc::now());
         Ok(())
@@ -181,9 +173,7 @@ impl SessionStore for InMemorySessionStore {
         at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), SessionError> {
         let mut sessions = self.sessions.lock().expect("store poisoned");
-        let meta = sessions
-            .get_mut(key)
-            .ok_or_else(|| SessionError::NotFound(*key))?;
+        let meta = sessions.get_mut(key).ok_or(SessionError::NotFound(*key))?;
         meta.last_activity_at = at;
         Ok(())
     }

@@ -1,5 +1,4 @@
-//! M2 验收示例：`cargo run --example hello` 用默认 MockModelService
-//! 注册一个 hello 用户插件并跑通一个完整回合。
+//! M2 验收：默认 MockModelService + 用户插件跑通 hello 回合。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,7 +7,7 @@ use serde_json::{Value, json};
 use so_lite_agent::context::PluginContext;
 use so_lite_agent::contract::{CallerPolicy, Info, PluginError, empty_params};
 use so_lite_agent::dispatch::ToolCallContext;
-use so_lite_agent::events::MemoryEventSink;
+use so_lite_agent::events::{Event, MemoryEventSink};
 use so_lite_agent::registry::{PluginDescriptor, UserPlugin};
 use so_lite_agent::rpc::{KernelBuilder, Method, RpcRequest};
 
@@ -43,14 +42,15 @@ impl UserPlugin for HelloPlugin {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), String> {
+#[tokio::test]
+async fn hello_turn_with_mock_model() {
     let events = Arc::new(MemoryEventSink::default());
     let kernel = KernelBuilder::new()
         .event_sink(events.clone())
         .register_plugin(PluginDescriptor::from_plugin::<HelloPlugin>())
         .build()
-        .await?;
+        .await
+        .expect("kernel 构建失败");
 
     kernel
         .handle(RpcRequest {
@@ -63,14 +63,25 @@ async fn main() -> Result<(), String> {
             .into(),
         })
         .await
-        .map_err(|e| e.message)?
+        .expect("请求失败")
         .expect("应有响应帧");
 
-    while !kernel.is_idle().await {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !kernel.is_idle().await && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    assert!(kernel.is_idle().await, "回合应在 10s 内结束");
+
     let events = events.take();
-    println!("hello 回合完成，事件数：{}", events.len());
-    println!("工具清单：{}", kernel.registry().user_entries().len());
-    Ok(())
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::MessageDelta { .. })),
+        "应有流式消息增量事件：{events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, Event::TurnEnd { .. })),
+        "应有回合结束事件：{events:?}"
+    );
+    assert_eq!(kernel.registry().user_entries().len(), 1);
 }

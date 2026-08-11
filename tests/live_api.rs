@@ -551,7 +551,10 @@ async fn switch_tool_call_not_polluting_next_context() {
         }
         .into(),
     };
-    let rpc = |id: u64, method: Method| RpcRequest { id, method: method.into() };
+    let rpc = |id: u64, method: Method| RpcRequest {
+        id,
+        method: method.into(),
+    };
     async fn session_count(kernel: &Arc<Kernel>) -> usize {
         let frame = kernel
             .handle(RpcRequest {

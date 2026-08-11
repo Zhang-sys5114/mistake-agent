@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::audit::{AuditRecord, Auditor};
 use crate::contract::{ToolError, ToolErrorCode};
@@ -57,7 +57,6 @@ pub enum LoopError {
 struct ToolCallAcc {
     name: String,
     arguments: String,
-    call_id: String,
 }
 
 pub struct AgentLoop {
@@ -191,7 +190,7 @@ impl AgentLoop {
                     }
                     ModelChunk::ToolCallStart {
                         index,
-                        call_id,
+                        call_id: _,
                         name,
                     } => {
                         calls.insert(
@@ -199,7 +198,6 @@ impl AgentLoop {
                             ToolCallAcc {
                                 name,
                                 arguments: String::new(),
-                                call_id,
                             },
                         );
                     }

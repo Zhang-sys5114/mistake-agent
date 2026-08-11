@@ -133,6 +133,7 @@ pub struct AgentLoop {
 }
 
 impl AgentLoop {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         model: Arc<dyn ModelService>,
         dispatch: Arc<Dispatch>,
