@@ -11,7 +11,7 @@ use crate::kernel::agent::dispatch::ToolCallContext;
 use crate::kernel::context::PluginContext;
 use crate::kernel::contract::{CallerPolicy, Info, PluginError, ToolDef, ToolError};
 use crate::kernel::plugin::services::{
-    AbortSignal, ComputeHandle, MemoryHandle, ModelHandle, ServiceId,
+    AbortSignal, ComputeHandle, MemoryHandle, ModelHandle, ServiceId, StorageHandle,
 };
 use crate::kernel::registry::{PluginDescriptor, UserPlugin};
 
@@ -24,7 +24,7 @@ mod history;
 mod templates;
 
 use check::{CheckParams, check_handler};
-use exam_pool::draw_from_pool;
+use exam_pool::{draw_from_pool, read_pool_json};
 use generate::generate_with_check;
 use gaps::{GapsParams, gaps_handler};
 use history::recent_mastered;
@@ -106,15 +106,17 @@ impl UserPlugin for PracticePlugin {
         let model_for_generate = model.clone();
         let memory_for_generate = memory.clone();
         let compute_for_generate = compute.clone();
+        let storage_for_generate = storage.clone();
         ctx.registrar.tool(
             "generate",
             std::sync::Arc::new(move |call_ctx: &ToolCallContext, params: Value| {
                 let model = model_for_generate.clone();
                 let memory = memory_for_generate.clone();
                 let compute = compute_for_generate.clone();
+                let storage = storage_for_generate.clone();
                 let signal = call_ctx.signal.clone();
                 Box::pin(async move {
-                    generate_handler(model, memory, compute, signal, params).await
+                    generate_handler(model, memory, compute, storage, signal, params).await
                 })
             }),
         )?;
@@ -153,6 +155,7 @@ async fn generate_handler(
     model: ModelHandle,
     memory: MemoryHandle,
     compute: ComputeHandle,
+    storage: StorageHandle,
     signal: AbortSignal,
     params: Value,
 ) -> Result<Value, ToolError> {
@@ -167,7 +170,9 @@ async fn generate_handler(
     let mastered = recent_mastered(&memory).await;
     // 真题层：只走池内抽取（真实来源），不走模板与 LLM 生成。
     if difficulty == Difficulty::Exam {
-        return match draw_from_pool(knowledge_point, &mastered) {
+        // 运行时数据文件优先，缺失/损坏回退内置种子（ADR-0042 数据运行时化）。
+        let pool_json = read_pool_json(&storage).await;
+        return match draw_from_pool(&pool_json, knowledge_point, &mastered) {
             Some(item) => Ok(json!({ "matched": true, "source": "exam_pool", "item": item })),
             None => Ok(json!({
                 "matched": false,
@@ -242,6 +247,7 @@ mod tests {
         ModelResponse, ModelService, ModelStream, MemoryHandle,
     };
     use crate::plugin::practice::geometry_check::tests::FakeCompute;
+    use crate::kernel::plugin::storage::MemoryStorage;
     use crate::plugin::practice::history::tests::FakeMemory;
     use crate::plugin::practice::history::record_attempt;
     use crate::plugin::practice::templates::*;
@@ -274,15 +280,25 @@ mod tests {
         }
     }
 
-    fn fake_handle(reply: &str) -> (ModelHandle, MemoryHandle, ComputeHandle) {
+    fn fake_handle(
+        reply: &str,
+    ) -> (
+        ModelHandle,
+        MemoryHandle,
+        ComputeHandle,
+        crate::kernel::plugin::services::StorageHandle,
+    ) {
         let model: Arc<dyn ModelService> = Arc::new(FakeModel {
             reply: Mutex::new(reply.into()),
         });
         let auditor = Auditor::new(Arc::new(MemoryAuditSink::default()));
+        let store: Arc<MemoryStorage> = Arc::new(MemoryStorage::new());
         (
             ModelHandle::new(model, std::time::Duration::from_secs(5), auditor),
             MemoryHandle::new(Arc::new(FakeMemory::default())),
             ComputeHandle::new(Arc::new(FakeCompute::default())),
+            crate::kernel::plugin::services::StorageHandle::new(store.clone())
+                .with_io(store.clone(), store.clone()),
         )
     }
 
@@ -303,12 +319,13 @@ mod tests {
 
     #[tokio::test]
     async fn generate_returns_matched_item() {
-        let (model, memory, compute) =
+        let (model, memory, compute, storage) =
             fake_handle(r#"{"question_text":"不应走到模型生成","answer_spec":""}"#);
         let out = generate_handler(
             model,
             memory,
             compute,
+            storage,
             AbortSignal::new(),
             json!({
                 "knowledge_point": "三角形全等判定",
@@ -326,13 +343,14 @@ mod tests {
 
     #[tokio::test]
     async fn generate_llm_fallback_returns_item() {
-        let (model, memory, compute) = fake_handle(
+        let (model, memory, compute, storage) = fake_handle(
             r#"{"knowledge_point":"数列","question_text":"求等差数列 $1,4,7,\\ldots$ 的第 10 项。","answer_spec":"$a_{10}=28$","diagram_spec":null}"#,
         );
         let out = generate_handler(
             model,
             memory,
             compute,
+            storage,
             AbortSignal::new(),
             json!({
                 "knowledge_point": "数列",
@@ -350,11 +368,12 @@ mod tests {
 
     #[tokio::test]
     async fn generate_llm_unparseable_falls_back_to_miss() {
-        let (model, memory, compute) = fake_handle("抱歉，我无法出题。");
+        let (model, memory, compute, storage) = fake_handle("抱歉，我无法出题。");
         let out = generate_handler(
             model,
             memory,
             compute,
+            storage,
             AbortSignal::new(),
             json!({
                 "knowledge_point": "量子力学",
@@ -370,11 +389,12 @@ mod tests {
 
     #[tokio::test]
     async fn generate_exam_pool_draws_item() {
-        let (model, memory, compute) = fake_handle("不应走到模型生成");
+        let (model, memory, compute, storage) = fake_handle("不应走到模型生成");
         let out = generate_handler(
             model,
             memory,
             compute,
+            storage,
             AbortSignal::new(),
             json!({
                 "knowledge_point": "集合运算",
@@ -392,11 +412,12 @@ mod tests {
 
     #[tokio::test]
     async fn generate_exam_pool_miss_returns_message() {
-        let (model, memory, compute) = fake_handle("不应走到模型生成");
+        let (model, memory, compute, storage) = fake_handle("不应走到模型生成");
         let out = generate_handler(
             model,
             memory,
             compute,
+            storage,
             AbortSignal::new(),
             json!({
                 "knowledge_point": "量子力学",
@@ -412,7 +433,7 @@ mod tests {
     #[tokio::test]
     async fn generate_skips_mastered_template_via_llm() {
         // 预置：triangle_sss 近期已答对（已掌握）。
-        let (model, memory, compute) = fake_handle(
+        let (model, memory, compute, storage) = fake_handle(
             r#"{"knowledge_point":"三角形全等判定","question_text":"如图，在 △ABC 与 △DEF 中，AB=DE，∠A=∠D，AC=DF，请判断全等并说明依据。","answer_spec":"全等（SAS）","diagram_spec":null}"#,
         );
         record_attempt(
@@ -427,6 +448,7 @@ mod tests {
             model,
             memory,
             compute,
+            storage,
             AbortSignal::new(),
             json!({
                 "knowledge_point": "三角形全等判定",
@@ -444,13 +466,14 @@ mod tests {
     #[tokio::test]
     async fn generate_llm_geometry_checked_ok() {
         // LLM 返回带图形规格的题，compute 校验通过 → geometry_checked=true。
-        let (model, memory, compute) = fake_handle(
+        let (model, memory, compute, storage) = fake_handle(
             r#"{"knowledge_point":"圆与切线","question_text":"如图，PA 是圆 O 的切线。","answer_spec":"PA⊥OA","diagram_spec":{"points":{"O":[0,0],"A":[3,0],"P":[3,4]},"objects":[{"type":"circle","center":"O","radius":3},{"type":"segment","ends":["O","A"]},{"type":"segment","ends":["A","P"]}],"labels":["O","A","P"]}}"#,
         );
         let out = generate_handler(
             model,
             memory,
             compute,
+            storage,
             AbortSignal::new(),
             json!({
                 "knowledge_point": "圆与切线",
@@ -467,7 +490,7 @@ mod tests {
     #[tokio::test]
     async fn generate_llm_geometry_retry_then_ok() {
         // 第一次校验失败（三点共线），第二次通过 → 重出成功。
-        let (model, memory, _) = fake_handle(
+        let (model, memory, _compute, storage) = fake_handle(
             r#"{"knowledge_point":"圆与切线","question_text":"如图，PA 是圆 O 的切线。","answer_spec":"PA⊥OA","diagram_spec":{"points":{"O":[0,0],"A":[3,0],"P":[3,4]},"objects":[{"type":"circle","center":"O","radius":3}],"labels":["O","A","P"]}}"#,
         );
         let compute = ComputeHandle::new(Arc::new(FakeCompute {
@@ -480,6 +503,7 @@ mod tests {
             model,
             memory,
             compute,
+            storage,
             AbortSignal::new(),
             json!({
                 "knowledge_point": "圆与切线",
@@ -496,7 +520,7 @@ mod tests {
     #[tokio::test]
     async fn generate_llm_geometry_exhausted_returns_message() {
         // 连续 3 次校验失败 → 停止（复用工具护栏语义），回告模型。
-        let (model, memory, _) = fake_handle(
+        let (model, memory, _compute, storage) = fake_handle(
             r#"{"knowledge_point":"圆与切线","question_text":"如图，PA 是圆 O 的切线。","answer_spec":"PA⊥OA","diagram_spec":{"points":{"O":[0,0],"A":[3,0],"P":[3,4]},"objects":[{"type":"circle","center":"O","radius":3}],"labels":["O","A","P"]}}"#,
         );
         let compute = ComputeHandle::new(Arc::new(FakeCompute {
@@ -510,6 +534,7 @@ mod tests {
             model,
             memory,
             compute,
+            storage,
             AbortSignal::new(),
             json!({
                 "knowledge_point": "圆与切线",
@@ -525,7 +550,7 @@ mod tests {
     #[tokio::test]
     async fn generate_llm_geometry_backend_down_degrades() {
         // 执行端不可用：降级放行（geometry_checked=false），不阻塞出题。
-        let (model, memory, _) = fake_handle(
+        let (model, memory, _compute, storage) = fake_handle(
             r#"{"knowledge_point":"圆与切线","question_text":"如图，PA 是圆 O 的切线。","answer_spec":"PA⊥OA","diagram_spec":{"points":{"O":[0,0],"A":[3,0],"P":[3,4]},"objects":[{"type":"circle","center":"O","radius":3}],"labels":["O","A","P"]}}"#,
         );
         let compute = ComputeHandle::new(Arc::new(FakeCompute {
@@ -535,6 +560,7 @@ mod tests {
             model,
             memory,
             compute,
+            storage,
             AbortSignal::new(),
             json!({
                 "knowledge_point": "圆与切线",

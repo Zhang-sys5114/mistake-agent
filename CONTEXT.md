@@ -35,8 +35,17 @@ _Avoid_: 业务插件（过早限定业务范围）、用户态插件（口语�
 _Avoid_: API（含义过泛）
 
 **Service handle（服务句柄）**:
-kernel 按能力声明注入用户插件的受限接口，只暴露该插件需要的方法，不暴露底层资源；等价于 OS 的文件描述符。
+kernel 按能力声明注入用户插件的受限接口，只暴露该插件需要的方法，不暴露底层资源；等价于 OS 的文件描述符。用户插件的一切磁盘读写只经 `StorageHandle` 语义方法（ADR-0042 磁盘 IO 铁律）。
 _Avoid_: 全局单例、直接依赖
+
+**DomainIo（域内文件能力）**:
+storage 引出的数据根目录域内文件 trait（read/write/remove/remove_tree/list，域 = `Domain` 枚举：mistakes/sessions/memory/data/uploads）；实现内部做域根拼接 + canonicalize 兜底（防符号链接逃逸）+ 原子写 + 审计（FileIo）。只注入内核插件（如 memory），用户插件永不持有。_Avoid_: 通用文件系统 API（插件直读 std::fs）
+
+**TmpIo（暂存文件能力）**:
+storage 引出的系统 temp 暂存文件 trait（read_staged/remove_staged），硬编码 `std::env::temp_dir()` + `mistake-agent-` 前缀白名单，与 DomainIo 解耦；读删记审计（StagedFileIo）。附件暂存（vision 读、grading 删）的唯一通道。_Avoid_: 让插件直读暂存路径
+
+**RelPath（相对路径）**:
+类型安全的域内相对路径：`parse` 构造即校验（段白名单 `[a-zA-Z0-9._-]`、首尾必须字母数字、拒绝 `.`/`..`/`\`/`:`/非 ASCII），不做任何路径规范化（规范化即攻击面），fail-closed——类型上不可能表示目录遍历。_Avoid_: 裸字符串路径拼接
 
 **Capability declaration（能力声明）**:
 用户插件注册时声明的服务依赖清单；kernel 据此校验并注入句柄。
@@ -177,3 +186,28 @@ _Avoid_: 直接把 chemfig 当 KaTeX 宏包引入（会静默渲染失败）、�
 
 **Mistake management state（错题管理状态）**:
 错题本记录的轻量管理字段：`is_correct` 表示已掌握（复用原有字段），`pinned` 表示置顶，`deleted_at` 非空表示软删除；`grading::list` 默认隐藏已删除记录，`grading::remove` / `grading::remove_many` 只写 `deleted_at`，不物理删除。_Avoid_: 硬删除错题、为已掌握另建 `mastered` 字段
+
+**Mistake edit boundary（错题编辑边界）**:
+错题修改的权限语义：模型可经 `grading::update` 改**内容字段**（subject/knowledge_point/question/student_answer/reference_answer/analysis），不可改**管理字段**（is_correct/pinned/deleted_at）；删除（remove/remove_many）与已掌握标记仅用户可做（UserOnly）。模型是错题本主要写入者（判分归档、练习回写），编辑能力保证幻觉内容可自愈；管理字段只由用户维护，避免模型污染掌握度统计。_Avoid_: 模型可删题、模型标已掌握
+
+**Mistake event log（错题事件流）**:
+追加式 JSONL（错题条目内 `events.jsonl`），逐条记录每道错题的判分与掌握度变更，是「正确率变化 / 反复丢分 / 掌握度」等时间线统计的唯一业务真相；与审计（Audit，操作事实记录、10MB 轮转）不同，事件流不轮转、只追加，`mistake.json` 快照中的 `is_correct` 只是其最新状态。_Avoid_: 审计、日志、Attempt 数组内嵌错题记录（快照与时间线分离，事件不进 mistake.json）
+
+**Mistake entry（错题条目）**:
+错题本的一个存储单元：`mistakes/<id>/` 目录，内含 `mistake.json`（当前快照）、`events.jsonl`（该题事件流）、`schedule.json`（该题掌握度调度）——错题以目录为领域对象，与 `sessions/<key>.jsonl` 每会话一文件的哲学一致；旧单文件 `mistakes.json` 由 bootstrap 一次性迁移。_Avoid_: mistakes.json 单文件全量重写、把事件内嵌进错题记录
+
+**Mastery schedule（掌握度调度）**:
+每道错题的 Anki 式调度状态（`schedule.json`：interval/ease/due_at/last_result），由判分事件折叠更新——调度层「错 1 次即重置间隔回 7 天」（again 语义，节奏惩罚），状态层「连错 2 次才打回已掌握」（掌握裁决，避免偶然失误误伤）；exam 达标（题数≥2 且得分率≥80%）是可信证据可自动置已掌握。调度与裁决分离，事件流为证据、调度为折叠状态。_Avoid_: 固定 7/14/30 天硬编码、已掌握凭用户自报永不过期
+
+**Timer service（定时服务）**:
+内核插件，提供定时触发与主动回合申请通道（`ServiceId::Scheduler` + `SchedulerHandle`）；只存插件注册的定时配置（interval / 载荷文本 / fire_on_start），到点请求 kernel 核心、由内核特权发起中断，对业务零感知（不知道到期/重测/清单）。_Avoid_: 调度器（与 Session scheduler 混淆）、定时器（只指底层 tokio 机制）
+
+**Proactive turn（主动回合）**:
+定时中断唤醒后发起的无用户消息回合——scheduler 内核插件到点请求 kernel 核心，内核特权在回合边界发起 Interrupt（"环境有变动"信号），回合空闲时从 pending 队列消费发起独立回合（不并入用户回合）；模型经白名单工具 `tracking::due_list` 自查到期清单，产出带 `proactive` 标记的合成 user 消息（display_text 前端渲染为系统通知气泡）落树；proactive 回合工具白名单缺省为空（结构性杜绝自动出题）。防骚扰状态（last_reminded_at / dismissed_until）纯内存、重启作废。_Avoid_: 推送通知（无服务器）、后台任务抢占当前回合、自动重测（模型只提醒，判分链只在学生回应后走）
+
+**Knowledge graph（知识图谱）**:
+知识点及其关联的结构化拓扑：每学科一个 `mistakes/graph/<学科>.json`（文件名 sanitize），节点 ID = `学科::知识点`，纯拓扑（节点 + 边 + 权重），属性实时聚合自 schedule.json / events.jsonl（可重建）；边分先验层（启动时模型生成一次前置依赖表落盘 `data/point_deps.json`，生成即数据）与共现层（一次判分批次 batch_id 事件驱动增量，权重 = 共现批次数，双层剪枝）；图谱按学科隔离（无跨学科边）。图谱同时是可视化数据源（`tracking::graph` Command → ECharts 力导向图）与 Agentic 检索索引（`tracking::graph_query`）。_Avoid_: 图数据库（违反本地单二进制红线）、向量检索（结构化精确过滤优先）、图谱快照存属性（真相在事件流，属性现算）
+
+**Runtime data（运行时数据）**:
+数据根目录 `data/` 下的教学数据文件（`data/gaokao_pool.json`、`data/point_deps.json` 等），bootstrap 启动时缺失即写默认种子（与 AGENTS.md 同款幂等），运行时可编辑、可被模型经 storage 句柄更新（生成即数据）；与编译期 include_str! 嵌入相对。_Avoid_: 静态资源、内置数据（暗示不可变）
+

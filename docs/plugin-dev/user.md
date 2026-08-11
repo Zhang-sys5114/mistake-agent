@@ -12,7 +12,8 @@
 
 ## 2. 目录形态与规则
 
-- 一个插件一个文件夹：`src/plugin/<name>/`，入口必须是 `mod.rs`；内部可拆子模块（如 `grading/core.rs`、`practice/templates.rs`）。
+- 一个插件一个文件夹：`src/plugin/<name>/`，入口必须是 `mod.rs`；内部可拆子模块（如 `grading/core.rs`、`practice/templates/mod.rs`）。
+- **职责先行**：开发时先规划职责；预计有两个及以上职责时，直接创建对应子模块或同名文件夹，不要先把不同职责堆进 `mod.rs` 再被动拆分。入口 `mod.rs` 只负责插件契约、装配和公共重导出；~400 行只是审查预警线，不是拆分触发条件。
 - **目录即插件**：build.rs 扫描一层子目录里存在 `mod.rs` 的文件夹即收录，字母序生成清单。
 - **禁用/WIP**：目录根部放一个空文件 `disabled`，整个目录**不参与编译、不注册**；删掉即恢复。写一半的代码可以安全放这里。
 - 公共辅助代码**不要**作为 `src/plugin/` 的兄弟目录出现（会被当成插件收录），请放进插件内部或放 `src/` 其他位置。
@@ -57,12 +58,23 @@ Arc::new(|call_ctx: &ToolCallContext, params: Value| Box::pin(async move { ... }
 
 | 句柄 | 可见能力 | 用途示例 |
 |---|---|---|
-| `StorageHandle` | 错题本五操作（save/get/list/update/remove） | grading 归档 |
+| `StorageHandle` | 错题本五操作（save/get/list/update/remove）**+ 附件暂存读写 + 教学数据文件读写**（见下） | grading 归档、vision 读图、practice 真题池 |
 | `ModelHandle` | 带超时/abort/审计的 `complete` | OCR、判分、组卷 |
 | `MemoryHandle` | 记忆 save/show/remove | 跨会话记忆 |
 | `ComputeHandle` | Python 验算 `run` | 数学验算 |
 
 句柄过滤是结构性的：没在 `requires` 声明就**拿不到**，运行时没有检查可绕。
+
+### 磁盘 IO 铁律（ADR-0042）
+
+**插件不持有任何文件句柄**——需要读写文件时，只能在 `requires` 里声明 `ServiceId::Storage`，经 `StorageHandle` 的语义方法调用（白名单校验、原子写、审计都在 storage 实现内，插件不可绕过）：
+
+| 方法 | 对应能力 | 用途 |
+|---|---|---|
+| `read_staged(path)` / `remove_staged(path)` | 系统 temp 附件暂存（`mistake-agent-` 前缀白名单） | vision 读图、grading 判分后清理暂存 |
+| `read_data_file(name)` / `write_data_file(name, content)` | 数据根目录 `data/` 教学数据文件（原子写） | 真题池 `gaokao_pool.json`、先验依赖表 |
+
+路径安全由 storage 保证（`RelPath` 类型校验 + canonicalize 兜底），插件传的是**文件名/暂存路径字符串**，永远不拼接真实路径、不触碰文件系统 API。不要试图用 `std::fs` 自己读文件——那正是铁律禁止的，且会被评审拦下。
 
 ## 5. 入口点与 CallerPolicy
 
@@ -85,4 +97,4 @@ Arc::new(|call_ctx: &ToolCallContext, params: Value| Box::pin(async move { ... }
 
 - 参考模板：[reference/user-plugin/](./reference/user-plugin/mod.rs)（有编译锚定测试保证与契约同步）；
 - 内核插件（特权子系统）写法：[kernel.md](./kernel.md)；
-- 契约与 RPC 细节：docs/api.md；服务契约：src/kernel/plugin/services.rs。
+- 契约与 RPC 细节：[docs/api.md](../api.md)；服务契约：`src/kernel/plugin/services/`。

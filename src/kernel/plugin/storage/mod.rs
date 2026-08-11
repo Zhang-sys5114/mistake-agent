@@ -24,6 +24,8 @@ pub(crate) struct Inner {
     pub(crate) messages: HashMap<SessionKey, Vec<Message>>,
     pub(crate) mistakes: Vec<Mistake>,
     pub(crate) audit: Vec<AuditRecord>,
+    /// 域内文件模拟（内存后端 DomainIo 用，key = `domain/rel`）。
+    pub(crate) files: HashMap<String, Vec<u8>>,
 }
 
 pub use core::{AnyStorage, active_chain, active_session, last_message_id};

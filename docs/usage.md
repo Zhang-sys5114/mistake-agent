@@ -45,7 +45,7 @@ cargo run --bin mistake-agent
 - **思考过程**：模型推理增量默认折叠在"思考过程"卡片里，点击展开/折叠；不展示给学生也随时可查。
 - **工具进度**：批改中底部显示"grading::upload：正在识别…"等进度。
 - **验算**：让 Agent 验算数学题（如"用 Python 验证 3x+5=11 的解"），Agent 调 `compute::verify`，代码在应用内 Pyodide（WASM 沙箱）执行。
-- **练习/复盘/组卷/追踪**：聊天里说"生成一道全等三角形变式题 / 给我周复盘 / 出 5 道薄弱点试卷 / 检查我的掌握度"，Agent 分别调 `practice::generate`、`report::weekly`、`exam::compose`、`tracking::checkin`。
+- **练习/复盘/组卷/追踪**：聊天里说"生成一道全等三角形变式题 / 我的薄弱点在哪 / 批改一下这道题 / 给我周复盘 / 出 5 道薄弱点试卷 / 检查我的掌握度"，Agent 分别调 `practice::generate`、`practice::gaps`、`practice::check`、`report::weekly`、`exam::compose`、`tracking::checkin`。
 
 ## 4. 数据与产物
 
@@ -54,7 +54,9 @@ cargo run --bin mistake-agent
 | settings.json | 模型配置与 key（用户独占写） |
 | sessions/<key>.jsonl | 会话消息树（首行元数据） |
 | mistakes/mistakes.json | 错题本 |
-| memory/ | 记忆条目（文件持久化，路径即层级） |
+| memory/ | 记忆条目（文件持久化；中文路径编码落盘，应用层路径不变） |
+| uploads/ | 作业附件持久副本 |
+| data/ | 运行时教学数据（真题池等） |
 | audit/audit.jsonl | 审计（10MB 轮转） |
 | logs/ | 分级诊断日志（10MB 轮转） |
 

@@ -15,7 +15,7 @@
 
 ### 1. Agent 系统提示（agent_system_prompt）
 
-注入位置：主模型每个请求的消息头（src/kernel/agent/loop_mod.rs 组装 ModelRequest 时注入，不落消息树）。内容见 src/kernel/prompt.rs，要点：
+注入位置：主模型每个请求的消息头（`src/kernel/agent/loop_mod/mod.rs` 组装 `ModelRequest` 时注入，不落消息树）。内容见 `src/kernel/prompt.rs`，要点：
 
 - 角色与受众（中学生、中文、耐心）。
 - 工具流程：先 `vision__read`（图片理解，不判分；多个文件逐个调用）→ 按用户意图决定：`grading__upload`（判分→归档→讲解）或直接讲解/描述；`grading__list`（错题本查询）。
@@ -40,7 +40,7 @@
 
 ### 3. 判分系统提示（grading_system_prompt）
 
-主模型使用，配合 `text.format = json_schema`（内联扁平数组 schema，src/plugin/grading.rs）：
+主模型使用，配合 `text.format = json_schema`（内联扁平数组 schema，`src/plugin/grading/core.rs`）：
 逐题输出 number/question/student_answer/correct/score/total/knowledge_point/analysis/subject/reference_answer；
 `subject` 为学科（数学/英语/物理/化学/生物/语文等，无法判断填"未分类"），`reference_answer` 为该题参考答案（可 null）；
 强制数组包裹。

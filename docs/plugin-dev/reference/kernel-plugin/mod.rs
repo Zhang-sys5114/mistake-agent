@@ -6,6 +6,10 @@
 // 3. 实现工具/命令/事件；构建即自动收录（ADR-0036），无需改任何聚合文件。
 //
 // 完整规则见 docs/plugin-dev/kernel.md。
+//
+// 磁盘 IO 铁律（ADR-0042）：内核插件需要落盘时，构造阶段注入
+// `Arc<dyn DomainIo>`（数据根目录域内）或 `Arc<dyn TmpIo>`（系统 temp 暂存），
+// 不要裸用 std::fs；路径安全靠 `RelPath::parse`（类型层无遍历），审计内置。
 
 use std::sync::Arc;
 

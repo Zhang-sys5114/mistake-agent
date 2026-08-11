@@ -5,8 +5,10 @@
 
 use std::path::Path;
 
-/// 数据根目录下的固定子目录（与 ADR-0011 布局一致）。
-const SUBDIRS: [&str; 6] = ["sessions", "mistakes", "memory", "audit", "logs", "uploads"];
+/// 数据根目录下的固定子目录（与 ADR-0011 布局一致；`data/` 为 ADR-0042 运行时数据）。
+const SUBDIRS: [&str; 7] = [
+    "sessions", "mistakes", "memory", "audit", "logs", "uploads", "data",
+];
 
 /// 默认教学规则模板：占位内容，家长/老师可编辑；仅首次创建时写入。
 const AGENTS_MD_TEMPLATE: &str = r#"# 教学规则（AGENTS.md）

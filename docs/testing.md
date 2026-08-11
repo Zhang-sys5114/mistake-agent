@@ -2,14 +2,14 @@
 
 ## 1. 测试策略
 
-- **单元测试**：`cargo test`（80 项），覆盖注册表校验、dispatch、session 调度（守卫/摘要/分支/压缩/中断）、storage（文件/内存）、memory（文件 CRUD/路径越界）、model（SSE/usage 解析）、settings（patch/public_view）、compute 桥接与 handler、12 个插件入口（schema/模板/聚合）。
+- **单元测试**：`cargo test`（137 项），覆盖注册表校验、dispatch、session 调度（守卫/摘要/分支/压缩/中断）、storage（文件/内存/DomainIo/TmpIo/迁移）、memory（文件 CRUD/路径越界/旧布局迁移）、model（SSE/usage 解析）、settings（patch/public_view）、compute 桥接与 handler、插件入口（schema/模板/聚合）。
 - **真实 API 集成测试**：`cargo test --test live_api -- --ignored --nocapture`，直接接 DeepSeek/SiliconFlow（无 key 自动跳过）。
 - **样例端到端**：`samples/` 三套作业图片逐一走 上传→OCR→判分→归档 全链路。
 - **前端自检**：`cd web && npm run check:pyodide`（真实加载 Pyodide WASM 并执行 Python：算术、符号计算（sympy 解方程/求导/积分）、物理（单位换算/运动学）、numpy 数值、异常路径）；`node scripts/katex-check.mjs`（KaTeX 行内/块级/化学式/矩阵/非法公式容错）。
 
-## 2. 用例与结果（2026-08-04 实测）
+## 2. 用例与结果（2026-08-10 实测）
 
-### 单元测试：80 项全过
+### 单元测试：137 项全过
 
 | 模块 | 覆盖点 |
 |---|---|
@@ -17,13 +17,16 @@
 | dispatch | 注册链路、命令回退同名工具 |
 | session | 首消息建会话、空闲超时/start_new/session::switch 树内分叉（摘要节点+新子树）、守卫决策（stub+LLM 解析失败保底）、消息级分支派生/切分支、上下文裁剪（scope_session_context）、压缩摘要、InterruptBus |
 | storage | 错题 CRUD、会话追加/归档、active_path/derive_branch/splice_compaction |
-| memory | 文件 CRUD、目录浏览、子树删除、路径校验（绝对/../空段） |
+| memory | 文件 CRUD、目录浏览、子树删除、路径校验（绝对/../空段）、中文路径编码与旧布局迁移 |
+| storage IO | `RelPath` 遍历向量、域隔离、TmpIo temp 白名单、运行时真题池文件优先/种子兜底 |
 | model | SSE 解析、usage 解析（response.usage 顶层）、ToolCall 展开 |
 | settings | patch 校验、public_view 不含 key |
 | compute | BridgeCompute 回执/取消 |
 | 插件 | 12 插件入口参数 schema、practice 模板生成、report/exam/tracking 聚合断言 |
 
 ### 真实 API 链路
+
+当前 `live_api` 共 9 个 ignored 用例，使用本地 `settings.json` 中的真实主模型/视觉模型配置；复验结果为 9/9 通过。
 
 | 用例 | 结果 |
 |---|---|

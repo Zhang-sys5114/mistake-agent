@@ -46,16 +46,16 @@ let kernel = KernelBuilder::new()
 
 **留使用方（不随 crate）**：
 
-- 内核插件实现（存储/记忆/验算等业务服务；`services.rs` 里 `MistakeStore`/`Mistake` 等错题领域 trait 不进 crate）。
+- 内核插件实现（存储/记忆/验算等业务服务；`plugin/services/storage.rs` 里 `MistakeStore`/`Mistake` 等错题领域 trait 不进 crate）。
 - 用户插件（业务工具）。
 - Settings、人格 prompt、具体 GUI 协议（本仓库的 settings/balance/cache/compute 方法走 `RpcExtension`）。
 
 ## 剥离前需解耦的点（M1，行为不变）
 
-- `loop_mod.rs`：`agent_system_prompt()` 直调 → 改为注入的 `system_prompt` provider。
-- `loop_mod.rs` / `session.rs`：`Interrupt::SettingsChanged` → 通用 `ConfigChanged`（或去掉）。
-- `services.rs`：错题领域类型（MistakeStore 等）移到 app 侧；`ModelService`/`SessionStore`/`AbortSignal`/`ModelChunk`/`ToolSchema` 等通用 trait 进 crate。
-- `rpc.rs`：`Method` 拆通用子集 + `custom` 兜底；`Kernel::new` 的硬编码装配（FileStorage/LiveSettingsModelService…）改为 `KernelBuilder`。
+- `agent/loop_mod/`：`agent_system_prompt()` 直调 → 改为注入的 `system_prompt` provider。
+- `agent/loop_mod/` / `agent/session/`：`Interrupt::SettingsChanged` → 通用 `ConfigChanged`（或去掉）。
+- `plugin/services/storage.rs`：错题领域类型（MistakeStore 等）移到 app 侧；`ModelService`/`SessionStore`/`AbortSignal`/`ModelChunk`/`ToolSchema` 等通用 trait 进 crate。
+- `agent/rpc/`：`Method` 拆通用子集 + `custom` 兜底；`Kernel::new` 的硬编码装配（FileStorage/LiveSettingsModelService…）改为 `KernelBuilder`。
 
 ## 里程碑（后续落地顺序）
 

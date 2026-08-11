@@ -12,7 +12,7 @@
 └───────────────────────────────────────────────────────────┘
 ```
 
-- GUI → kernel：前端经 `kernel_send` 提交**请求帧**（`RpcRequest`，见 src/kernel/agent/rpc.rs），进程内 mpsc 通道投递。
+- GUI → kernel：前端经 `kernel_send` 提交**请求帧**（`RpcRequest`，见 `src/kernel/agent/rpc/protocol.rs`），进程内 mpsc 通道投递。
 - kernel → GUI：`Kernel::handle` 返回**响应帧**（带 id 回执），`EventSink`（ChannelEventSink）发**事件帧**（无 id 播报，`Event`），统一经 Tauri `Channel<String>` 推给前端。
 - Tauri 侧桥接（src/main.rs 的 Tauri 命令，非 RPC 方法）：`start_kernel`（进程内创建 Kernel + 请求循环）、`kernel_send`（投递一行 JSONL 请求）、`pick_homework_file`（rfd 文件对话框，返回作业路径）。
 - 通信格式：JSON Lines（每行一个完整 JSON 对象），UTF-8。
@@ -75,7 +75,7 @@
 
 ## 3. 内核入口点契约
 
-### 3.1 两段式插件契约（src/kernel/context.rs, registry.rs）
+### 3.1 两段式插件契约（`src/kernel/context.rs`、`src/kernel/registry/`）
 
 ```rust
 pub trait UserPlugin {
@@ -125,11 +125,11 @@ pub trait UserPlugin {
 
 > `trigger_command` 找不到同名 Command 时，会回退放行同名 Tool（用户对 UserAndModel/UserOnly 工具均可调），因此 GUI 可直接触发 `grading::list` 等工具。
 
-## 4. 服务契约（src/kernel/plugin/services.rs）
+## 4. 服务契约（`src/kernel/plugin/services/`）
 
 | 服务 | 角色 trait | 注入视图 | 说明 |
 |---|---|---|---|
-| Storage | `SessionStore` + `MistakeStore` + `AuditSink` | `StorageHandle`（错题本 save/get/list/update/remove/remove_many 6 操作） | 会话/错题/审计；文件持久化（sessions/*.jsonl、mistakes.json、audit.jsonl，10MB 轮转） |
+| Storage | `SessionStore` + `MistakeStore` + `AuditSink` + `DomainIo` + `TmpIo` | `StorageHandle`（错题本、附件暂存、运行时数据文件语义面） | 会话/错题/审计；文件持久化（sessions/*.jsonl、mistakes.json、audit.jsonl，10MB 轮转） |
 | Memory | `MemoryService`（save/show/remove，remove 删子树） | `MemoryHandle` | 路径类型化校验；文件持久化到数据根目录 memory/（失败回退内存实现） |
 | Compute | `ComputeService::run` | `ComputeHandle` | BridgeCompute：经 `compute_request` 事件把代码发给 GUI，等待 `compute_result` 回执；超时/取消由 kernel 侧负责 |
 | Model | `ModelService::stream/complete` | `ModelHandle`（仅 complete + 超时/abort/审计） | 路由主/视觉模型；设置变更时经共享持有器热替换，已注册插件的句柄同步生效 |
@@ -155,7 +155,7 @@ pub trait UserPlugin {
 
 - Endpoint：`POST https://api.siliconflow.cn/v1/chat/completions`。
 - 模型：`Qwen/Qwen3-VL-32B-Instruct`（settings 可配 `SILICONFLOW_MODEL`）。
-- 图片：`content` 数组 `{"type":"image_url","image_url":{"url":"data:<mime>;base64,...","detail":"high"}}` + `{"type":"text","text":"仅转写，不要解题"}`（src/plugin/grading.rs `ocr_image`）。
+- 图片：`content` 数组 `{"type":"image_url","image_url":{"url":"data:<mime>;base64,...","detail":"high"}}` + `{"type":"text","text":"仅转写，不要解题"}`（`src/plugin/grading/core.rs` OCR 流程）。
 - PDF：文本型 PDF 用 `pdf-extract` 提取文字；扫描版 PDF 明确报错提示拍照上传。
 
 ### 5.3 settings.json（数据根目录 `~/Documents/.mistake-agent/`）
@@ -190,7 +190,7 @@ pub trait UserPlugin {
 
 ```bash
 cd web && npm install && npm run build    # 前端构建（改过 web/ 后必须执行）
-cargo test                                # 单元测试（97 项）
+cargo test                                 # 单元测试（137 项）
 cargo test --test live_api -- --ignored   # 真实 API 验收：hello + samples/ 三套样例
 cargo run --bin mistake-agent             # Tauri GUI（Wayland/X11 均可）
 ```
@@ -202,16 +202,15 @@ cargo run --bin mistake-agent             # Tauri GUI（Wayland/X11 均可）
 | 文件 | 内容 |
 |---|---|
 | src/kernel/contract.rs | 入口点元数据、CallerPolicy、ToolError、wire name |
-| src/kernel/plugin/services.rs | 四服务契约、受控句柄、ServiceHandles、MemoryPath |
+| src/kernel/plugin/services/ | 四服务契约、受控句柄、ServiceHandles、MemoryPath、DomainIo/TmpIo |
 | src/kernel/plugin/model/ | Responses API / Chat Completions 适配器、SSE 解析、路由服务 |
-| src/kernel/registry.rs / context.rs | 注册表校验、两段式契约（UserPlugin + KernelPlugin）、EntryRegistrar |
+| src/kernel/registry/ / context.rs | 注册表校验、两段式契约（UserPlugin + KernelPlugin）、EntryRegistrar |
 | src/kernel/agent/dispatch.rs | Caller 检查、jsonschema 校验、两级取消、延期后门 |
-| src/kernel/agent/loop_mod.rs | agent loop、护栏、气泡完成落盘 |
-| src/kernel/agent/session.rs | SessionScheduler、LlmTurnDecider、InterruptBus、空闲超时 |
+| src/kernel/agent/loop_mod/ | agent loop、护栏、气泡完成落盘 |
+| src/kernel/agent/session/ | SessionScheduler、LlmTurnDecider、InterruptBus、空闲超时 |
 | src/kernel/plugin/storage/ · memory/ · compute/ · session/ | 内核插件（服务实现 + 工具入口）；plugin/mod.rs 聚合内核插件清单（ADR-0035） |
-| src/kernel/agent/rpc.rs | 帧类型、Kernel 组装与请求路由 |
+| src/kernel/agent/rpc/ | 帧类型、Kernel 组装与请求路由 |
 | src/main.rs | Tauri 壳：进程内 Kernel + Channel 桥接（standalone，唯一二进制） |
-| src/main.rs | Tauri 壳：进程内 Kernel + Channel 桥接（standalone） |
 | web/ | Vue 3 UI（src/App.vue、composables/useKernel.js，构建产物 web/dist） |
 | src/plugin/grading/ | 场景一：上传/OCR/判分/归档（含学科与参考答案） |
 | src/plugin/ | 业务用户插件：hello/grading/practice/report/exam/tracking |

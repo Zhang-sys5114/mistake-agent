@@ -106,11 +106,13 @@ pub(crate) async fn upload_handler(
 ) -> Result<Value, ToolError> {
     let p: UploadParams =
         serde_json::from_value(params).map_err(|e| ToolError::invalid_params(e.to_string()))?;
-    let path = std::path::Path::new(&p.file);
     // 先读图（vision::read_content：图片理解/PDF 抽文），不删文件；读完确认内容后判分，
-    // 再清理暂存副本。
-    let content = read_content(&model, path, &ctx.events, "grading::upload").await?;
-    let _ = std::fs::remove_file(path);
+    // 再经 StorageHandle 清理暂存副本（ADR-0042 磁盘 IO 铁律，插件不持有文件句柄）。
+    let content = read_content(&model, &storage, &p.file, &ctx.events, "grading::upload").await?;
+    storage
+        .remove_staged(&p.file)
+        .await
+        .map_err(|e| ToolError::handler(format!("清理暂存文件失败：{e}")))?;
 
     emit_progress(ctx, "grading::upload", "正在逐题判分…");
     let grading_text = grade_content(&model, &content, ctx).await?;

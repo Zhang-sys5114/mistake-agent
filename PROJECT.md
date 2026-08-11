@@ -1,6 +1,6 @@
 # Mistake Agent v2 — 项目总览
 
-> 本文档自包含：只看这一份文件即可了解项目全貌、技术决策与分工方式。详细决策留痕见 `docs/adr/`（34 条 ADR）与 `CONTEXT.md`（术语表），但理解本项目不要求先读它们。
+> 本文档自包含：只看这一份文件即可了解项目全貌、技术决策与分工方式。详细决策留痕见 `docs/adr/`（42 条 ADR）与 `CONTEXT.md`（术语表），但理解本项目不要求先读它们。
 
 ## 1. 项目一句话
 
@@ -18,7 +18,7 @@
 | 场景 | 一句话 | 主要入口 |
 |---|---|---|
 | 1. 上传作业 / 自动批改 | 图片或 PDF 上传 → 视觉模型理解图片（`vision::read`：作业转写 / 图片描述）→ 模型按内容与用户意图决定：讲解、描述或判分归档 | `vision::read` + `grading::*` |
-| 2. 薄弱点定位 / 分层练习 | 基于错题定位知识漏洞 → 基础补漏 → 变式 → 拔高 → 真题 | `practice::*` |
+| 2. 薄弱点定位 / 分层练习 | 基于错题定位知识漏洞 → 基础补漏 → 变式 → 拔高 → 真题 | `practice::generate` / `practice::gaps` / `practice::check` |
 | 3. 多周期复盘 | 按日 / 周 / 单元 / 月考 / 学期生成可视化报告 | `report::*` |
 | 4. 阶段性考核 | 按薄弱点自动组卷、限时作答、判分、掌握度判定 | `exam::*` |
 | 5. 长效追踪 | 知识点图谱、掌握度状态、7/14/30 天强制重测 | `tracking::*` |
@@ -174,15 +174,17 @@ mistake-agent/
 │   ├── lib.rs                    ← 库出口（kernel 公开面 + plugin 注册聚合）
 │   ├── main.rs                   ← Tauri GUI 入口（进程内 kernel，standalone）
 │   ├── kernel.rs                 ← kernel 模块入口（mod kernel;）
-│   ├── kernel/                   ← 内核（Rust 2018 布局，目录即模块）
+│   ├── kernel/                   ← 内核（目录即模块，职责先行）
 │   │   ├── agent/                ← Agent 核心调度层
-│   │   │   ├── loop_mod.rs       ← agent loop（护栏/压缩/中断消费）
-│   │   │   ├── session.rs        ← 会话调度（Goal/切换决策/树内分叉 + 摘要边界）
-│   │   │   ├── dispatch.rs  rpc.rs  balance.rs  cache.rs
+│   │   │   ├── loop_mod/         ← agent loop（主循环/回合类型/测试）
+│   │   │   ├── session/          ← 会话调度（guard/summarize/interrupt/scheduler）
+│   │   │   ├── rpc/              ← RPC（协议/处理器/组装）
+│   │   │   └── dispatch.rs  balance.rs  cache.rs
 │   │   ├── plugin/               ← 内核插件层（一插件一文件夹，mod.rs 承载插件 info）
-│   │   │   ├── services.rs       ← 内核插件公共契约（服务 trait + 受控句柄）
+│   │   │   ├── services/         ← 公共契约（model/storage/memory/compute）
 │   │   │   └── storage/  memory/  compute/  model/  session/
-│   │   ├── registry.rs  contract.rs  context.rs
+│   │   ├── registry/             ← 注册表（entry/mod/tests）
+│   │   ├── contract.rs  context.rs
 │   │   └── events.rs  audit.rs  logger.rs  message.rs  prompt.rs  settings.rs
 │   └── plugin.rs                 ← 用户插件入口（mod plugin;）
 │       └── plugin/               ← 用户插件（hello/ vision/ grading/ practice/ report/ exam/ tracking/）
@@ -192,9 +194,12 @@ mistake-agent/
 
 **边界约束**：单 crate 内没有 Cargo 依赖图边界，能力边界靠两层纪律保证：可见性（kernel 只公开 trait 与句柄类型，服务实现与内核内部用 pub(crate) 隐藏）+ 运行时调度（CallerPolicy、句柄注入、注册校验）。用户插件只允许经公开 API 面与内核交互。
 
+**文件组织（开发约定）**：职责先于实现规划；新功能预计存在两个及以上职责时，直接创建同名文件夹与 `mod.rs`，不先堆成单文件再拆。`mod.rs` 只负责公共面、装配与 `pub use` 重导出，职责实现放子模块；子模块间共享的私有项经父模块 `pub(crate) use` 桥接。~400 行只是审查预警线，不是拆分触发条件。已按此拆分的：`agent/session/`（guard/summarize/interrupt/scheduler/clock）、`agent/rpc/`（protocol/handlers）、`agent/loop_mod/`（turn）、`plugin/services/`（model/storage/memory/compute）、`plugin/storage/file/`（mistakes/io/tmp）、`plugin/storage/core/`（chain）、`registry/`（entry）、`plugin/memory/`（store/inmem）、`plugin/practice/templates/`（geometry/algebra/english）、`plugin/grading/`（tests.rs 拆出）。
+
 ## 9. 当前状态
 
-- **M1–M6 主体已完成（除 Windows 打包）**，设计文档 37 条 ADR（0001–0037）+ 术语表（CONTEXT.md）。
+- **M1–M6 全部完成**（含 Windows 打包实测：`错题 Agent_0.1.0_x64-setup.exe` 在 Windows 环境安装运行通过），设计文档 42 条 ADR（0001–0042）+ 术语表（CONTEXT.md）。
+- **磁盘 IO 铁律 + 数据运行时化落地**（2026-08-10，ADR-0042）：`DomainIo`（数据根目录域内文件：域枚举 + canonicalize 兜底 + 原子写 + 审计）+ `TmpIo`（系统 temp 暂存：`mistake-agent-` 前缀白名单）+ `RelPath`（类型层无目录遍历，fail-closed）；memory 收编（中文路径 base64url 段编码经 DomainIo 落盘）；vision/grading 附件读写、practice 真题池全经 StorageHandle 语义方法（插件零文件句柄）；`data/` 子目录 + 真题池运行时化（`gaokao_pool.json` 文件优先、内置种子兜底，`read_pool_json` 真实链路测试）；verify_geometry.py 维持 include_str!（执行代码非数据）。
 - kernel：注册表/两段式契约（用户插件 UserPlugin + 内核插件 KernelPlugin，ADR-0035）/dispatch/loop/RPC/session 调度全链路；四服务全部生产实现——storage（文件持久化：会话 JSONL/错题 JSON/审计 JSONL 轮转）、memory（文件持久化 + MemoryHandle 事件/审计）、model（Responses API + Chat Completions，LiveSettingsModelService 热更新）、compute（BridgeCompute → GUI Pyodide）。
 - 构建期插件自动发现（ADR-0036）：插件目录 `mod.rs` 即插件描述、`disabled` 标记即禁用（不编译不注册）；插件开发手册 + 参考模板（docs/plugin-dev/，复制即开工，include! 编译锚定测试保证与契约同步）。
 - **ADR-0037 剥离落地中**：M1（本仓库解耦：system_prompt 注入、ConfigChanged、错题领域移到 `src/mistake.rs`、RPC 通用子集 + KernelBuilder）与 M2（本地独立 crate `so-lite-agent/` + MockModelService/InMemorySessionStore + hello 示例）已落地；M3-M5（Provider 适配器/真实 API、插件手册迁移、crates.io 发布与 mistake-agent 切换）待办，详见 [docs/plan/so-lite-agent.md](plan/so-lite-agent.md)。
@@ -203,12 +208,13 @@ mistake-agent/
 - 聊天页上下文缓存命中率（ADR-0033）：get_cache_stats 按会话 + 全局聚合主模型回合 usage（Responses `cached_tokens` / Chat Completions `prompt_cache_*`）；真实链路实测命中率 97.3%（命中 4864 / 未命中 190 tokens）。
 - 会话切换防污染（ADR-0034）：session::switch 控制消息不落会话树、不随历史携带，切换后回答归新会话；真实链路实测后续回合不再反复切换。
 - Pyodide 验算执行端完整化：numpy/sympy（符号计算/物理单位）离线打包（`npm run fetch:pyodide` 预热，vite 构建校验存在性）；前端自检真实执行解方程/求导/积分/单位换算/运动学/numpy；live_api 覆盖 kernel→桥→回执→模型续答全链路。
-- 用户插件 7 个：hello、vision（看图理解：上传→读图→模型决定讲解/描述或判分归档）、grading（场景一：判分归档，输出 subject/reference_answer）、practice、report、exam、tracking；内核插件 5 个（storage/memory/compute/model/session），`memory::*`、`compute::verify`、`session::switch` 由内核模块经 KernelPlugin 契约注册（ADR-0035）——五个场景工具均可从会话内触达。
+- 用户插件 7 个：hello、vision（看图理解：上传→读图→模型决定讲解/描述或判分归档）、grading（场景一：判分归档，输出 subject/reference_answer，含 get/update/remove/remove_many 错题管理命令，ADR-0038）、practice（场景二：生成/gaps/check，含智能出题与几何对拍）、report、exam、tracking；内核插件 5 个（storage/memory/compute/model/session），`memory::*`、`compute::verify`、`session::switch` 由内核模块经 KernelPlugin 契约注册（ADR-0035）——五个场景工具均可从会话内触达。
+- 场景二 practice 智能出题全链路落地（2026-08-09，设计见 docs/variants.md）：确定性模板库 15 个初高中知识点（几何模板带 diagram_spec 与前端渲染器同源协议）+ 高考真题池（data/gaokao_pool.json include_str! 编译期嵌入，difficulty=exam 走池内抽取）+ LLM 自由出题（json_schema 强约束，模板未命中时）；LLM 生成的几何图经 compute::verify（verify_geometry.py）做存在性/自洽性对拍，失败注入 prompt 重出（连续 3 次停，执行端不可用降级放行）；practice::check 把练习记录落 memory（practice/history），generate 出题前读近 30 天已掌握集合避重复（prompt 注入避开清单 + 真题池过滤）。
 - 场景一真实链路复验通过（2026-08-04）：图片/文本 PDF → Qwen3-VL OCR → deepseek-v4-flash（Responses API json_schema）判分 → 错题归档；assistant 消息落盘与 usage 解析已修复并有 live_api 断言。
 - Tauri GUI 正式化（Vue 3 + Vite，按 ui-ux-pro-max 设计系统）：聊天/错题本/会话历史/设置四页 + **OOBE 首次引导**（test_connection 连通性自检）；思维链默认折叠、流式打字机、工具进度、停止、消息树编辑与分支切换、Pyodide 验算执行端（本地 WASM）、Iconify 图标、Markdown+KaTeX+DOMPurify 防 XSS、附件（图片/PDF 持久展示）、错题本搜索/排序。
 - 设置页余额卡片（`check_balance` RPC）：DeepSeek `/user/balance` + SiliconFlow `/user/info` 真实查询，只读不落盘（ADR-0031）。
 - **Standalone**：kernel 内嵌 GUI 进程，mistake-agent 单二进制即可运行（sidecar 已彻底移除）。
-- 验收命令：`cd web && npm install && npm run fetch:pyodide && npm run build`；`cd web && npm run check:pyodide`；`cargo test`（80 项单元）；`cargo test --test live_api -- --ignored`（真实 API：hello 落盘+usage、三套样例、memory 往返、reasoning 回传回归 repro_reasoning、compute::verify 全链路）；`cargo run --bin mistake-agent`（GUI）。
+- 验收命令：`cd web && npm install && npm run fetch:pyodide && npm run build`；`cd web && npm run check:pyodide`；`cargo test`（121 项单元）；`cargo test --test live_api -- --ignored`（真实 API：hello 落盘+usage、三套样例、memory 往返、reasoning 回传回归 repro_reasoning、compute::verify 全链路）；`cargo run --bin mistake-agent`（GUI）。
 
 ## 10. 里程碑
 
@@ -220,7 +226,7 @@ mistake-agent/
 | M3 | RPC + Tauri 壳 | ✅ 完成：GUI ↔ kernel 进程内 RPC 闭环（standalone） |
 | M4 | 五个插件 + compute::verify | ✅ 完成：7 用户插件 + 5 内核插件注册；场景一全链路 + Pyodide 验算桥接 |
 | M5 | 消息树 / 记忆路由 / 设置向导 / 审计日志 | ✅ 完成：编辑/切分支、memory 工具、设置页、审计补全 |
-| M6 | Windows 打包 + 测试 + 文档 | 🟡 除 Windows 打包外完成：80 单测 + 真实 API 链路 + 文档同步；setup.exe 待 Windows 环境 |
+| M6 | Windows 打包 + 测试 + 文档 | ✅ 完成：121 单测 + 真实 API 链路 + 文档同步；Windows setup.exe 安装运行实测通过（2026-08-09） |
 
 后续计划：**M7 = Agent core 剥离为 `so-lite-agent` crate**（ADR-0037，进行中）——M1/M2 已落地，M3-M5 待办；参考 Pi 分层，开箱即用，内核/用户插件由使用方编写；实施顺序见 [docs/plan/so-lite-agent.md](plan/so-lite-agent.md)。
 
@@ -252,7 +258,7 @@ mistake-agent/
 - 三类入口点：**Tool**（LLM 调度）、**Command**（GUI/用户调度）、**Event**（kernel 生命周期调度）。
 - 内核服务：`ServiceId::{Storage, Memory, Compute, Model}`；内核插件经 `KernelPlugin` 两段式契约注册（info 声明 namespace/provides/入口点，register 绑定 handler，ADR-0035）。
 - 会话调度是独立内核级模块（kernel-session），**不占 ServiceId**；切换决策由主模型完成（LlmTurnDecider，失败降级 continue）。
-- 工具列表示例：`vision::read / grading::upload / grading::list / practice::generate / report::weekly / exam::compose / tracking::checkin / compute::verify / memory::save / memory::show / memory::remove`；会话历史经 RPC `list_sessions / read_session` 提供（不注册为模型工具）。
+- 工具列表示例：`vision::read / grading::upload / grading::list / practice::generate / practice::gaps / practice::check / report::weekly / exam::compose / tracking::checkin / compute::verify / memory::save / memory::show / memory::remove`；会话历史经 RPC `list_sessions / read_session` 提供（不注册为模型工具）。
 
 ## 13. 术语表（浓缩）
 
@@ -281,5 +287,5 @@ mistake-agent/
 
 ## 14. 风险与后续优化
 
-- **风险**：Pyodide 桥接与 Windows 打包是 Windows 侧的主要工程风险，M3-M4 要尽早验证；settings 明文存 key 是已知取舍（DPAPI 列后续）；主模型每回合新消息预决策 + 回合末决策共两次小调用，有少量成本（可接受）。
+- **风险**：Windows 打包已实测通过（NSIS setup.exe 安装运行正常）；settings 明文存 key 是已知取舍（DPAPI 列后续）；主模型每回合新消息预决策 + 回合末决策共两次小调用，有少量成本（可接受）。
 - **后续优化**：工具并行（拓扑排序）、子 agent、wasmtime 内嵌 Python（compute 收进 kernel）、第三方插件/技能系统、数据目录可配置、家长端报表、Windows 凭据管理器。
