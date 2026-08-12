@@ -43,9 +43,10 @@ async function loadSessions() {
   detail.value = null;
   try {
     const r = await props.kernel.call("list_sessions", {}, 10000);
+    // 用客户端 localStorage 增强的时间排序（比后端 last_activity_at 更实时）
     sessions.value = (r.sessions || []).sort((a, b) => {
-      const ta = new Date(a.last_activity_at || a.created_at || 0);
-      const tb = new Date(b.last_activity_at || b.created_at || 0);
+      const ta = sessionActivityTime(a);
+      const tb = sessionActivityTime(b);
       return tb - ta;
     });
   } catch (e) {
@@ -68,6 +69,8 @@ async function openSession(key) {
       props.kernel.call("read_session", { key }, 10000),
       loadToolCatalog(props.kernel),
     ]);
+    // 把 key 注入 meta 以便 formatSessionTime 查 localStorage
+    if (r.meta) r.meta._key = key;
     detail.value = r;
     sessionView.value = buildSessionView(
       r.messages,
@@ -87,6 +90,31 @@ function formatTime(iso) {
   } catch {
     return "";
   }
+}
+
+/** 获取会话最近活动时间：优先 localStorage 里的客户端记录（更实时），回退后端时间 */
+const LS_ACTIVITY_PREFIX = "ma:last-activity:";
+function sessionActivityTime(s) {
+  if (!s) return null;
+  const key = s.key || s._key;
+  const backendDate = new Date(s.last_activity_at || s.created_at || 0);
+  try {
+    if (key) {
+      const stored = localStorage.getItem(LS_ACTIVITY_PREFIX + key);
+      if (stored) {
+        const storedDate = new Date(stored);
+        // 只有客户端记录比后端时间新时才用（说明后端滞后）
+        if (!isNaN(storedDate) && storedDate > backendDate) return storedDate;
+      }
+    }
+  } catch { /* quota 满时静默 */ }
+  return backendDate;
+}
+
+function formatSessionTime(s, iso) {
+  const t = sessionActivityTime(s);
+  if (!t || isNaN(t.getTime())) return formatTime(iso);
+  return t.toLocaleString("zh-CN", { hour12: false });
 }
 
 function goalText(s) {
@@ -122,7 +150,7 @@ onMounted(loadSessions);
       </button>
       <div class="session-meta">
         <span class="badge">目标：{{ goalText(detail.meta) }}</span>
-        <span class="muted">最后活动：{{ formatTime(detail.meta?.last_activity_at) }}</span>
+        <span class="muted">最后活动：{{ formatSessionTime(detail.meta) }}</span>
       </div>
       <div class="session-detail">
         <TransitionGroup name="msg" tag="div" class="bubbles">
@@ -149,7 +177,7 @@ onMounted(loadSessions);
             <div>
               <div class="session-goal">{{ goalText(s) }}</div>
               <div class="muted">
-                {{ formatTime(s.last_activity_at || s.created_at) }}
+                {{ formatSessionTime(s) }}
                 <span class="badge weak" style="margin-left: 8px">{{ s.status }}</span>
               </div>
             </div>

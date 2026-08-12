@@ -1,6 +1,8 @@
 <script setup>
 import { ref, watch } from "vue";
 import { Icon } from "@iconify/vue";
+import PracticeQuestion from "./PracticeQuestion.vue";
+import WeakPointList from "./WeakPointList.vue";
 
 const props = defineProps({
   bubble: { type: Object, required: true },
@@ -15,6 +17,7 @@ const emit = defineEmits([
   "open-attachment",
   "save-edit",
   "cancel-edit",
+  "tool-interact",
 ]);
 
 const editText = ref("");
@@ -35,6 +38,77 @@ function attachmentIcon(att) {
   if (/\.pdf$/i.test(att.name || att.path)) return "mdi:file-pdf-box";
   if (/\.(png|jpe?g|webp|bmp)$/i.test(att.name || att.path)) return "mdi:image";
   return "mdi:file-outline";
+}
+
+/* ──── 工具结果辅助 ──── */
+
+/** 从 practice::gaps 结果中提取薄弱点数组（兼容数组/包裹对象）。 */
+function extractWeakPoints(result) {
+  if (!result) return [];
+  if (Array.isArray(result)) return result;
+  for (const k of ["gaps", "weaknesses", "points", "items"]) {
+    if (Array.isArray(result[k])) return result[k];
+  }
+  return [];
+}
+
+/** 检测结果是否像薄弱点数据 */
+function isGapsResult(bubble) {
+  const e = (bubble.entry || "").toLowerCase();
+  if (e === "practice::gaps" || e.includes("gaps")) return true;
+  if (bubble.result && extractWeakPoints(bubble.result).length) return true;
+  return false;
+}
+
+/** 检测结果是否像练习题数据 */
+function isPracticeQuestionResult(bubble) {
+  const e = (bubble.entry || "").toLowerCase();
+  if (e === "practice::generate" || e.includes("generate")) return true;
+  const r = bubble.result;
+  if (!r) return false;
+  // 按数据结构判断：有 question_text 的就是练习题
+  if (r.question_text || r.item?.question_text) return true;
+  return false;
+}
+
+/** 从 bubble 中提取知识点名 */
+function getKnowledgePoint(bubble) {
+  if (bubble.params?.knowledge_point) return bubble.params.knowledge_point;
+  const r = bubble.result;
+  if (!r) return "";
+  if (r.knowledge_point) return r.knowledge_point;
+  if (r.item?.knowledge_point) return r.item.knowledge_point;
+  return "";
+}
+
+/** 提取练习题 item（兼容 item 包裹和直接字段） */
+function getQuestionItem(bubble) {
+  const r = bubble.result;
+  if (!r) return null;
+  if (r.item) return r.item;
+  if (r.question_text) return r;
+  return null;
+}
+
+/** 通用工具结果 → Markdown / JSON 文本，供气泡回退渲染。 */
+function formatToolResultText(result) {
+  if (result == null) return "";
+  if (typeof result === "string") return result;
+  try {
+    return "```json\n" + JSON.stringify(result, null, 2) + "\n```";
+  } catch {
+    return String(result);
+  }
+}
+
+/** 通用工具结果 → 一行摘要。 */
+function toolResultSummary(result) {
+  if (!result) return null;
+  if (typeof result === "string") return result.slice(0, 80);
+  if (Array.isArray(result)) return `${result.length} 条`;
+  const keys = Object.keys(result);
+  if (keys.length === 1) return `${keys[0]}: ${JSON.stringify(result[keys[0]]).slice(0, 60)}`;
+  return keys.slice(0, 3).join(" · ");
 }
 </script>
 
@@ -70,6 +144,42 @@ function attachmentIcon(att) {
           >
             {{ bubble.toolOk === true ? "完成" : bubble.toolOk === false ? "失败" : "进行中" }}
           </span>
+        </div>
+
+        <!-- 工具结果交互式内容 -->
+        <div v-if="bubble.result && bubble.toolOk !== false" class="tool-card-body">
+          <!-- practice::gaps → 薄弱点列表 -->
+          <WeakPointList
+            v-if="isGapsResult(bubble) && extractWeakPoints(bubble.result).length"
+            :points="extractWeakPoints(bubble.result)"
+            @generate="(p) => emit('tool-interact', { action: 'generate', ...p })"
+          />
+          <!-- practice::gaps 结果为空 -->
+          <p v-else-if="isGapsResult(bubble)" class="muted" style="text-align:center;padding:12px 0;">
+            <Icon icon="mdi:emoticon-happy-outline" width="18" /> 近期没有发现薄弱知识点，继续保持！
+          </p>
+
+          <!-- practice::generate 成功 → 练习卡片 -->
+          <PracticeQuestion
+            v-else-if="isPracticeQuestionResult(bubble) && getQuestionItem(bubble)"
+            :item="getQuestionItem(bubble)"
+            :knowledge-point="getKnowledgePoint(bubble)"
+            @practice-again="(p) => emit('tool-interact', { action: 'practice-again', ...p })"
+          />
+          <!-- practice::generate 未命中 → 展示后端 message -->
+          <div
+            v-else-if="isPracticeQuestionResult(bubble)"
+            class="tool-unmatched"
+          >
+            <Icon icon="mdi:information-outline" width="18" />
+            <span>{{ bubble.result.message || "暂未找到合适的题目，换个知识点试试。" }}</span>
+          </div>
+
+          <!-- 其他工具：通用回退（折叠 JSON / Markdown） -->
+          <details v-else class="tool-card-detail" :open="true">
+            <summary>{{ toolResultSummary(bubble.result) }}</summary>
+            <div class="tool-result-md md-body" v-html-smiles="formatToolResultText(bubble.result)"></div>
+          </details>
         </div>
       </div>
       <template v-else>

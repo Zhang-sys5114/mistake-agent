@@ -200,6 +200,7 @@ export function renderPath(view, opts = {}) {
           ...base,
           type: "tool",
           entry: kind.entry || "",
+          title: toolTitle(kind.entry || ""),
           toolOk: ok,
           toolIcon: toolIcon(kind.entry || ""),
           params: kind.params || {},

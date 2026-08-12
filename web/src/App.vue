@@ -11,6 +11,16 @@ import OobePage from "./components/OobePage.vue";
 const kernel = useKernel();
 provide("kernel", kernel);
 
+/* ──── 跨页面跳转：错题本"追问" → 聊天页 ──── */
+const navigateToChatMessage = ref("");
+provide("navigateToChatMessage", navigateToChatMessage);
+
+function navigateToChatWithMessage(msg) {
+  navigateToChatMessage.value = msg;
+  view.value = "chat";
+}
+provide("navigateToChatWithMessage", navigateToChatWithMessage);
+
 const ready = ref(false);
 const busy = ref(false);
 const status = ref("准备中");
