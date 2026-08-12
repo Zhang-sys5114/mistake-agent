@@ -1124,21 +1124,6 @@ textarea {
   font-size: 13px;
 }
 
-.tool-card-detail {
-  margin-top: 6px;
-  font-size: 12px;
-}
-
-.tool-card-detail summary {
-  cursor: pointer;
-  user-select: none;
-  color: var(--color-text-weak);
-}
-
-.tool-card-detail summary:hover {
-  color: var(--color-accent);
-}
-
 .tool-card-body {
   margin-top: 6px;
   padding: 10px;
@@ -2751,10 +2736,6 @@ textarea {
   padding: 16px 0;
   color: var(--color-text-weak);
   font-size: 14px;
-}
-
-.tool-result-md {
-  font-size: 13px;
 }
 
 /* ---------- 7c. 薄弱点列表 ---------- */

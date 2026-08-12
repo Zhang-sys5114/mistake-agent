@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { Icon } from "@iconify/vue";
 import PracticeQuestion from "./PracticeQuestion.vue";
 import WeakPointList from "./WeakPointList.vue";
@@ -90,26 +90,12 @@ function getQuestionItem(bubble) {
   return null;
 }
 
-/** 通用工具结果 → Markdown / JSON 文本，供气泡回退渲染。 */
-function formatToolResultText(result) {
-  if (result == null) return "";
-  if (typeof result === "string") return result;
-  try {
-    return "```json\n" + JSON.stringify(result, null, 2) + "\n```";
-  } catch {
-    return String(result);
-  }
-}
-
-/** 通用工具结果 → 一行摘要。 */
-function toolResultSummary(result) {
-  if (!result) return null;
-  if (typeof result === "string") return result.slice(0, 80);
-  if (Array.isArray(result)) return `${result.length} 条`;
-  const keys = Object.keys(result);
-  if (keys.length === 1) return `${keys[0]}: ${JSON.stringify(result[keys[0]]).slice(0, 60)}`;
-  return keys.slice(0, 3).join(" · ");
-}
+/** 工具气泡是否渲染结果内容：仅练习卡片 / 薄弱点列表等交互组件，通用 JSON/Markdown 详情不再展示。 */
+const hasToolBody = computed(() => {
+  const r = props.bubble;
+  if (!r.result || r.toolOk === false) return false;
+  return isGapsResult(r) || isPracticeQuestionResult(r);
+});
 </script>
 
 <template>
@@ -146,8 +132,8 @@ function toolResultSummary(result) {
           </span>
         </div>
 
-        <!-- 工具结果交互式内容 -->
-        <div v-if="bubble.result && bubble.toolOk !== false" class="tool-card-body">
+        <!-- 工具结果交互式内容（通用 JSON/Markdown 详情不渲染，只保留状态徽章） -->
+        <div v-if="hasToolBody" class="tool-card-body">
           <!-- practice::gaps → 薄弱点列表 -->
           <WeakPointList
             v-if="isGapsResult(bubble) && extractWeakPoints(bubble.result).length"
@@ -175,11 +161,6 @@ function toolResultSummary(result) {
             <span>{{ bubble.result.message || "暂未找到合适的题目，换个知识点试试。" }}</span>
           </div>
 
-          <!-- 其他工具：通用回退（折叠 JSON / Markdown） -->
-          <details v-else class="tool-card-detail" :open="true">
-            <summary>{{ toolResultSummary(bubble.result) }}</summary>
-            <div class="tool-result-md md-body" v-html-smiles="formatToolResultText(bubble.result)"></div>
-          </details>
         </div>
       </div>
       <template v-else>
