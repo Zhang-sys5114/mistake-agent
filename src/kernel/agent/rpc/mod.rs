@@ -57,6 +57,7 @@ pub struct Kernel {
 pub struct KernelBuilder {
     events: Arc<dyn EventSink>,
     system_prompt: SystemPromptProvider,
+    settings: Option<Arc<std::sync::RwLock<Settings>>>,
     handles: ServiceHandles,
     store: Option<Arc<dyn SessionStore>>,
     main_model: Option<Arc<dyn ModelService>>,
@@ -79,6 +80,7 @@ impl KernelBuilder {
         Self {
             events: Arc::new(crate::kernel::events::MemoryEventSink::default()),
             system_prompt: Arc::new(String::new),
+            settings: None,
             handles: ServiceHandles::default(),
             store: None,
             main_model: None,
@@ -98,6 +100,11 @@ impl KernelBuilder {
 
     pub fn system_prompt(mut self, provider: SystemPromptProvider) -> Self {
         self.system_prompt = provider;
+        self
+    }
+
+    pub fn settings(mut self, settings: Arc<std::sync::RwLock<Settings>>) -> Self {
+        self.settings = Some(settings);
         self
     }
 
@@ -181,20 +188,39 @@ impl KernelBuilder {
                 .map_err(|e| format!("插件注册失败：{e}"))?;
         }
 
-        let dispatch = Arc::new(Dispatch::new(
+        let english_mode: crate::kernel::agent::dispatch::EnglishModeProvider =
+            match self.settings.as_ref() {
+                Some(settings) => {
+                    let settings = settings.clone();
+                    Arc::new(move || settings.read().map(|s| s.english_mode).unwrap_or(false))
+                }
+                None => Arc::new(|| false),
+            };
+        let dispatch = Dispatch::new(
             registry.clone(),
             auditor.clone(),
             std::time::Duration::from_secs(30),
             std::time::Duration::from_secs(5),
             std::time::Duration::from_secs(10 * 60),
             self.events.clone(),
-        ));
+        )
+        .with_english_mode(english_mode);
+        let dispatch = Arc::new(dispatch);
+        let llm_settings = self.settings.clone();
+        let mut decider = LlmTurnDecider::new(main_model.clone());
+        let mut scheduler_summarizer = LlmSummarizer::new(main_model.clone());
+        let mut loop_summarizer = LlmSummarizer::new(main_model.clone());
+        if let Some(settings) = llm_settings.clone() {
+            decider = decider.with_settings(settings.clone());
+            scheduler_summarizer = scheduler_summarizer.with_settings(settings.clone());
+            loop_summarizer = loop_summarizer.with_settings(settings);
+        }
         // 中断总线必须由 scheduler 与 loop 共享：scheduler 发环境变更，loop 回合边界消费。
         let scheduler = Arc::new(SessionScheduler::new(
             store.clone(),
-            Arc::new(LlmTurnDecider::new(main_model.clone())),
+            Arc::new(decider),
             Arc::new(SystemClock),
-            Arc::new(LlmSummarizer::new(main_model.clone())),
+            Arc::new(scheduler_summarizer),
             self.interrupt_bus.clone(),
         ));
         let loop_model = main_model.clone();
@@ -203,7 +229,7 @@ impl KernelBuilder {
             dispatch.clone(),
             auditor.clone(),
             self.events.clone(),
-            Arc::new(LlmSummarizer::new(main_model)),
+            Arc::new(loop_summarizer),
             self.interrupt_bus,
             self.system_prompt,
             Some(scheduler.clone() as Arc<dyn SessionSwitch>),
@@ -328,12 +354,14 @@ impl RpcExtension for AppRpc {
                     let temp_settings = if is_vision {
                         crate::kernel::settings::Settings {
                             log_level: snapshot.log_level,
+                            english_mode: snapshot.english_mode,
                             main_model: snapshot.main_model.clone(),
                             vision_model: model_cfg,
                         }
                     } else {
                         crate::kernel::settings::Settings {
                             log_level: snapshot.log_level,
+                            english_mode: snapshot.english_mode,
                             main_model: model_cfg,
                             vision_model: snapshot.vision_model.clone(),
                         }
@@ -470,7 +498,18 @@ impl Kernel {
 
         KernelBuilder::new()
             .event_sink(events)
-            .system_prompt(Arc::new(crate::kernel::prompt::agent_system_prompt))
+            .settings(settings.clone())
+            .system_prompt({
+                let settings_for_prompt = settings.clone();
+                Arc::new(move || {
+                    crate::kernel::prompt::agent_system_prompt(
+                        settings_for_prompt
+                            .read()
+                            .map(|s| s.english_mode)
+                            .unwrap_or(false),
+                    )
+                })
+            })
             .service_handles(handles)
             .session_store(storage.clone())
             .main_model(main_service.clone())

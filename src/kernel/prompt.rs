@@ -152,3 +152,20 @@ pub fn summarize_prompt(english_mode: bool) -> String {
     }
     prompt
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn english_mode_appends_immersion_rules_to_prompts() {
+        assert!(agent_system_prompt(true).contains("English Immersion Mode"));
+        assert!(!agent_system_prompt(false).contains("English Immersion Mode"));
+        assert!(vision_prompt(true).contains("English Immersion Mode"));
+        assert!(grading_system_prompt(true).contains("English Immersion Mode"));
+        assert!(practice_check_system_prompt(true).contains("English Immersion Mode"));
+        assert!(practice_generate_system_prompt(true).contains("English Immersion Mode"));
+        assert!(turn_decider_prompt(true).contains("English Immersion Mode"));
+        assert!(summarize_prompt(true).contains("English Immersion Mode"));
+    }
+}

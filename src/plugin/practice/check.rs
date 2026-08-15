@@ -71,6 +71,7 @@ pub async fn check_handler(
     model: ModelHandle,
     storage: StorageHandle,
     memory: MemoryHandle,
+    english_mode: bool,
     params: Value,
 ) -> Result<Value, ToolError> {
     let p: CheckParams =
@@ -95,7 +96,7 @@ pub async fn check_handler(
     }
 
     // 第二步：模型判分（自由作答 / 数学等价等对拍覆盖不了的形态）。
-    let result = model_check(&model, &p).await?;
+    let result = model_check(&model, &p, english_mode).await?;
     let archived = if !result.correct {
         let mistake = Mistake {
             id: MistakeId(uuid::Uuid::new_v4()),
@@ -169,8 +170,12 @@ fn check_output(
     })
 }
 
-async fn model_check(model: &ModelHandle, p: &CheckParams) -> Result<CheckResult, ToolError> {
-    let system = Message::system(practice_check_system_prompt());
+async fn model_check(
+    model: &ModelHandle,
+    p: &CheckParams,
+    english_mode: bool,
+) -> Result<CheckResult, ToolError> {
+    let system = Message::system(practice_check_system_prompt(english_mode));
     let mut lines = vec![format!("题目：{}", p.question.trim())];
     lines.push(format!("学生作答：{}", p.student_answer.trim()));
     if let Some(r) = p.reference_answer.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
@@ -330,6 +335,7 @@ mod tests {
             model,
             storage,
             memory,
+            false,
             json!({
                 "question": "|-3| = ?",
                 "student_answer": " 3 ",
@@ -357,6 +363,7 @@ mod tests {
             model,
             storage,
             memory,
+            false,
             json!({
                 "question": "|-3| = ?",
                 "student_answer": "-3",
@@ -389,6 +396,7 @@ mod tests {
             model,
             storage,
             memory,
+            false,
             json!({
                 "question": "证明 △ABC ≅ △DEF",
                 "student_answer": "由 AB=DE、∠B=∠E、BC=EF，SAS 判定全等",
@@ -410,6 +418,7 @@ mod tests {
             model,
             storage,
             memory,
+            false,
             json!({ "question": "1+1=?", "student_answer": "" }),
         )
         .await
@@ -428,6 +437,7 @@ mod tests {
             model,
             storage,
             memory.clone(),
+            false,
             json!({
                 "question": "|-3| = ?",
                 "student_answer": "-3",
