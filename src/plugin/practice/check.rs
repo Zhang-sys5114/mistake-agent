@@ -92,7 +92,12 @@ pub async fn check_handler(
     if let Some(ref_text) = reference
         && exact_match(&p.student_answer, ref_text)
     {
-        return Ok(check_output(true, "exact_match", None, None, "参考答案对拍一致，作答正确。", false));
+        let analysis = if english_mode {
+            "The answer matches the reference answer and is correct."
+        } else {
+            "参考答案对拍一致，作答正确。"
+        };
+        return Ok(check_output(true, "exact_match", None, None, analysis, false));
     }
 
     // 第二步：模型判分（自由作答 / 数学等价等对拍覆盖不了的形态）。
@@ -350,6 +355,36 @@ mod tests {
         assert_eq!(out["method"], "exact_match");
         assert_eq!(out["archived_mistake"], false);
         assert!(store.items.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn check_exact_match_english_mode_returns_english() {
+        let store = Arc::new(FakeStore::default());
+        let (model, storage, memory) = handles(
+            r#"{"correct":false,"analysis":"不应走到模型判分"}"#,
+            store.clone(),
+        );
+        let out = check_handler(
+            model,
+            storage,
+            memory,
+            true,
+            json!({
+                "question": "The sun is bright.",
+                "student_answer": "sunny",
+                "reference_answer": "sunny",
+                "subject": "英语",
+                "knowledge_point": "词性转换",
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["correct"], true);
+        assert_eq!(out["method"], "exact_match");
+        assert_eq!(
+            out["analysis"],
+            "The answer matches the reference answer and is correct."
+        );
     }
 
     #[tokio::test]
