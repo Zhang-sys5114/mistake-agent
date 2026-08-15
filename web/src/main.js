@@ -11,6 +11,13 @@ import "@fontsource/baloo-2/700.css";
 // 离线图标：把 mdi 图标集注册进 Iconify 运行时，避免 WebView 在线拉取。
 addCollection(mdiIcons);
 
+// 全局阻止浏览器默认右键菜单（WebView2），输入框/文本域除外，保留复制粘贴
+window.addEventListener("contextmenu", (e) => {
+  const tag = e.target.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || e.target.isContentEditable) return;
+  e.preventDefault();
+});
+
 const app = createApp(App);
 app.directive("html-smiles", vHtmlSmiles);
 app.mount("#app");

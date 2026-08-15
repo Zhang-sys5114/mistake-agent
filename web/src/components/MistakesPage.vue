@@ -1,8 +1,9 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Icon } from "@iconify/vue";
 
 const props = defineProps({ kernel: { type: Object, required: true } });
+const navigateToChatWithMessage = inject("navigateToChatWithMessage", () => {});
 
 const loading = ref(false);
 const error = ref("");
@@ -11,6 +12,20 @@ const subjects = ref([]);
 const subject = ref("");
 const search = ref("");
 const sortBy = ref("time_desc");
+
+/* ──── 编辑模式 ──── */
+const editMode = ref(false);
+const selectedIds = ref(new Set());
+const confirmDeleteCount = ref(0); // >0 时显示确认对话框
+
+/* ──── 单题编辑弹窗 ──── */
+const editingMistake = ref(null);
+const editForm = ref({});
+
+/* ──── 右键 / 长按菜单 ──── */
+const contextMenu = ref({ visible: false, x: 0, y: 0, mistake: null });
+let pointerTimer = null;
+let pointerMoved = false;
 
 const total = ref(0);
 const wrong = ref(0);
@@ -124,6 +139,8 @@ watch(
 
 onBeforeUnmount(() => {
   document.removeEventListener("keydown", onKeydown);
+  document.removeEventListener("keydown", onCtxKey);
+  if (pointerTimer) clearTimeout(pointerTimer);
 });
 
 /* -------- 长文徽标 -------- */
@@ -158,12 +175,21 @@ const filtered = computed(() => {
     );
   }
   const sorted = [...list].sort((a, b) => {
+    // 置顶优先
+    if (a.pinned && !b.pinned) return -1;
+    if (!a.pinned && b.pinned) return 1;
     if (sortBy.value === "subject") {
       return (a.subject || "").localeCompare(b.subject || "", "zh");
     }
     return new Date(b.created_at) - new Date(a.created_at);
   });
   return sorted;
+});
+
+/** 全选状态 */
+const allSelected = computed(() => {
+  if (!filtered.value.length) return false;
+  return filtered.value.every((m) => selectedIds.value.has(String(m.id)));
 });
 
 async function load() {
@@ -198,6 +224,243 @@ function formatTime(iso) {
   }
 }
 
+/* ================================================================
+ *  编辑模式
+ * ================================================================ */
+function toggleEditMode() {
+  editMode.value = !editMode.value;
+  if (!editMode.value) selectedIds.value = new Set();
+}
+
+function toggleSelect(id) {
+  const s = new Set(selectedIds.value);
+  if (s.has(id)) s.delete(id); else s.add(id);
+  selectedIds.value = s;
+}
+
+function selectAll() {
+  if (allSelected.value) {
+    selectedIds.value = new Set();
+  } else {
+    selectedIds.value = new Set(filtered.value.map((m) => String(m.id)));
+  }
+}
+
+async function batchDelete() {
+  const ids = [...selectedIds.value];
+  if (!ids.length) return;
+  if (confirmDeleteCount.value === 0) {
+    confirmDeleteCount.value = ids.length;
+    return;
+  }
+  // 二次确认后执行
+  try {
+    const r = await props.kernel.triggerCommand("grading::remove_many", { ids });
+    confirmDeleteCount.value = 0;
+    selectedIds.value = new Set();
+    editMode.value = false;
+    await load();
+    alertMsg.value = `已删除 ${r.deleted ?? ids.length} 条`;
+    setTimeout(() => { alertMsg.value = ""; }, 3000);
+  } catch (e) {
+    confirmDeleteCount.value = 0;
+    alertMsg.value = `删除失败：${e.message || e}`;
+    setTimeout(() => { alertMsg.value = ""; }, 4000);
+  }
+}
+
+function cancelBatchDelete() {
+  confirmDeleteCount.value = 0;
+}
+
+const alertMsg = ref("");
+const longPressed = ref(false);  // 长按后阻止 click 打开抽屉
+
+/* ================================================================
+ *  右键 / 长按菜单
+ * ================================================================ */
+function menuStyle() {
+  const { x, y } = contextMenu.value;
+  // 防止溢出视口：默认右下展开，超出则翻折
+  let left = x + "px";
+  let top = y + "px";
+  return { left, top };
+}
+
+function openContextMenu(e, mistake) {
+  contextMenu.value = { visible: true, x: e.clientX, y: e.clientY, mistake };
+  // 标记已触发右键/长按，阻止后续 click 事件打开抽屉
+  longPressed.value = true;
+  setTimeout(() => { longPressed.value = false; }, 100);
+}
+function closeContextMenu() {
+  contextMenu.value = { visible: false, x: 0, y: 0, mistake: null };
+}
+
+watch(
+  () => contextMenu.value.visible,
+  (v) => {
+    if (v) document.addEventListener("keydown", onCtxKey);
+    else document.removeEventListener("keydown", onCtxKey);
+  },
+);
+function onCtxKey(e) {
+  if (e.key === "Escape") closeContextMenu();
+}
+
+/* 长按检测 */
+function onPointerDown(e, mistake) {
+  pointerMoved = false;
+  pointerTimer = setTimeout(() => {
+    if (!pointerMoved) {
+      openContextMenu(e, mistake);
+    }
+  }, 500);
+}
+function onPointerMove()  { pointerMoved = true; }
+function onPointerUp()    { clearTimeout(pointerTimer); }
+
+/* 菜单操作 */
+async function menuAskQuestion() {
+  const m = contextMenu.value.mistake;
+  if (!m) return;
+  closeContextMenu();
+  const q = (m.question || "").replace(/<[^>]+>/g, "").slice(0, 200);
+  navigateToChatWithMessage({ action: "ask-question", text: `追问这道错题：${q}` });
+}
+
+async function menuTogglePin(pin) {
+  const m = contextMenu.value.mistake;
+  if (!m) return;
+  closeContextMenu();
+  try {
+    const r = await props.kernel.triggerCommand("grading::update", { id: String(m.id), pinned: pin });
+    Object.assign(m, r.mistake);
+    await load();
+  } catch (e) {
+    alertMsg.value = `操作失败：${e.message || e}`;
+    setTimeout(() => { alertMsg.value = ""; }, 3000);
+  }
+}
+
+async function menuMarkMastered() {
+  const m = contextMenu.value.mistake;
+  if (!m) return;
+  closeContextMenu();
+  try {
+    const r = await props.kernel.triggerCommand("grading::update", { id: String(m.id), is_correct: true });
+    Object.assign(m, r.mistake);
+    await load();
+  } catch (e) {
+    alertMsg.value = `操作失败：${e.message || e}`;
+    setTimeout(() => { alertMsg.value = ""; }, 3000);
+  }
+}
+
+async function menuUnmarkMastered() {
+  const m = contextMenu.value.mistake;
+  if (!m) return;
+  closeContextMenu();
+  try {
+    const r = await props.kernel.triggerCommand("grading::update", { id: String(m.id), is_correct: false });
+    Object.assign(m, r.mistake);
+    await load();
+    alertMsg.value = "已取消已掌握标记";
+    setTimeout(() => { alertMsg.value = ""; }, 2000);
+  } catch (e) {
+    alertMsg.value = `操作失败：${e.message || e}`;
+    setTimeout(() => { alertMsg.value = ""; }, 3000);
+  }
+}
+
+async function menuDelete() {
+  const m = contextMenu.value.mistake;
+  if (!m) return;
+  closeContextMenu();
+  try {
+    await props.kernel.triggerCommand("grading::remove", { id: String(m.id) });
+    await load();
+    alertMsg.value = "已删除";
+    setTimeout(() => { alertMsg.value = ""; }, 2000);
+  } catch (e) {
+    alertMsg.value = `删除失败：${e.message || e}`;
+    setTimeout(() => { alertMsg.value = ""; }, 3000);
+  }
+}
+
+/* ================================================================
+ *  单题编辑弹窗
+ * ================================================================ */
+function openEditDialog(mistake) {
+  editForm.value = {
+    id:               String(mistake.id),
+    subject:          mistake.subject || "",
+    knowledge_point:  mistake.knowledge_point || "",
+    question:         mistake.question || "",
+    student_answer:   mistake.student_answer || "",
+    reference_answer: mistake.reference_answer || "",
+    analysis:         mistake.analysis || "",
+  };
+  editingMistake.value = mistake;
+}
+
+async function saveEditDialog() {
+  const m = editingMistake.value;
+  if (!m) return;
+  try {
+    const r = await props.kernel.triggerCommand("grading::update", {
+      id:               editForm.value.id,
+      subject:          editForm.value.subject || undefined,
+      knowledge_point:  editForm.value.knowledge_point || undefined,
+      question:         editForm.value.question || undefined,
+      student_answer:   editForm.value.student_answer || undefined,
+      reference_answer: editForm.value.reference_answer || null,
+      analysis:         editForm.value.analysis || undefined,
+    });
+    Object.assign(m, r.mistake);
+    editingMistake.value = null;
+    await load();
+    alertMsg.value = "已保存";
+    setTimeout(() => { alertMsg.value = ""; }, 2000);
+  } catch (e) {
+    alertMsg.value = `保存失败：${e.message || e}`;
+    setTimeout(() => { alertMsg.value = ""; }, 4000);
+  }
+}
+
+function closeEditDialog() {
+  editingMistake.value = null;
+}
+
+/* ================================================================
+ *  抽屉操作（标记已掌握 / 变式练习）
+ * ================================================================ */
+async function markDrawerMastered() {
+  const m = drawerItem.value;
+  if (!m) return;
+  try {
+    const r = await props.kernel.triggerCommand("grading::update", { id: String(m.id), is_correct: true });
+    Object.assign(m, r.mistake);
+    await load();
+    alertMsg.value = "已标记为掌握";
+    setTimeout(() => { alertMsg.value = ""; }, 2000);
+  } catch (e) {
+    alertMsg.value = `操作失败：${e.message || e}`;
+    setTimeout(() => { alertMsg.value = ""; }, 3000);
+  }
+}
+
+function doVariantPractice() {
+  const m = drawerItem.value;
+  if (!m) return;
+  const kp = m.knowledge_point || "";
+  navigateToChatWithMessage({
+    action: "variant-practice",
+    knowledge_point: kp,
+    difficulty: "variant",
+  });
+}
+
 onMounted(load);
 </script>
 
@@ -206,10 +469,21 @@ onMounted(load);
     <!-- ======== 头部 ======== -->
     <div class="page-head">
       <h2>错题本</h2>
-      <button class="btn ghost" :disabled="loading" @click="load">
-        <Icon icon="mdi:refresh" width="18" />刷新
-      </button>
+      <div class="page-head-actions">
+        <button class="btn ghost" :class="{ active: editMode }" @click="toggleEditMode">
+          <Icon icon="mdi:pencil-box-multiple" width="18" />
+          {{ editMode ? "退出编辑" : "编辑" }}
+        </button>
+        <button class="btn ghost" :disabled="loading" @click="load">
+          <Icon icon="mdi:refresh" width="18" />刷新
+        </button>
+      </div>
     </div>
+
+    <!-- 操作提示 -->
+    <p v-if="alertMsg" class="alert success" role="status">
+      <Icon icon="mdi:check-circle-outline" width="18" />{{ alertMsg }}
+    </p>
 
     <!-- ======== 统计卡片 ======== -->
     <div v-if="!loading && mistakes.length" class="stat-strip">
@@ -285,20 +559,55 @@ onMounted(load);
       <p>没有匹配的错题，换个关键词试试。</p>
     </div>
 
+    <!-- ======== 编辑工具栏 ======== -->
+    <div v-if="editMode && filtered.length" class="edit-toolbar">
+      <label class="edit-check-all">
+        <input type="checkbox" :checked="allSelected" @change="selectAll" />
+        全选（{{ selectedIds.size }}/{{ filtered.length }}）
+      </label>
+      <button
+        class="btn danger"
+        :disabled="selectedIds.size === 0"
+        @click="batchDelete"
+      >
+        <Icon icon="mdi:delete-outline" width="16" />批量删除（{{ selectedIds.size }}）
+      </button>
+    </div>
+
     <!-- ======== 卡片网格（扫读层） ======== -->
-    <div v-else class="mistake-grid">
+    <div class="mistake-grid">
       <article
         v-for="m in filtered"
         :key="String(m.id)"
         class="card mistake-card"
+        :class="{ 'edit-mode': editMode }"
         tabindex="0"
         role="button"
         :aria-label="'打开错题详情：' + stripHtml(m.question).slice(0, 40)"
-        @click="openDrawer(m)"
-        @keydown.enter="openDrawer(m)"
-        @keydown.space.prevent="openDrawer(m)"
+        @click="longPressed ? (longPressed = false) : (editMode ? toggleSelect(String(m.id)) : openDrawer(m))"
+        @keydown.enter="longPressed ? (longPressed = false) : (editMode ? toggleSelect(String(m.id)) : openDrawer(m))"
+        @keydown.space.prevent="longPressed ? (longPressed = false) : (editMode ? toggleSelect(String(m.id)) : openDrawer(m))"
+        @contextmenu.prevent.stop="openContextMenu($event, m)"
+        @pointerdown="onPointerDown($event, m)"
+        @pointermove="onPointerMove"
+        @pointerup="onPointerUp"
       >
+        <!-- 编辑模式复选框 -->
+        <div v-if="editMode" class="mistake-card-check" @click.stop>
+          <input
+            type="checkbox"
+            :checked="selectedIds.has(String(m.id))"
+            @change="toggleSelect(String(m.id))"
+          />
+        </div>
+
         <div class="card-head">
+          <span v-if="m.pinned" class="badge pinned-badge">
+            <Icon icon="mdi:pin" width="11" />置顶
+          </span>
+          <span v-if="m.is_correct" class="badge success">
+            <Icon icon="mdi:check-circle" width="11" />已掌握
+          </span>
           <span class="badge">{{ m.subject || "未分类" }}</span>
           <span class="badge weak">{{ m.knowledge_point || "未标注知识点" }}</span>
           <span v-if="isLongText(m.question)" class="badge long-text-badge">
@@ -321,6 +630,113 @@ onMounted(load);
       </article>
     </div>
 
+    <!-- ======== 右键 / 长按菜单 ======== -->
+    <Teleport to="body">
+      <div
+        v-if="contextMenu.visible"
+        class="ctx-overlay"
+        @click="closeContextMenu"
+        @keydown.esc="closeContextMenu"
+      >
+        <div class="ctx-menu card" :style="menuStyle()" @click.stop>
+          <button class="ctx-item" @click="menuAskQuestion()">
+            <Icon icon="mdi:chat-question-outline" width="18" />追问
+          </button>
+          <button
+            v-if="contextMenu.mistake?.pinned"
+            class="ctx-item"
+            @click="menuTogglePin(false)"
+          >
+            <Icon icon="mdi:pin-off-outline" width="18" />取消置顶
+          </button>
+          <button v-else class="ctx-item" @click="menuTogglePin(true)">
+            <Icon icon="mdi:pin-outline" width="18" />置顶
+          </button>
+          <button
+            v-if="!contextMenu.mistake?.is_correct"
+            class="ctx-item"
+            @click="menuMarkMastered()"
+          >
+            <Icon icon="mdi:check-circle-outline" width="18" />标记已掌握
+          </button>
+          <button
+            v-else
+            class="ctx-item"
+            @click="menuUnmarkMastered()"
+          >
+            <Icon icon="mdi:close-circle-outline" width="18" />取消已掌握
+          </button>
+          <button class="ctx-item" @click="openEditDialog(contextMenu.mistake)">
+            <Icon icon="mdi:pencil-outline" width="18" />编辑
+          </button>
+          <button class="ctx-item danger" @click="menuDelete()">
+            <Icon icon="mdi:delete-outline" width="18" />删除
+          </button>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- ======== 批量删除确认 ======== -->
+    <Teleport to="body">
+      <div v-if="confirmDeleteCount > 0" class="confirm-overlay" @click.self="cancelBatchDelete">
+        <div class="confirm-dialog card">
+          <p>
+            <Icon icon="mdi:alert-circle-outline" width="20" />
+            确定要删除选中的 <strong>{{ confirmDeleteCount }}</strong> 道错题吗？
+          </p>
+          <p class="muted">删除后可在后端数据中保留（软删除），列表不再展示。</p>
+          <div class="confirm-actions">
+            <button class="btn ghost" @click="cancelBatchDelete">取消</button>
+            <button class="btn danger" @click="batchDelete">确认删除</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- ======== 单题编辑弹窗 ======== -->
+    <Teleport to="body">
+      <div v-if="editingMistake" class="mistake-edit-overlay" @click.self="closeEditDialog">
+        <div class="mistake-edit-dialog card" @keydown.esc="closeEditDialog">
+          <div class="edit-dialog-head">
+            <h3><Icon icon="mdi:pencil-outline" width="20" />编辑错题</h3>
+            <button class="icon-btn" @click="closeEditDialog" aria-label="关闭">
+              <Icon icon="mdi:close" width="20" />
+            </button>
+          </div>
+          <div class="edit-dialog-body">
+            <div class="field">
+              <span>学科</span>
+              <input v-model="editForm.subject" class="input" placeholder="如：数学" />
+            </div>
+            <div class="field">
+              <span>知识点</span>
+              <input v-model="editForm.knowledge_point" class="input" placeholder="如：三角函数" />
+            </div>
+            <div class="field">
+              <span>题目</span>
+              <textarea v-model="editForm.question" rows="4" class="input" placeholder="题目内容（支持 Markdown）"></textarea>
+            </div>
+            <div class="field">
+              <span>你的作答</span>
+              <textarea v-model="editForm.student_answer" rows="2" class="input" placeholder="学生作答"></textarea>
+            </div>
+            <div class="field">
+              <span>参考答案</span>
+              <textarea v-model="editForm.reference_answer" rows="2" class="input" placeholder="参考答案"></textarea>
+            </div>
+            <div class="field">
+              <span>错因分析</span>
+              <textarea v-model="editForm.analysis" rows="3" class="input" placeholder="错因分析（支持 Markdown）"></textarea>
+            </div>
+          </div>
+          <div class="edit-dialog-foot">
+            <button class="btn ghost" @click="closeEditDialog">取消</button>
+            <button class="btn primary" @click="saveEditDialog">保存</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
     <!-- ======== 抽屉遮罩 + 面板（精读层） ======== -->
     <Transition name="drawer">
       <div
@@ -333,6 +749,12 @@ onMounted(load);
           <!-- 头部 -->
           <div class="drawer-header">
             <div class="drawer-header-tags">
+              <span v-if="drawerItem.pinned" class="badge pinned-badge">
+                <Icon icon="mdi:pin" width="11" />置顶
+              </span>
+              <span v-if="drawerItem.is_correct" class="badge success">
+                <Icon icon="mdi:check-circle" width="11" />已掌握
+              </span>
               <span class="badge">{{ drawerItem.subject || "未分类" }}</span>
               <span class="badge weak">{{ drawerItem.knowledge_point || "未标注知识点" }}</span>
               <span v-if="isLongText(drawerItem.question)" class="badge long-text-badge">
@@ -417,11 +839,20 @@ onMounted(load);
               <Icon icon="mdi:chevron-left" width="22" />上一题
             </button>
             <div class="drawer-foot-actions">
-              <button class="btn primary drawer-action-btn">
+              <button class="btn primary drawer-action-btn" @click="doVariantPractice">
                 <Icon icon="mdi:sparkles" width="16" />变式练习
               </button>
-              <button class="btn ghost drawer-action-btn">
-                <Icon icon="mdi:check-circle-outline" width="16" />标记已掌握
+              <button
+                class="btn drawer-action-btn"
+                :class="drawerItem?.is_correct ? 'success-ghost' : 'ghost'"
+                :disabled="drawerItem?.is_correct"
+                @click="markDrawerMastered"
+              >
+                <Icon icon="mdi:check-circle-outline" width="16" />
+                {{ drawerItem?.is_correct ? "已掌握" : "标记已掌握" }}
+              </button>
+              <button class="btn ghost drawer-action-btn" @click="openEditDialog(drawerItem)">
+                <Icon icon="mdi:pencil-outline" width="16" />编辑
               </button>
             </div>
             <button class="btn ghost drawer-nav-btn" @click="goNext" :disabled="filtered.length <= 1">
