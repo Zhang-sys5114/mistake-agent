@@ -1,5 +1,45 @@
 # TODO
 
+## 新增待办（2026-09-19）：会话改用户手动切换 + 模型收敛 DeepSeek + 教师服务端 + 错题本优化
+
+### 1. 会话系统改成只有用户能切换（参考 Chatbox）
+
+目标：**一个话题 = 一条独立会话**，左侧会话列表 +「新对话」（Chatbox / DeepSeek 网页版形态）；**会话切换只由用户发起**，主模型不再自动判断换话题、不再自动分叉新会话。放弃「摘要节点 + 新会话子树」的树内分叉承载会话边界（ADR-0026/0030/0032 需修订或另立 ADR）。
+
+- [ ] 下线模型自动切换：`SessionScheduler::on_new_message` 主模型预决策（ADR-0032）、回合末 `LlmTurnDecider` 决策（ADR-0030）、`session::switch` 工具（模型不可见）三处一并删除；`GuardModel`/`turn_decider_prompt` 相应退役。
+- [ ] 保留的自动行为：仅系统级空闲超时是否保留待定（倾向保留但改为"提示用户"而非自动切）；失败降级逻辑随决策一起删除。
+- [ ] 后端 `start_new` 语义 = 用户手动新建会话（不再由模型触发）；交接摘要仅在用户新建会话时按需携带。
+- [ ] 前端：会话列表（新建 / 重命名 / 删除 / 按最近活动排序）+「新对话」入口，Chatbox 式交互；会话标题仍由模型按首条消息生成。
+- [ ] 存量数据迁移：树结构会话（含摘要节点、兄弟分支）拆分为独立会话条目，幂等 + `.bak`。
+- [ ] **待定**：会话内消息版本切换（编辑重发 + `< / >` 浏览旧版本，DeepSeek 式）是否保留——若保留，限定为"会话内版本浏览"，不再承担会话边界语义。
+
+### 2. 设置删掉硅基流动等视觉模型，统一只用 DeepSeek
+
+目标：单份 DeepSeek 配置同时承担**主模型 + 调度模型 + 视觉理解模型**。
+
+- [ ] settings.json 收敛为一份模型配置（`api_url` / `api_key` / `model` / `transport`），删除 `vision_model` 字段（[src/kernel/settings.rs](../src/kernel/settings.rs)）。
+- [ ] 设置页删「视觉模型（OCR / 图片理解）」卡片与 SiliconFlow 余额卡片；OOBE 同步去掉视觉模型输入项（[SettingsPage.vue](../web/src/components/SettingsPage.vue)、[OobePage.vue](../web/src/components/OobePage.vue)）。
+- [ ] 调度/摘要（`LlmTurnDecider` / `LlmSummarizer`）与视觉理解（vision::read → [routing.rs](../src/kernel/plugin/model/routing.rs)）全部改走同一配置，按用途选模型的入口收敛。
+- [ ] 余额查询去掉 SiliconFlow 专用分支（[balance.rs](../src/kernel/agent/balance.rs) 的 `siliconflow_url`；ADR-0019/0031 需修订）。
+- [ ] 存量配置兼容：旧 settings.json 带 `vision_model` 时忽略并清理，启动不报错。
+- [ ] **先验证**：DeepSeek 端点是否支持图片输入（多模态）。若不支持，OCR / 图片理解链路需另定方案（本地 OCR 或保留可选视觉端点）——此点确认后再改 `vision__read` 的实现。
+
+### 3. 加入服务端：教师端班级管理 + 出题下发（学生端登录接入）
+
+目标形态：新增**服务端 + 学生端登录接入**；服务端带账号体系，学生端登录后从服务端拉取下发题目并同步错题。
+
+- [ ] 账号体系：教师/学生登录，学生端登录接入，本地数据与账号绑定。
+- [ ] 教师端：创建班级、管理学生（加入/移除/重置）、查看学生错题内容与掌握度。
+- [ ] 出题下发：教师出题后下发给**全班或指定部分学生**；学生端接收获派作业（练习/试卷）并作答，结果回传。
+- [ ] 同步：错题本/事件流 ↔ 服务端（增量上传 + 下发拉取；冲突与离线策略需定）。
+- [ ] 架构决策待立 ADR：服务端技术栈、数据模型、鉴权方式、学生端（Tauri）接入路径。
+
+### 4. 错题本优化（前端错题卡）
+
+- [ ] **错题卡加入标题（标题由模型生成）**：卡片顶部加一行标题（现状：[MistakesPage.vue](../web/src/components/MistakesPage.vue) 卡片只有 学科/知识点 badge + 题干截断，无标题）。做法：判分归档时由模型一并生成短标题 → [src/mistake.rs](../src/mistake.rs) 新增 `title` 字段 + 判分提示词（[prompt.rs](../src/kernel/prompt.rs)）补标题字段与「一句话概括、不超过 N 字」要求 + `grading::update` 支持编辑；卡片/抽屉顶部展示。存量错题无 `title`：前端回退显示 学科 + 知识点（或按需补一次回填）。
+- [ ] **小字加入 LaTeX 渲染支持**：卡片「你的作答 / 参考答案」两处小字（`.answer-strip-text`）目前是纯插值，`$x^2$` / `$\frac{1}{2}$` 原样显示；改为走 `v-html-smiles` / `renderMarkdown`（KaTeX + mhchem + DOMPurify，[markdown.js](../web/src/lib/markdown.js)），同时保留单行省略与字号样式。
+- [ ] **错题正文完全拷贝到错题卡题目内容中**：归档时把原题正文**逐字完整**写入 `question`，不概括、不重写、不漏小问（现状：判分提示词只写「question（题目）」，模型可能缩写重写——[prompt.rs](../src/kernel/prompt.rs) 判分系统提示需补「题干必须逐字保留原文」约束，并核对 `grading__upload` 落库路径与卡片 2 行截断展示）。
+
 ## 任务书（2026 项目实战·任务 3）落地任务（2026-08-09 设计方案已定，决策见 ADR-0039/0040/0041）
 
 ### 基础架构改造（三个场景的地基，先做）
