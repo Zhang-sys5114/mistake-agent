@@ -2,20 +2,20 @@
 
 ## 1. 测试策略
 
-- **单元测试**：`cargo test`（149 项），覆盖注册表校验、dispatch、session 调度（守卫/摘要/分支/压缩/中断）、storage（文件/内存/DomainIo/TmpIo/迁移）、memory（文件 CRUD/路径越界/旧布局迁移）、model（SSE/usage 解析）、settings（patch/public_view）、prompt（英语模式规则 + AGENTS.md 加载/回退/拼接）、compute 桥接与 handler、插件入口（schema/模板/聚合）。
+- **单元测试**：`cargo test`（146 项），覆盖注册表校验、dispatch、session 调度（新建会话/归档/交接摘要/空闲提示/压缩/中断）、storage（文件/内存/DomainIo/TmpIo/迁移）、memory（文件 CRUD/路径越界/旧布局迁移）、model（SSE/usage 解析）、settings（patch/public_view）、prompt（英语模式规则 + AGENTS.md 加载/回退/拼接）、compute 桥接与 handler、插件入口（schema/模板/聚合）。
 - **真实 API 集成测试**：`cargo test --test live_api -- --ignored --nocapture`，直接接 DeepSeek/SiliconFlow（无 key 自动跳过）。
 - **样例端到端**：`samples/` 三套作业图片逐一走 上传→OCR→判分→归档 全链路。
 - **前端自检**：`cd web && npm run check:pyodide`（真实加载 Pyodide WASM 并执行 Python：算术、符号计算（sympy 解方程/求导/积分）、物理（单位换算/运动学）、numpy 数值、异常路径）；`node scripts/katex-check.mjs`（KaTeX 行内/块级/化学式/矩阵/非法公式容错）。
 
-## 2. 用例与结果（2026-08-10 实测）
+## 2. 用例与结果（单元测试 2026-09-21 实测；真实 API 部分为 2026-08-10 实测，本次未复验）
 
-### 单元测试：149 项全过
+### 单元测试：146 项全过
 
 | 模块 | 覆盖点 |
 |---|---|
 | registry | namespace 撞名、wire 撞名、requires 不可满足、懒注册 |
 | dispatch | 注册链路、命令回退同名工具 |
-| session | 首消息建会话、空闲超时/start_new/session::switch 树内分叉（摘要节点+新子树）、守卫决策（stub+LLM 解析失败保底）、消息级分支派生/切分支、上下文裁剪（scope_session_context）、压缩摘要、InterruptBus |
+| session | 首消息建会话、无自动切换（新消息一律继续当前会话）、空闲超时只发 `SessionIdle` 事件不分叉、用户新建会话（归档旧会话/新独立 SessionKey/携带或不携带交接摘要/空会话不携带）、摘要节点下挂新消息、LLM 摘要重试与降级、消息级分支派生/切分支、压缩摘要、InterruptBus |
 | storage | 错题 CRUD、会话追加/归档、active_path/derive_branch/splice_compaction |
 | prompt | AGENTS.md 加载（正常/缺失/超限/非 UTF-8）、系统提示拼接规则与回退、reason 标签 |
 | memory | 文件 CRUD、目录浏览、子树删除、路径校验（绝对/../空段）、中文路径编码与旧布局迁移 |
@@ -28,7 +28,7 @@
 
 ### 真实 API 链路
 
-当前 `live_api` 共 9 个 ignored 用例，使用本地 `settings.json` 中的真实主模型/视觉模型配置；复验结果为 9/9 通过。
+当前 `live_api` 共 8 个 ignored 用例，使用本地 `settings.json` 中的真实主模型/视觉模型配置。
 
 | 用例 | 结果 |
 |---|---|
@@ -37,6 +37,7 @@
 | memory 工具往返（save/show/remove + 文件落盘） | ✅ 通过 |
 | LaTeX 输出（模型按 prompt 输出 $...$ 公式） | ✅ 通过（勾股定理，$a$/$b$/$c$） |
 | compute::verify 全链路（事件→回执→工具成功→模型续答） | ✅ 通过：测试模拟 GUI 执行端回执固定 stdout，kernel→桥→回执→续答闭环 |
+| 用户新建会话 + 交接摘要（`create_session_carry_summary_real_api`，ADR-0044） | ⏳ 待复验（本次改动新增，替换原"预决策"链路；需本地 settings.json） |
 
 | 样例 | 类型 | 题数 | 对 | 错 | 归档 | 备注 |
 |---|---|---|---|---|---|---|
@@ -62,11 +63,11 @@
 | 8 | 会话 JSONL 只有 user 消息、审计 tokens 全 None | SSE 事件映射未命中 usage（usage 在 `response.usage` 顶层） | 已修：completed/incomplete 事件解析 response.usage；live_api 加落盘+usage 断言 |
 | 9 | Method::ComputeResult 的 id 与 RPC 顶层 id 撞名 | serde flatten 字段冲突 | 已修：rename `compute_id`，前端按 compute_id 回执 |
 | 10 | 工具调用回合报"reasoning_text must be passed back" | 三层原因：①只回传 id 丢文本；②**并行调用时一个 reasoning 只覆盖第一个 function_call**（实测 DeepSeek 要求每个调用前都有 reasoning）；③流式 delta 先于 item start 时文本丢失 | 已修：loop 累积 id+text 并防御 delta 乱序；`messages_to_responses_input` 回传文本并**按调用复制 reasoning**；再被拒时兜底剥离 reasoning + `effort=none` 重试；真实 API 复验通过 |
-| 11 | 会话切换频率超限时丢消息/归档错乱 | 归档后才检查切换频率 | 已修：频率检查前置，超限降级 continue（消息不丢） |
+| 11 | 会话切换频率超限时丢消息/归档错乱 | 归档后才检查切换频率 | 已废弃（ADR-0044）：模型自动切换整体下线，频率护栏随决策一并删除 |
 | 12 | 回合失败后界面/状态未恢复 | 失败时未发 turn_end | 已修：失败发 `turn_end(failed)` + error，前端恢复可聊天 |
-| 13 | DeepSeek 503 导致守卫/摘要/回合失败 | 无重试 | 已修：守卫/摘要对瞬时错误重试 2 次（线性退避），主回合流重试 1 次；系统性错误（无余额/模型下架）不重试直接降级；单测模拟 503→成功通过 |
+| 13 | DeepSeek 503 导致摘要/回合失败 | 无重试 | 已修：摘要器对瞬时错误重试 2 次（线性退避），主回合流重试 1 次；系统性错误（无余额/模型下架）不重试直接降级；单测模拟 503→成功通过。守卫模型已退役（ADR-0044），重试实现移至 `session/summarize.rs::complete_with_retry` |
 | 14 | 工具调用回合报"reasoning_text must be passed back"（批改失败） | **真实根因是 call_id 不匹配**：loop 丢弃首轮 function_call 的真实 call_id，第二轮回填用随机 uuid；DeepSeek 对错误 call_id 的报错信息误导为 reasoning | 已修：ToolCall 消息保存真实 call_id（tool_call_with_id），回传时优先使用；保留 reasoning 回传（无害）；真实批改多轮验证通过 |
-| 15 | 会话切换后上下文/历史断裂 | 切换只注入摘要，模型记不住之前对话 | 已修：切换 = 树内分叉——当前节点下挂「摘要节点 + 新会话子树」，摘要作为上下文边界，旧分支保留为兄弟版本（GUI < / > 可切回） |
+| 15 | 会话切换后上下文/历史断裂 | 切换只注入摘要，模型记不住之前对话 | 已被 ADR-0044 取代：模型不再自动切换会话。用户新建会话时按需携带交接摘要（`carry_summary`），新会话为独立 SessionKey，旧会话完整归档可查 |
 
 ## 4. 成本观察（真实调用）
 

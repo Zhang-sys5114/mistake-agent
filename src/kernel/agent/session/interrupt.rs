@@ -7,21 +7,9 @@ use super::*;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "interrupt", rename_all = "snake_case")]
 pub enum Interrupt {
-    SessionSwitched {
-        from: SessionKey,
-        to: SessionKey,
-        goal: Goal,
-    },
-    GoalUpdated {
-        goal: Goal,
-    },
     ConfigChanged,
-    MemoryChanged {
-        path: String,
-    },
-    CompactionDone {
-        session: SessionKey,
-    },
+    MemoryChanged { path: String },
+    CompactionDone { session: SessionKey },
 }
 
 #[derive(Clone)]

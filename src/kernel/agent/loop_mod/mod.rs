@@ -5,10 +5,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::kernel::agent::dispatch::{Caller, Dispatch};
-use crate::kernel::agent::session::{InterruptBus, SessionKey, SessionSwitch, Summarizer};
+use crate::kernel::agent::session::{InterruptBus, Summarizer};
 use crate::kernel::audit::{AuditRecord, Auditor};
 use crate::kernel::contract::{ToolError, ToolErrorCode};
 use crate::kernel::events::{Event, EventSink};
@@ -67,8 +67,6 @@ pub struct AgentLoop {
     context_limit_tokens: usize,
     /// 压缩时保留的最近消息条数。
     compaction_keep_last: usize,
-    /// 回合内主动切换会话（session::switch 工具）。
-    switcher: Option<Arc<dyn SessionSwitch>>,
 }
 
 impl AgentLoop {
@@ -81,7 +79,6 @@ impl AgentLoop {
         summarizer: Arc<dyn Summarizer>,
         bus: InterruptBus,
         system_prompt: SystemPromptProvider,
-        switcher: Option<Arc<dyn SessionSwitch>>,
     ) -> Self {
         Self {
             model,
@@ -95,7 +92,6 @@ impl AgentLoop {
             system_prompt,
             context_limit_tokens: 131_072,
             compaction_keep_last: 15,
-            switcher,
         }
     }
 
@@ -125,7 +121,6 @@ impl AgentLoop {
         let mut conversation = input.messages;
         let turn_deadline = Instant::now() + input.turn_budget;
         let mut tool_calls = 0usize;
-        let mut current_session: Option<SessionKey> = None;
         let mut consecutive_failures = 0usize;
         let mut last_code: Option<ToolErrorCode> = None;
         let mut remaining_forced = input.forced_tool.clone();
@@ -358,7 +353,6 @@ impl AgentLoop {
                                 tool_calls,
                                 compaction: None,
                                 usage: usage_opt(&turn_usage),
-                                session_key: current_session,
                             });
                         }
                         return Err(LoopError::Model(e.to_string()));
@@ -401,28 +395,6 @@ impl AgentLoop {
                 });
                 let result = if full_name.is_empty() {
                     Err(ToolError::unknown_tool(&wire_name))
-                } else if full_name == "session::switch" {
-                    // 回合内主动切换（ADR-0030）：执行会话切换并回填新会话键。
-                    match &self.switcher {
-                        Some(s) => {
-                            let goal = params
-                                .get("goal")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            match s.switch(&goal).await {
-                                Ok(key) => {
-                                    current_session = Some(key);
-                                    Ok(json!({
-                                        "switched": true,
-                                        "session_key": key.to_string(),
-                                    }))
-                                }
-                                Err(e) => Err(ToolError::handler(e)),
-                            }
-                        }
-                        None => Err(ToolError::handler("会话切换不可用")),
-                    }
                 } else {
                     self.dispatch
                         .call_tool(&full_name, params.clone(), Caller::Model)
@@ -474,7 +446,6 @@ impl AgentLoop {
             tool_calls,
             compaction,
             usage: usage_opt(&turn_usage),
-            session_key: current_session,
         };
         // TurnEnd 事件不在 loop 内发：由 RPC 层在消息落盘 + active_path 更新后发出
         // （否则前端收到 turn_end 立刻回读会话时，活跃路径还是旧的，新消息会从链上消失）。
@@ -529,8 +500,6 @@ impl AgentLoop {
 
 fn interrupt_name(interrupt: &crate::kernel::agent::session::Interrupt) -> String {
     match interrupt {
-        crate::kernel::agent::session::Interrupt::SessionSwitched { .. } => "session_switched",
-        crate::kernel::agent::session::Interrupt::GoalUpdated { .. } => "goal_updated",
         crate::kernel::agent::session::Interrupt::ConfigChanged => "config_changed",
         crate::kernel::agent::session::Interrupt::MemoryChanged { .. } => "memory_changed",
         crate::kernel::agent::session::Interrupt::CompactionDone { .. } => "compaction_done",

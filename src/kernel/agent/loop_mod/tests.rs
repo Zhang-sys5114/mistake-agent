@@ -63,7 +63,6 @@ fn setup_loop(
             Arc::new(StubSummarizer),
             bus,
             Arc::new(|| "你是测试 Agent".to_string()),
-            None,
         )
         .with_compaction_limits(context_limit, 2),
     );

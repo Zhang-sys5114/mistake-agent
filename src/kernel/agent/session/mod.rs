@@ -1,23 +1,21 @@
-//! Session scheduler（M1.5）：SessionKey、生命周期、守卫模型、交接摘要、空闲超时。
+//! Session scheduler（M1.5）：SessionKey、生命周期、交接摘要、空闲超时。
 
 // ---------- 会话类型（Key/Goal/Status/Meta） ----------
 
-use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::kernel::message::{Message, MessageId, MessageKind};
+use crate::kernel::message::{Message, MessageId};
 use crate::kernel::plugin::services::{
-    AbortSignal, ModelError, ModelKind, ModelRequest, ModelResponse, ModelService, ResponseFormat,
-    SessionStore, StorageError,
+    AbortSignal, ModelError, ModelKind, ModelRequest, ModelResponse, ModelService, SessionStore,
+    StorageError,
 };
-use crate::kernel::prompt::{summarize_prompt, turn_decider_prompt};
+use crate::kernel::prompt::summarize_prompt;
 
 // ---------- SessionKey ----------
 
@@ -84,27 +82,19 @@ impl SessionMeta {
 }
 
 mod clock;
-mod guard;
 mod interrupt;
 mod scheduler;
 mod summarize;
 
 pub use clock::{Clock, FakeClock, SystemClock};
-pub use guard::{GuardDecision, GuardError, GuardInput, GuardModel, LlmTurnDecider, StubGuard};
 pub use interrupt::{Interrupt, InterruptBus};
-pub use scheduler::{SchedulerError, SessionScheduler, SessionSwitch, TurnContext};
-pub use scheduler::{is_session_summary, scope_session_context};
+pub use scheduler::{CreatedSession, SchedulerError, SessionScheduler, TurnContext};
 pub use summarize::{HandoffSummary, LlmSummarizer, StubSummarizer, Summarizer};
-
-// 子模块间共享的内部函数（同 crate 可见）。
-pub(crate) use guard::complete_with_retry;
-#[cfg(test)]
-pub(crate) use guard::parse_guard_decision;
-pub(crate) use summarize::message_text;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::events::{Event, MemoryEventSink};
     use crate::kernel::message::MessageKind;
     use crate::kernel::plugin::services::{
         ModelChunk, ModelError, ModelResponse, ModelStream, TokenUsage,
@@ -170,24 +160,31 @@ mod tests {
         }
     }
 
-    fn setup() -> (SessionScheduler, FakeClock, MemoryStorage, InterruptBus) {
+    fn setup() -> (
+        SessionScheduler,
+        FakeClock,
+        MemoryStorage,
+        InterruptBus,
+        Arc<MemoryEventSink>,
+    ) {
         let store = MemoryStorage::new();
         let clock = FakeClock::new(Utc::now());
         let bus = InterruptBus::new();
+        let events = Arc::new(MemoryEventSink::default());
         let scheduler = SessionScheduler::new(
             Arc::new(store.clone()),
-            Arc::new(StubGuard::new()),
             Arc::new(clock.clone()),
             Arc::new(StubSummarizer),
             bus.clone(),
+            events.clone(),
         );
-        (scheduler, clock, store, bus)
+        (scheduler, clock, store, bus, events)
     }
 
     #[tokio::test]
     async fn display_text_persisted_on_forced_tool_message() {
         // force_tool 场景：text（模型指令）与 display_text（前端展示）分离落盘。
-        let (scheduler, _, store, _) = setup();
+        let (scheduler, _, store, _, _) = setup();
         let ctx = scheduler
             .on_new_message_with_display(
                 "请调用工具 memory::show 处理：数学/向量组的线性相关性",
@@ -212,19 +209,9 @@ mod tests {
         assert_eq!(user.1.as_deref(), Some("翻看记忆：数学/向量组的线性相关性"));
     }
 
-    /// 确定性 continue 守卫：测试“新消息默认继续当前会话”时替代关键词版 StubGuard。
-    struct ContinueGuard;
-
-    #[async_trait]
-    impl GuardModel for ContinueGuard {
-        async fn decide(&self, _input: &GuardInput) -> Result<GuardDecision, GuardError> {
-            Ok(GuardDecision::Continue)
-        }
-    }
-
     #[tokio::test]
     async fn first_message_creates_session() {
-        let (scheduler, _, store, _) = setup();
+        let (scheduler, _, store, _, _) = setup();
         let ctx = scheduler.on_new_message("帮我看看这道题").await.unwrap();
         assert_eq!(ctx.messages.len(), 1);
         let metas = store.list_sessions().await.unwrap();
@@ -233,44 +220,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_timeout_forks_session_branch() {
-        let (scheduler, clock, store, _) = setup();
+    async fn idle_timeout_emits_event_and_continues() {
+        let (scheduler, clock, store, _, events) = setup();
         let first = scheduler.on_new_message("帮我看看这道题").await.unwrap();
+        events.take();
         clock.advance(Duration::from_secs(13 * 60 * 60));
         let second = scheduler.on_new_message("生成周复习报告").await.unwrap();
-        // 空闲超时不再开新会话：同一棵树内分叉。
+        // 空闲超时不再自动分叉：留在原会话，只发提示事件（ADR-0044）。
         assert_eq!(first.session_key, second.session_key);
         let metas = store.list_sessions().await.unwrap();
         assert_eq!(metas.len(), 1);
         assert_eq!(metas[0].status, SessionStatus::Active);
-        // 活跃路径 = [..., 摘要节点, 新用户消息]
         let msgs = store.read_path(&second.session_key).await.unwrap();
-        assert!(matches!(
-            msgs[msgs.len() - 2].kind,
-            crate::kernel::message::MessageKind::System { ref text, .. }
-                if text.contains("上一会话梗概")
-        ));
+        assert!(
+            !msgs.iter().any(|m| matches!(
+                m.kind,
+                MessageKind::System { ref text, .. } if text.contains("上一会话梗概")
+            )),
+            "不应再插入摘要节点"
+        );
         assert!(matches!(
             msgs.last().unwrap().kind,
-            crate::kernel::message::MessageKind::User { .. }
+            MessageKind::User { .. }
         ));
+        let emitted = events.take();
+        assert!(
+            emitted
+                .iter()
+                .any(|e| matches!(e, Event::SessionIdle { .. })),
+            "应发出空闲提示事件：{emitted:?}"
+        );
     }
 
     #[tokio::test]
     async fn new_message_continues_current_session() {
-        let store = MemoryStorage::new();
-        let clock = FakeClock::new(Utc::now());
-        let bus = InterruptBus::new();
-        let scheduler = SessionScheduler::new(
-            Arc::new(store.clone()),
-            Arc::new(ContinueGuard),
-            Arc::new(clock.clone()),
-            Arc::new(StubSummarizer),
-            bus.clone(),
-        );
+        let (scheduler, _, store, _, _) = setup();
         let first = scheduler.on_new_message("帮我看看这道题").await.unwrap();
         let second = scheduler.on_new_message("继续讲第二题").await.unwrap();
-        // 主模型决策 continue：新消息继续当前会话（ADR-0032）。
+        // 没有任何自动切换：新消息一律继续当前会话。
         assert_eq!(first.session_key, second.session_key);
         let metas = store.list_sessions().await.unwrap();
         assert_eq!(metas.len(), 1, "不应自动切换新会话");
@@ -278,116 +265,114 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_message_start_new_forks_branch() {
-        // StubGuard 命中“报告”关键词 → start_new：树内分叉（摘要节点 + 新用户消息）。
-        let (scheduler, _, store, bus) = setup();
-        let first = scheduler.on_new_message("帮我看看这道题").await.unwrap();
-        let second = scheduler.on_new_message("生成周复习报告").await.unwrap();
-        assert_eq!(first.session_key, second.session_key, "分叉不新建会话");
+    async fn create_new_session_archives_previous_and_returns_new_key() {
+        let (scheduler, _, store, _, _) = setup();
+        let old = scheduler.on_new_message("帮我看看这道题").await.unwrap();
+
+        let created = scheduler.create_new_session(None, false).await.unwrap();
+
+        assert_ne!(created.key, old.session_key, "新会话应为独立 SessionKey");
+        assert_eq!(created.archived, Some(old.session_key));
+        assert!(!created.summary_attached);
         let metas = store.list_sessions().await.unwrap();
-        assert_eq!(metas.len(), 1, "仍是同一个会话");
-        assert_eq!(metas[0].status, SessionStatus::Active);
-        let msgs = store.read_path(&second.session_key).await.unwrap();
-        assert!(
-            msgs.iter().any(|m| {
-                matches!(
-                    m.kind,
-                    crate::kernel::message::MessageKind::System { ref text, .. }
-                        if text.contains("上一会话梗概")
-                )
-            }),
-            "分叉点应有会话摘要节点"
-        );
-        assert!(
-            matches!(
-                msgs.last().unwrap().kind,
-                crate::kernel::message::MessageKind::User { .. }
-            ),
-            "新用户消息应挂到摘要之后"
-        );
-        let interrupts = bus.take_all();
-        assert!(
-            interrupts
+        assert_eq!(metas.len(), 2);
+        let archived = metas.iter().find(|m| m.key == old.session_key).unwrap();
+        assert_eq!(archived.status, SessionStatus::Archived);
+        assert!(archived.archived_at.is_some());
+        // 单 Active 不变量：查找活动会话的地方都取第一个匹配。
+        assert_eq!(
+            metas
                 .iter()
-                .any(|i| matches!(i, Interrupt::SessionSwitched { .. })),
-            "应发出会话切换中断"
+                .filter(|m| m.status == SessionStatus::Active)
+                .count(),
+            1
+        );
+        assert_eq!(
+            metas.iter().find(|m| m.key == created.key).unwrap().status,
+            SessionStatus::Active
         );
     }
 
     #[tokio::test]
-    async fn interrupt_bus_receives_switch() {
-        let (scheduler, _, _, bus) = setup();
-        scheduler.on_new_message("帮我看看这道题").await.unwrap();
-        scheduler.switch("批改英语作业").await.unwrap();
-        let interrupts = bus.take_all();
-        assert!(
-            interrupts
-                .iter()
-                .any(|i| matches!(i, Interrupt::SessionSwitched { .. }))
-        );
-    }
-
-    #[test]
-    fn parse_guard_decision_accepts_json_and_fences() {
-        assert!(matches!(
-            parse_guard_decision(r#"{"action":"continue","goal":""}"#),
-            Some(GuardDecision::Continue)
-        ));
-        let d = parse_guard_decision(
-            "```json\n{\"action\":\"start_new\",\"goal\":\"批改英语作业\"}\n```",
-        );
-        assert!(matches!(d, Some(GuardDecision::StartNew(_))));
-        assert!(parse_guard_decision("不是 JSON").is_none());
-    }
-
-    #[tokio::test]
-    async fn llm_turn_decider_returns_start_new() {
-        let model = Arc::new(ScriptedModel::new(vec![Ok(
-            r#"{"action":"start_new","goal":"批改英语作业"}"#.into(),
-        )]));
-        let decider = LlmTurnDecider::new(model);
-        let decision = decider
-            .decide(&GuardInput {
-                goal: Some(Goal {
-                    text: "复习数学".into(),
+    async fn create_new_session_without_active_session() {
+        let (scheduler, _, store, _, _) = setup();
+        let created = scheduler
+            .create_new_session(
+                Some(Goal {
+                    text: "线性代数".into(),
                 }),
-                summary: "最近对话：做完三道绝对值题".into(),
-                new_text: None,
-            })
+                false,
+            )
             .await
             .unwrap();
-        match decision {
-            GuardDecision::StartNew(goal) => assert_eq!(goal.text, "批改英语作业"),
-            _ => panic!("应 start_new"),
-        }
-    }
-
-    #[tokio::test]
-    async fn turn_end_decision_failure_falls_back_to_continue() {
-        let store = MemoryStorage::new();
-        let clock = FakeClock::new(Utc::now());
-        let bus = InterruptBus::new();
-        let decider = Arc::new(LlmTurnDecider::new(Arc::new(ScriptedModel::new(vec![
-            Err("模型 500".into()),
-        ]))));
-        let scheduler = SessionScheduler::new(
-            Arc::new(store.clone()),
-            decider,
-            Arc::new(clock.clone()),
-            Arc::new(StubSummarizer),
-            bus.clone(),
-        );
-        let first = scheduler.on_new_message("帮我看看这道题").await.unwrap();
-        // 回合结束决策失败 → 存疑即继续：不切会话。
-        scheduler
-            .on_turn_end(&first.session_key, &[])
-            .await
-            .unwrap();
+        assert_eq!(created.archived, None);
+        assert!(!created.summary_attached);
         let metas = store.list_sessions().await.unwrap();
         assert_eq!(metas.len(), 1);
-        assert_eq!(metas[0].status, SessionStatus::Active);
-        let leftovers = bus.take_all();
-        assert!(leftovers.is_empty(), "意外中断：{leftovers:?}");
+        assert_eq!(metas[0].goal.as_ref().unwrap().text, "线性代数");
+    }
+
+    #[tokio::test]
+    async fn create_new_session_carry_summary_attaches_summary_first() {
+        let (scheduler, _, store, _, _) = setup();
+        let old = scheduler.on_new_message("帮我看看这道题").await.unwrap();
+        scheduler.on_new_message("继续讲第二题").await.unwrap();
+
+        let created = scheduler.create_new_session(None, true).await.unwrap();
+
+        assert!(created.summary_attached);
+        let msgs = store.read_path(&created.key).await.unwrap();
+        assert_eq!(msgs.len(), 1, "新会话首条消息即为交接摘要");
+        assert!(matches!(
+            msgs[0].kind,
+            MessageKind::System { ref text, .. } if text.contains("上一会话梗概")
+        ));
+        // 旧会话本身不因携带摘要而被写入。
+        let old_msgs = store.read_path(&old.session_key).await.unwrap();
+        assert!(!old_msgs.iter().any(|m| matches!(
+            m.kind,
+            MessageKind::System { ref text, .. } if text.contains("上一会话梗概")
+        )));
+    }
+
+    #[tokio::test]
+    async fn create_new_session_carry_summary_skips_empty_session() {
+        let (scheduler, _, store, _, _) = setup();
+        // 先建一个空会话（无任何消息），再携带摘要新建。
+        let old = scheduler.create_new_session(None, false).await.unwrap();
+
+        let created = scheduler.create_new_session(None, true).await.unwrap();
+
+        assert!(!created.summary_attached, "空会话没有可交接的内容");
+        assert_eq!(created.archived, Some(old.key));
+        assert!(store.read_path(&created.key).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn on_new_message_appends_under_handoff_summary() {
+        let (scheduler, _, store, _, events) = setup();
+        scheduler.on_new_message("帮我看看这道题").await.unwrap();
+        let created = scheduler.create_new_session(None, true).await.unwrap();
+        events.take();
+
+        let ctx = scheduler.on_new_message("换一道新题").await.unwrap();
+
+        assert_eq!(ctx.session_key, created.key, "新消息应落在新会话");
+        let msgs = store.read_path(&created.key).await.unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert!(
+            matches!(
+                msgs[0].kind,
+                MessageKind::System { ref text, .. } if text.contains("上一会话梗概")
+            ),
+            "首条应为交接摘要"
+        );
+        assert_eq!(
+            msgs[1].parent_id,
+            Some(msgs[0].id),
+            "用户消息应挂在摘要节点下"
+        );
+        assert!(events.take().is_empty(), "刚活动过，不应触发空闲提示");
     }
 
     #[tokio::test]
@@ -402,27 +387,6 @@ mod tests {
         let summarizer = LlmSummarizer::new(model).with_retry(2, Duration::ZERO);
         let text = summarizer.summarize(&messages, None).await;
         assert!(text.contains("共 8 条消息"));
-    }
-
-    #[tokio::test]
-    async fn llm_turn_decider_retries_transient_errors() {
-        // 第一次 503 → 重试成功，决策器返回 start_new。
-        let model = Arc::new(ScriptedModel::new(vec![
-            Err("HTTP 503 Service Unavailable".into()),
-            Ok(r#"{"action":"start_new","goal":"批改英语作业"}"#.into()),
-        ]));
-        let decider = LlmTurnDecider::new(model).with_retry(2, Duration::ZERO);
-        let decision = decider
-            .decide(&GuardInput {
-                goal: Some(Goal {
-                    text: "复习数学".into(),
-                }),
-                summary: "最近对话：作业批改完成".into(),
-                new_text: None,
-            })
-            .await
-            .unwrap();
-        assert!(matches!(decision, GuardDecision::StartNew(_)));
     }
 
     #[tokio::test]
@@ -446,69 +410,5 @@ mod tests {
             .await;
         assert!(text.contains("共 2 条消息"));
         assert_eq!(model.call_count(), 0, "短会话摘要不应调用模型");
-    }
-
-    #[tokio::test]
-    async fn frequency_limit_rejects_excess_switches() {
-        let store = MemoryStorage::new();
-        let clock = FakeClock::new(Utc::now());
-        let bus = InterruptBus::new();
-        let scheduler = SessionScheduler::new(
-            Arc::new(store.clone()),
-            Arc::new(StubGuard::new()),
-            Arc::new(clock.clone()),
-            Arc::new(StubSummarizer),
-            bus.clone(),
-        );
-        // 首条建会话；随后分叉 5 次（达到 1 小时上限）。
-        let first = scheduler.on_new_message("帮我看看这道题").await.unwrap();
-        let mut last_key = first.session_key;
-        for _ in 0..5 {
-            last_key = scheduler.switch("新目标").await.unwrap();
-        }
-        // 第 6 次超限：拒绝并返回错误（调用方/模型可感知），不产生新分支。
-        assert!(scheduler.switch("再切一次").await.is_err());
-        let metas = store.list_sessions().await.unwrap();
-        let active = metas
-            .iter()
-            .find(|m| m.status == SessionStatus::Active)
-            .unwrap();
-        assert_eq!(active.key, last_key);
-        assert_eq!(metas.len(), 1, "分叉不新建会话");
-    }
-
-    #[tokio::test]
-    async fn switch_forks_branch_with_summary() {
-        let (scheduler, _, store, _) = setup();
-        scheduler.on_new_message("帮我看看这道题").await.unwrap();
-        scheduler.on_new_message("继续讲第二题").await.unwrap();
-        let key = scheduler.switch("批改英语作业").await.unwrap();
-        let metas = store.list_sessions().await.unwrap();
-        assert_eq!(metas.len(), 1, "切换不新建会话");
-        let msgs = store.read_path(&key).await.unwrap();
-        assert!(
-            matches!(
-                msgs.last().unwrap().kind,
-                crate::kernel::message::MessageKind::System { ref text, .. }
-                    if text.contains("上一会话梗概")
-            ),
-            "切换后活跃路径末尾应为会话摘要节点"
-        );
-    }
-
-    #[test]
-    fn scope_session_context_cuts_at_summary() {
-        let u1 = Message::user("u1");
-        let a1 = Message::assistant("a1");
-        let mut s = Message::system_with_display("上一会话梗概：摘要", None);
-        s.parent_id = Some(a1.id);
-        let u2 = Message::user("u2");
-        let scoped = scope_session_context(&[u1.clone(), a1.clone(), s.clone(), u2.clone()]);
-        assert_eq!(scoped.len(), 2, "从摘要节点起算");
-        assert_eq!(scoped[0].id, s.id);
-        assert_eq!(scoped[1].id, u2.id);
-        // 无摘要节点（根会话）时原样返回。
-        let full = scope_session_context(&[u1.clone(), a1.clone()]);
-        assert_eq!(full.len(), 2);
     }
 }

@@ -1,6 +1,6 @@
 # 内核插件开发手册
 
-面向「写内核插件（特权子系统）」的开发者。内核插件运行在**信任边界内**，负责敏感资源与能力（会话存储、记忆、模型、验算、会话切换）；与用户插件的区别是：注册上下文注入**全量**服务句柄，并在 `info` 里用 `provides` 声明自己提供的服务。
+面向「写内核插件（特权子系统）」的开发者。内核插件运行在**信任边界内**，负责敏感资源与能力（会话存储、记忆、模型、验算）；与用户插件的区别是：注册上下文注入**全量**服务句柄，并在 `info` 里用 `provides` 声明自己提供的服务。
 
 内核整体生命周期、模块职责和扩展边界见 [Kernel 开发手册](../kernel-dev.md)；本文只讲 KernelPlugin 的注册与插件实现。
 
@@ -67,8 +67,9 @@ pub fn descriptor() -> KernelDescriptor {
 
 - `memory`：`save/show/remove` 工具入口（服务实现在同一文件夹）；
 - `compute`：`verify` 工具（BridgeCompute → GUI Pyodide）；
-- `session`：`switch` 工具（工具入口与 Session scheduler 分离，调度器在 `src/kernel/agent/session/`）；
 - `storage` / `model`：纯服务提供者，无工具入口，`register` 为空。
+
+> `session` 内核插件（`session::switch` 工具）已随模型自动切换一并删除（ADR-0044），会话新建改由 `create_session` RPC 触发，不经工具入口。
 
 ## 6. 注册校验与常见错误
 

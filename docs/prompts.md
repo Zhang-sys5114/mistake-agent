@@ -48,17 +48,24 @@
 `subject` 为学科（数学/英语/物理/化学/生物/语文等，无法判断填"未分类"），`reference_answer` 为该题参考答案（可 null）；
 强制数组包裹。
 
-### 4. 会话切换决策提示（turn_decider_prompt）— M2 落地，ADR-0030/0032
+### 4. ~~会话切换决策提示（turn_decider_prompt）~~ — 已退役，ADR-0044
 
-生产实现 = 主模型 + turn_decider_prompt 独立调用，输出严格 JSON：continue / update_goal / start_new 三动作；
-输入含 new_text（新消息，可能为 null）——**new_text 非空 = 新消息到达，先判断是否切换上下文再回答**；
-new_text 为 null = 回合结束判断目标是否完成。存疑即 continue，start_new 仅当目标明显无关；
-解析失败/调用失败时按 continue 兜底（存疑即继续）。
+**本提示已删除**：`turn_decider_prompt` / `ENGLISH_DECIDER_RULE` 随模型自动切换整体下线（ADR-0044）。
+会话新建改由用户经 `create_session` RPC 发起，模型不再做任何 continue / update_goal / start_new 决策，
+"存疑即继续"的兜底也随之消失（不再有决策，也就没有决策失败）。
+
+> 本章节号保留，以免 §5 及之后重编号。下文为历史记录。
+>
+> ~~生产实现 = 主模型 + turn_decider_prompt 独立调用，输出严格 JSON：continue / update_goal / start_new 三动作；
+> 输入含 new_text（新消息，可能为 null）——**new_text 非空 = 新消息到达，先判断是否切换上下文再回答**；
+> new_text 为 null = 回合结束判断目标是否完成。存疑即 continue，start_new 仅当目标明显无关；
+> 解析失败/调用失败时按 continue 兜底（存疑即继续）。~~
 
 ### 5. 压缩/交接摘要提示（summarize_prompt）— M2 落地
 
 生产实现 = 主模型 + summarize_prompt 生成：保留错题 id、知识点、未完成事项、结论；≤300 字；
-用于会话交接摘要（旧会话归档）与上下文压缩。
+用于**交接摘要**（用户新建会话且 `carry_summary` 为真时，作为新会话首条 system 消息，ADR-0044）与**上下文压缩**；
+<8 条消息走计数 stub 不调模型，模型失败/超时降级 stub。
 
 ### 6. 练习答案判分提示（practice_check_system_prompt）— 场景二即时批改
 
@@ -78,6 +85,7 @@ compute::verify（Pyodide）做可解性对拍，失败带原因重出、连续 
 
 | 日期 | 变更 | 原因/结果 |
 |---|---|---|
+| 2026-09-21 | `turn_decider_prompt` / `ENGLISH_DECIDER_RULE` 删除 | 模型自动切换整体下线（ADR-0044）：会话新建改由用户发起，提示词与三动作决策一并退役 |
 | 2026-08-15 | 新增英语练习模式提示规则（settings `english_mode`） | 沉浸式英语环境：主对话/判分/出题/即时批改/图片理解/会话决策/摘要全链路英文，GUI 文案保持中文；`agent_system_prompt` 注入英文人设（B+C 演法：全听懂中文、假装只抓英文关键词、永远只回英文并用英文引导组句），中文教学规则（AGENTS.md）照常注入不翻译 |
 | 2026-08-10 | Agent 系统提示加载数据根 AGENTS.md 教学规则全文（缺失/损坏/超限回退静态文本，64KB 上限） | TODO「AGENTS.md 加载进系统提示」落地：家长/老师编辑即生效；设置页展示加载状态 + 一键打开编辑 |
 | 2026-08-09 | 新增练习出题提示（practice_generate_system_prompt） | practice::generate 模板未命中时 LLM 自由出题：结构化 schema 强约束、几何图经可解性对拍后出题 |

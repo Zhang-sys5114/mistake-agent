@@ -16,7 +16,7 @@ ADR-0021 曾定：内核插件（memory/compute/session）的工具入口由 ker
 1. **新增 `KernelPlugin` 两段式契约**（`info()` + `register(ctx)`），形状与 `UserPlugin` 完全一致；`Info` 增加 `provides: Vec<ServiceId>` 字段——内核插件在 info 中声明其提供的 ServiceId，用户插件不得声明（fail-fast 拒绝）。
 2. **同一张注册表**：内核插件经 `Registry::register_kernel_plugin` 注册，与用户插件共用 namespace 唯一、wire name 全局唯一、CallerPolicy、懒/急加载（LoadPolicy）全部校验与语义；跨用户/内核插件的 wire 撞名同样被拒绝。
 3. **注册上下文差异**：`KernelContext` 注入**全量** `ServiceHandles`（内核插件在信任边界内，是服务提供者，不做 requires 过滤）；用户插件仍只拿到 requires 声明的受限句柄。
-4. **入口归属回归内核模块**：`memory::save/show/remove`、`compute::verify`、`session::switch` 从 `src/plugin/` 移入各自内核模块（`src/kernel/plugin/memory/`、`src/kernel/plugin/compute/`、`src/kernel/plugin/session/`；Session scheduler 留在 `src/kernel/agent/session/`），以 `KernelPlugin` 注册；storage/model 以内核插件身份声明 provides（当前无工具入口）。聚合清单 `kernel::plugin::builtin_kernel_plugins()` 与 `plugin::builtin_plugins()` 并列。
+4. **入口归属回归内核模块**：`memory::save/show/remove`、`compute::verify` 从 `src/plugin/` 移入各自内核模块（`src/kernel/plugin/memory/`、`src/kernel/plugin/compute/`；Session scheduler 留在 `src/kernel/agent/session/`），以 `KernelPlugin` 注册；storage/model 以内核插件身份声明 provides（当前无工具入口）。聚合清单 `kernel::plugin::builtin_kernel_plugins()` 与 `plugin::builtin_plugins()` 并列。~~`session::switch`~~ 原在此列，已由 ADR-0044 连同整个 `src/kernel/plugin/session/` 目录删除。
 5. **服务实例仍由 `Kernel::new` 引导构造**（依赖数据根目录、settings 热更新与启动回退策略），注册表负责身份/入口校验，不接管服务生命周期。
 
 备选方案：
@@ -28,6 +28,6 @@ ADR-0021 曾定：内核插件（memory/compute/session）的工具入口由 ker
 ## 后果
 
 - `src/plugin/` 只保留业务用户插件（hello/grading/practice/report/exam/tracking，6 个）；`src/kernel/` 五个模块各带 `descriptor()`。
-- 用户可见性不变：memory/compute 工具仍出现在用户功能中心与模型工具列表（同表注册，`user_entries`/`model_tools` 不区分来源）；`session::switch` 仍由 agent loop 特殊执行。
+- 用户可见性不变：memory/compute 工具仍出现在用户功能中心与模型工具列表（同表注册，`user_entries`/`model_tools` 不区分来源）；~~`session::switch` 仍由 agent loop 特殊执行~~（ADR-0044 删除，agent loop 不再有任何按 wire name 特判的工具）。
 - 新增校验：ServiceId 提供唯一（`ServiceTaken`）、用户插件不得声明 provides（`ProvisionNotAllowed`）。
 - 测试：注册表新增内核插件懒加载、provides 去重、跨用户/内核 wire 撞名用例；原 plugin/memory、plugin/compute 的 handler 测试随代码迁移。

@@ -5,7 +5,6 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::kernel::agent::dispatch::Caller;
-use crate::kernel::agent::session::SessionKey;
 use crate::kernel::message::MessageId;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,10 +26,11 @@ pub enum AuditRecord {
     BranchSwitched {
         message_id: MessageId,
     },
-    SessionSwitched {
-        from: SessionKey,
-        to: SessionKey,
-        reason: String,
+    /// 用户手动新建会话（ADR-0044）：归档旧会话 + 可选携带交接摘要。
+    SessionCreated {
+        session: String,
+        archived: Option<String>,
+        summary_attached: bool,
     },
     MemoryWrite {
         path: String,

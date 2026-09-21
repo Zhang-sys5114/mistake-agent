@@ -2,8 +2,8 @@
 //!
 //! - `loop_mod`：agent loop（LLM 唯一决策者，串行工具执行，护栏/压缩/中断消费）；
 //! - `dispatch`：统一工具执行（CallerPolicy 双墙、懒注册、schema 校验、超时/取消、审计）；
-//! - `session`：Session scheduler（SessionKey/Goal/切换决策/交接摘要，独立内核级模块，
-//!   不占 ServiceId；`session::switch` 工具入口见 `crate::kernel::plugin::session`）；
+//! - `session`：Session scheduler（SessionKey/Goal/生命周期/交接摘要/空闲超时，独立内核级模块，
+//!   不占 ServiceId；会话切换仅由用户经 `create_session` 发起）；
 //! - `rpc`：帧类型与 Kernel 组装（standalone 进程内内核，GUI 唯一通信面）；
 //! - `balance` / `cache`：余额查询与上下文缓存命中率统计（RPC 辅助能力）。
 

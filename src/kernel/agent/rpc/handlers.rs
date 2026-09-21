@@ -11,24 +11,11 @@ pub(crate) async fn persist_turn_messages(
     skip_id: Option<MessageId>,
 ) -> Result<Option<MessageId>, String> {
     let mut last_kept: Option<MessageId> = None;
-    let mut skipped_switch: Option<MessageId> = None;
     for msg in messages {
         if Some(msg.id) == skip_id {
             continue;
         }
-        if msg.is_switch_tool_call() {
-            if last_kept.is_none() {
-                last_kept = msg.parent_id;
-            }
-            skipped_switch = Some(msg.id);
-            continue;
-        }
-        let mut m = msg.clone();
-        if skipped_switch.is_some_and(|sid| m.parent_id == Some(sid))
-            && let Some(anchor) = last_kept
-        {
-            m.parent_id = Some(anchor);
-        }
+        let m = msg.clone();
         store
             .append_message(key, &m)
             .await
@@ -283,6 +270,44 @@ impl Kernel {
                     result: Some(json!({
                         "session_key": key,
                         "messages": serde_json::to_value(&path).unwrap_or_default(),
+                    })),
+                    error: None,
+                }))
+            }
+            Method::CreateSession {
+                carry_summary,
+                goal,
+            } => {
+                // 回合在跑时拒绝：在飞的任务持有旧会话 key，会继续往刚归档的会话里落盘。
+                {
+                    let state = self.state.lock().await;
+                    if state.turn.is_some() {
+                        return Err(RpcError::new(
+                            "turn_in_progress",
+                            "当前有回合在跑，请先停止再新建会话",
+                        ));
+                    }
+                }
+                let goal = goal
+                    .map(|text| text.trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .map(|text| crate::kernel::agent::session::Goal { text });
+                let created = self
+                    .scheduler
+                    .create_new_session(goal, carry_summary)
+                    .await
+                    .map_err(|e| RpcError::new("scheduler_error", e.to_string()))?;
+                self.auditor.record(AuditRecord::SessionCreated {
+                    session: created.key.to_string(),
+                    archived: created.archived.map(|k| k.to_string()),
+                    summary_attached: created.summary_attached,
+                });
+                Ok(Some(RpcFrame::Response {
+                    id,
+                    result: Some(json!({
+                        "session_key": created.key,
+                        "archived_session_key": created.archived,
+                        "summary_attached": created.summary_attached,
                     })),
                     error: None,
                 }))

@@ -19,8 +19,8 @@ use crate::kernel::agent::cache::CacheTracker;
 use crate::kernel::agent::dispatch::Dispatch;
 use crate::kernel::agent::loop_mod::{AgentLoop, SystemPromptProvider, TurnInput, TurnOutcome};
 use crate::kernel::agent::session::{
-    Interrupt, InterruptBus, LlmSummarizer, LlmTurnDecider, SessionKey, SessionScheduler,
-    SessionStatus, SessionSwitch, SystemClock, scope_session_context,
+    Interrupt, InterruptBus, LlmSummarizer, SessionKey, SessionScheduler, SessionStatus,
+    SystemClock,
 };
 use crate::kernel::audit::{AuditRecord, Auditor};
 use crate::kernel::contract::{CallerPolicy, full_to_wire};
@@ -207,21 +207,19 @@ impl KernelBuilder {
         .with_english_mode(english_mode);
         let dispatch = Arc::new(dispatch);
         let llm_settings = self.settings.clone();
-        let mut decider = LlmTurnDecider::new(main_model.clone());
-        let mut scheduler_summarizer = LlmSummarizer::new(main_model.clone());
-        let mut loop_summarizer = LlmSummarizer::new(main_model.clone());
-        if let Some(settings) = llm_settings.clone() {
-            decider = decider.with_settings(settings.clone());
-            scheduler_summarizer = scheduler_summarizer.with_settings(settings.clone());
-            loop_summarizer = loop_summarizer.with_settings(settings);
+        let mut summarizer = LlmSummarizer::new(main_model.clone());
+        if let Some(settings) = llm_settings {
+            summarizer = summarizer.with_settings(settings);
         }
+        // 摘要器无状态：调度层（按需交接摘要）与 loop（上下文压缩）共用一个实例。
+        let summarizer: Arc<dyn crate::kernel::agent::session::Summarizer> = Arc::new(summarizer);
         // 中断总线必须由 scheduler 与 loop 共享：scheduler 发环境变更，loop 回合边界消费。
         let scheduler = Arc::new(SessionScheduler::new(
             store.clone(),
-            Arc::new(decider),
             Arc::new(SystemClock),
-            Arc::new(scheduler_summarizer),
+            summarizer.clone(),
             self.interrupt_bus.clone(),
+            self.events.clone(),
         ));
         let loop_model = main_model.clone();
         let loop_engine = Arc::new(AgentLoop::new(
@@ -229,10 +227,9 @@ impl KernelBuilder {
             dispatch.clone(),
             auditor.clone(),
             self.events.clone(),
-            Arc::new(loop_summarizer),
+            summarizer,
             self.interrupt_bus,
             self.system_prompt,
-            Some(scheduler.clone() as Arc<dyn SessionSwitch>),
         ));
 
         Ok(Arc::new(Kernel {
@@ -559,10 +556,7 @@ impl Kernel {
     ) -> Result<(), RpcError> {
         let signal = AbortSignal::new();
         let tools = self.registry.model_tools();
-        // 会话上下文边界：从最近的「上一会话梗概」起算，旧会话内容不进模型上下文。
-        let messages = scope_session_context(&messages);
-        // 注入当前会话 ID：分叉会话 = 摘要节点（会话边界）的消息 UUID；根会话 = 链首消息 UUID。
-        // 模型据此确认是否真的切换到了新会话（分叉后 ID 变化，会话内保持不变）。
+        // 注入当前会话 ID：会话链首消息的 UUID（同一会话内保持不变）。
         let session_id = messages
             .first()
             .map(|m| m.id.to_string())
@@ -604,8 +598,7 @@ impl Kernel {
             match outcome {
                 Ok(outcome) => {
                     let compaction = outcome.compaction.clone();
-                    // 回合内经 session::switch 切换后，后半段消息归新会话。
-                    let persist_key = outcome.session_key.unwrap_or(key);
+                    let persist_key = key;
                     let skip_summary = compaction.as_ref().map(|c| c.summary.id);
                     let persisted_last = match persist_turn_messages(
                         &store,
@@ -650,11 +643,6 @@ impl Kernel {
                     {
                         events.emit(Event::Error {
                             message: format!("活跃路径推进失败：{e}"),
-                        });
-                    }
-                    if let Err(e) = scheduler.on_turn_end(&persist_key, &outcome.messages).await {
-                        events.emit(Event::Error {
-                            message: format!("回合收尾失败：{e}"),
                         });
                     }
                     // 消息已落盘、活跃路径已推进：此刻通知前端刷新，链式渲染不会丢新消息。

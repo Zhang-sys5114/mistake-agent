@@ -84,19 +84,19 @@ kernel 对 LLM provider 的统一抽象，提供流式消息与工具调用；v2
 _Avoid_: Provider（指具体厂商适配器）
 
 **Session（会话）**:
-一次对话流的过程记录，JSONL 追加式持久化；平台层由来源路由派生 SessionKey，任务层由 LLM 通过内核 session 工具切换，对用户完全隐藏。
+一次对话流的过程记录，JSONL 追加式持久化；一个话题 = 一条独立会话，**新建只由用户发起**（ADR-0044，`create_session` RPC），旧会话归档保留。
 _Avoid_: 对话（用户视角的聊天）、聊天记录
 
 **SessionKey（会话键）**:
-标识一个会话的内部路由键；平台层由消息来源派生（v2 即本地 App 本身，未来聊天渠道按渠道与对端隔离），任务层切换时生成新键，不暴露给用户。
+标识一个会话的内部路由键；平台层由消息来源派生（v2 即本地 App 本身，未来聊天渠道按渠道与对端隔离），用户新建会话时生成新键。键本身不暴露给用户，但会话边界对用户可见（GUI 可新建/查看）。
 _Avoid_: 会话 ID（暗示用户可见）
 
 **Session handoff（会话交接）**:
-任务层切换会话时，kernel 在当前消息节点下分叉出「会话子树」，以「上一会话梗概」摘要节点开头（摘要整条链）的机制；摘要节点是模型上下文边界，旧会话内容不进新会话上下文。
+用户新建会话时（`create_session` 且 `carry_summary` 为真），把「上一会话梗概」作为新会话首条 system 消息带入的机制，让新会话延续旧会话的结论；旧会话本身不被写入。
 _Avoid_: 迁移、续传
 
 **Interrupt（内部中断）**:
-内核组件（会话调度、settings、memory、compaction）向 agent loop 发出的环境变更信号，通知其下回合上下文需按新环境重组；回合边界消费，不抢占当前回合，真正需要立即打断的场景走取消链。
+内核组件（settings、memory、compaction）向 agent loop 发出的环境变更信号，通知其下回合上下文需按新环境重组；回合边界消费，不抢占当前回合，真正需要立即打断的场景走取消链。（会话调度已不再是生产者——ADR-0044 删除模型自动切换后，`SessionSwitched` / `GoalUpdated` 一并消失。）
 _Avoid_: 事件（Event 指面向 GUI 的播报）
 
 **Wire name（模型可见名）**:
@@ -104,19 +104,19 @@ _Avoid_: 事件（Event 指面向 GUI 的播报）
 _Avoid_: 全名（指内部 namespace::tool）
 
 **Session scheduler（会话调度）**:
-独立的内核级模块（非服务插件），负责会话生命周期与任务层切换；**切换 = 树内分叉**（不新建 SessionKey）：start_new / 空闲超时 / session::switch 工具都在当前消息节点下挂一棵以摘要节点开头的会话子树（ADR-0030/0032）；持久化委托 storage 服务。
+独立的内核级模块（非服务插件），负责会话生命周期、空闲超时检测与交接摘要；**会话新建只由用户发起**（ADR-0044，`create_session` RPC）——归档当前活动会话、新建独立 SessionKey，树内分叉机制已整体删除；持久化委托 storage 服务。
 _Avoid_: 会话管理（易与用户可见的管理界面混淆）
 
 **Guard model（守卫模型）**:
-（已退役，ADR-0030）原设计由 Session scheduler 调用的独立调度模型；现切换决策全部归主模型：新消息到达先判断是否切换上下文（ADR-0032，先判断后回答），回合结束由 LlmTurnDecider 判断 continue / update_goal / start_new（失败降级 continue），回合内由主模型调用 session::switch 工具主动切换。
+（已退役，ADR-0044）原设计由 Session scheduler 调用的独立调度模型，负责在"新消息到达"与"回合结束"时决策 continue / update_goal / start_new。最后一个调用方（会话切换决策）已删除，`GuardModel` trait / `guard_prompt` / `StubGuard` / `LlmTurnDecider` 全部移除。
 _Avoid_: 调度模型（易与主模型混淆）
 
 **Goal（会话目标）**:
-当前会话要完成的学习目标，由主模型在 start_new 时生成并写入会话元数据；主模型据此在 continue / update_goal / start_new 三动作间决策，存疑即继续。
+会话元数据中的可选学习目标；`create_session` 可显式传入，不再是模型决策的产物。
 _Avoid_: 任务名（过窄，Goal 可含更丰富描述）
 
 **History route（历史路由）**:
-模型浏览完整消息树的通道（列出会话 + 读取指定会话的消息树），与记忆路由并列；新会话上下文只含本会话子树（从摘要节点起算），完整旧记录按需翻阅。
+浏览历史会话的通道，经 RPC `list_sessions` / `read_session` 提供（**未注册为模型工具**——模型看不到历史路由）；新建会话后旧会话完整归档，可按需翻阅。
 _Avoid_: 聊天记录查询（口语）
 
 **Message tree（消息树）**:

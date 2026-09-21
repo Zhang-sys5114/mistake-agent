@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::kernel::agent::session::SessionKey;
 use crate::kernel::message::{Message, MessageId};
 use crate::kernel::plugin::services::{AbortSignal, TokenUsage, ToolSchema};
 
@@ -50,8 +49,6 @@ pub struct TurnOutcome {
     pub compaction: Option<CompactionInfo>,
     /// 本回合所有主模型流调用的累计 token 用量（缓存命中统计用）。
     pub usage: Option<TokenUsage>,
-    /// 回合内经 session::switch 切换后的新会话（None = 未切换，仍用原会话）。
-    pub session_key: Option<SessionKey>,
 }
 
 #[derive(Debug, Clone)]

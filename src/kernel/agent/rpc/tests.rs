@@ -32,6 +32,18 @@ fn rpc_wire_parses_generic_and_custom_methods() {
     let merged = custom_params(&compute);
     assert_eq!(merged["compute_id"], 9);
     assert_eq!(merged["stdout"], "ok");
+
+    let create: RpcRequest =
+        serde_json::from_str(r#"{"id":4,"method":"create_session","carry_summary":true}"#).unwrap();
+    let WireMethod::Generic(Method::CreateSession {
+        carry_summary,
+        goal,
+    }) = create.method
+    else {
+        panic!("create_session 应解析为通用方法");
+    };
+    assert!(carry_summary);
+    assert!(goal.is_none());
 }
 
 struct StubBuilderModel;
@@ -95,37 +107,104 @@ async fn kernel_builder_assembles_and_routes_custom_method() {
 }
 
 #[tokio::test]
-async fn switch_tool_call_not_persisted_and_children_reparented() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemoryStorage::new());
+async fn create_session_rpc_archives_old_and_opens_new() {
+    let storage = MemoryStorage::new();
+    let store: Arc<dyn SessionStore> = Arc::new(storage.clone());
     let key = SessionKey::new();
     store
         .create_session(&key, &SessionMeta::new(key))
         .await
         .unwrap();
-    let user = Message::user("帮我批改数学作业");
-    store.append_message(&key, &user).await.unwrap();
-
-    let mut switch = Message::tool_call(
-        "session::switch",
-        json!({"goal": "批改英语作业"}),
-        Ok(json!({"switched": true})),
-    );
-    switch.parent_id = Some(user.id);
-    let mut answer = Message::assistant("好的，先切换到英语作业");
-    answer.parent_id = Some(switch.id);
-    let answer_id = answer.id;
-
-    let last = persist_turn_messages(&store, &key, &[switch, answer], None)
+    store
+        .append_message(&key, &Message::user("帮我看看这道题"))
         .await
         .unwrap();
-    assert_eq!(last, Some(answer_id));
+    store
+        .append_message(&key, &Message::assistant("这道题先看定义域"))
+        .await
+        .unwrap();
 
-    let path = store.read_path(&key).await.unwrap();
-    assert_eq!(path.len(), 2, "切换控制消息不应落盘");
-    assert!(!path[1].is_switch_tool_call());
+    let auditor = Auditor::new(Arc::new(MemoryAuditSink::default()));
+    let kernel = KernelBuilder::new()
+        .session_store(store.clone())
+        .main_model(Arc::new(StubBuilderModel))
+        .auditor(auditor)
+        .build()
+        .await
+        .unwrap();
+
+    // 短会话（<8 条）走 stub 摘要，不触发语言模型调用。
+    let frame = kernel
+        .handle(RpcRequest {
+            id: 1,
+            method: WireMethod::Generic(Method::CreateSession {
+                carry_summary: true,
+                goal: None,
+            }),
+        })
+        .await
+        .unwrap()
+        .expect("应有响应帧");
+    let RpcFrame::Response { result, error, .. } = frame else {
+        panic!("应为响应帧");
+    };
+    assert!(error.is_none(), "不应报错：{error:?}");
+    let result = result.unwrap();
+    assert_eq!(result["summary_attached"], true);
+    assert_eq!(result["archived_session_key"], json!(key));
+    let new_key: SessionKey = serde_json::from_value(result["session_key"].clone()).unwrap();
+    assert_ne!(new_key, key);
+
+    let metas = store.list_sessions().await.unwrap();
+    assert_eq!(metas.len(), 2);
     assert_eq!(
-        path[1].parent_id,
-        Some(user.id),
-        "子消息父链应重接到切换前最后一条"
+        metas
+            .iter()
+            .filter(|m| m.status == SessionStatus::Active)
+            .count(),
+        1,
+        "归档后应只剩一个活动会话"
     );
+    assert_eq!(
+        metas.iter().find(|m| m.key == key).unwrap().status,
+        SessionStatus::Archived
+    );
+    let path = store.read_path(&new_key).await.unwrap();
+    assert_eq!(path.len(), 1);
+    assert!(matches!(
+        path[0].kind,
+        crate::kernel::message::MessageKind::System { ref text, .. }
+            if text.contains("上一会话梗概")
+    ));
+}
+
+#[tokio::test]
+async fn removed_switch_tool_is_unknown() {
+    // session::switch 已下线（ADR-0044）：强制调用应报未知工具，而非静默切换会话。
+    let store: Arc<dyn SessionStore> = Arc::new(MemoryStorage::new());
+    let auditor = Auditor::new(Arc::new(MemoryAuditSink::default()));
+    let kernel = KernelBuilder::new()
+        .session_store(store)
+        .main_model(Arc::new(StubBuilderModel))
+        .auditor(auditor)
+        .build()
+        .await
+        .unwrap();
+    let err = kernel
+        .handle(RpcRequest {
+            id: 1,
+            method: WireMethod::Generic(Method::SendUserMessage {
+                text: "换个话题".into(),
+                force_tool: Some(ForcedToolRequest {
+                    entry: "session::switch".into(),
+                    hint: None,
+                    display: None,
+                }),
+                file: Vec::new(),
+                asset: Vec::new(),
+            }),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "unknown_tool");
 }
