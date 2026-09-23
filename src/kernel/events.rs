@@ -34,9 +34,11 @@ pub enum Event {
     TurnEnd {
         stop_reason: StopReason,
     },
-    SessionSwitched {
-        from: SessionKey,
-        to: SessionKey,
+    /// 会话空闲超时（ADR-0044）：用户在该会话沉寂超过阈值后再次发言。
+    /// 仅作提示——不再自动切换会话，是否开新话题由用户决定。
+    SessionIdle {
+        session: SessionKey,
+        idle_seconds: i64,
     },
     MemoryChanged {
         path: String,

@@ -40,6 +40,7 @@
 | `set_settings` | `patch` | ✅ M2/M5 | 应用设置补丁并持久化（含 `english_mode`）；模型配置变化时热替换双模型服务；成功后发 `settings_changed` 事件 |
 | `list_sessions` | — | ✅ M5 | 返回 `{sessions:[{key,goal,status,created_at,last_activity_at}]}` |
 | `read_session` | `key` | ✅ M5 | 返回 `{meta,messages}`（会话历史/消息树完整记录） |
+| `create_session` | `carry_summary?: bool`, `goal?: string` | ✅ | 用户手动新建会话（ADR-0044）：归档当前活动会话并开启全新独立 `SessionKey`，返回 `{session_key, archived_session_key, summary_attached}`；`carry_summary` 显式控制是否把旧会话摘要作为新会话首条 system 消息；回合在飞时拒绝（`turn_in_progress`） |
 | `compute_result` | `compute_id`, `stdout`, `stderr`, `duration_ms` | ✅ M4 | GUI/Pyodide 验算回执（compute 桥接）；`compute_id` 必须回填事件 `compute_request` 的 id |
 | `get_rules_status` | — | ✅ | 返回 `{loaded: bool, path, reason?, bytes?}`：数据根 AGENTS.md 教学规则加载状态（`reason` = `missing`/`too_large`/`invalid_utf8`，缺失/损坏/超限时系统提示已回退静态文本） |
 
@@ -70,7 +71,7 @@
 | `tool_progress` | `entry`, `message` | 长任务进度（如"正在识别第 3/12 页"） |
 | `compute_request` | `id`, `code` | kernel → GUI：请求在 Pyodide 执行端运行 Python，GUI 回 `compute_result` |
 | `turn_end` | `stop_reason` | `natural` / `tool_call_limit` / `consecutive_failures` / `turn_timeout` / `user_aborted` / `failed` / `internal_abort`；`failed` 表示回合失败，前端恢复可聊天状态 |
-| `session_switched` | `from`, `to` | 会话切换（内部键，UI 不展示） |
+| `session_idle` | `session`, `idle_seconds` | 会话空闲超时提示（ADR-0044）：用户沉寂超过 12h 后再次发言时发出。**仅提示**，不自动切换会话——是否开新话题由用户决定 |
 | `memory_changed` | `path` | 记忆变更 |
 | `compaction` | `session` | 上下文压缩 |
 | `error` | `message` | 错误播报 |
@@ -180,20 +181,22 @@ pub trait UserPlugin {
 - 延期后门：`DeadlineHandle::extend`，受回合预算钳制 + 审计。
 - OCR 页级失败：重试 2 次 → 页级错误记结果继续；系统性模型错误直接 `ToolError::model_unavailable` 撂挑子。
 
-## 7. 会话与消息树（ADR-0006/0007）
+## 7. 会话与消息树（ADR-0007/0044）
 
-- `SessionKey` = UUID；守卫模型（生产实现 = 主模型 + guard_prompt 独立调用）在"新消息到达"时决策 continue/update_goal/start_new；**start_new 只在有新消息时触发**，回合结束只允许 continue/update_goal；守卫失败/不确定时默认 continue（存疑即继续）。
-- 会话分叉摘要：`start_new` / 空闲超时 / `session::switch` 均树内分叉——当前消息节点下挂「上一会话梗概」摘要节点（生产实现 = 主模型 + summarize_prompt 生成），新用户消息随后，旧分支保留为兄弟版本；摘要节点是模型上下文边界（scope_session_context 从摘要起算）。完整历史经 `session::history` 可查。
-- 空闲超时 12h：超时后新消息在同一棵树内分叉出新会话子树（摘要节点开头）。
+- `SessionKey` = UUID。**会话新建只由用户发起**（ADR-0044）：经 `create_session` RPC 归档当前活动会话并开启独立 `SessionKey`。没有任何模型侧的自动判断——`SessionScheduler::on_new_message` 的预决策（原 ADR-0032）、回合末 `LlmTurnDecider`（原 ADR-0030）、`session::switch` 工具（原 ADR-0034）三处已一并删除，`GuardModel` / `turn_decider_prompt` 随之退役。
+- **单 Active 不变量**：任一时刻至多一个 `status == active` 的会话；新建会话时归档**全部** Active 会话（`MemoryStorage::list_sessions` 遍历 HashMap 顺序不定，两个 Active 会让"当前会话"变成随机）。
+- 交接摘要：`create_session` 的 `carry_summary` 为真且旧会话有非空内容时，把「上一会话梗概：…」（生产实现 = 主模型 + summarize_prompt 生成，<8 条消息走计数 stub 不调模型）作为**新会话首条** system 消息，后续用户消息挂在其下；旧会话本身不因携带摘要而被写入。
+- 空闲超时 12h：检测保留，但**不再自动分叉**——发 `session_idle` 事件提示用户后继续当前会话。
 - 消息气泡：一个输出 item = 一个气泡，**完成即落盘**（含 assistant 回复与工具调用）；中断只丢半截，已完整气泡保留。工具调用气泡只展示状态（工具名 + 完成/失败徽章），通用 JSON/Markdown 返回详情不再渲染；仅 practice 练习卡片、薄弱点列表等交互组件保留结果内容。
 - 消息树：`edit_message` 从被编辑消息的父节点派生新消息并更新 active_path（旧分支完整保留）；仅 user 消息可编辑（改完重发，自动重新回答），assistant 等模型消息不可编辑；`switch_branch` 切换 active_path；`read_path` 只读活跃路径，旁支不进入 LLM 上下文。
-- `InterruptBus`（内部中断，ADR-0023）：环境变更信号队列（会话切换/目标更新/设置变更/记忆变更/压缩），RPC 回合任务在消息进入后与回合收尾后各消费一次，转成 GUI 事件并写审计。
+- `InterruptBus`（内部中断，ADR-0023）：环境变更信号队列（设置变更/记忆变更/压缩），RPC 回合任务在消息进入后与回合收尾后各消费一次，转成 GUI 事件并写审计。
+- **存量数据**：ADR-0044 之前产生的树结构会话（含摘要节点）会把整条路径原样送给模型——摘要节点与其祖先内容重复，token 上升。数据本身不受影响，无需迁移；用户新建会话即可绕开。
 
 ## 8. 运行与验收
 
 ```bash
 cd web && npm install && npm run build    # 前端构建（改过 web/ 后必须执行）
-cargo test                                 # 单元测试（149 项）
+cargo test                                 # 单元测试（146 项）
 cargo test --test live_api -- --ignored   # 真实 API 验收：hello + samples/ 三套样例
 cargo run --bin mistake-agent             # Tauri GUI（Wayland/X11 均可）
 ```
@@ -210,8 +213,8 @@ cargo run --bin mistake-agent             # Tauri GUI（Wayland/X11 均可）
 | src/kernel/registry/ / context.rs | 注册表校验、两段式契约（UserPlugin + KernelPlugin）、EntryRegistrar |
 | src/kernel/agent/dispatch.rs | Caller 检查、jsonschema 校验、两级取消、延期后门 |
 | src/kernel/agent/loop_mod/ | agent loop、护栏、气泡完成落盘 |
-| src/kernel/agent/session/ | SessionScheduler、LlmTurnDecider、InterruptBus、空闲超时 |
-| src/kernel/plugin/storage/ · memory/ · compute/ · session/ | 内核插件（服务实现 + 工具入口）；plugin/mod.rs 聚合内核插件清单（ADR-0035） |
+| src/kernel/agent/session/ | SessionScheduler、InterruptBus、空闲超时、交接摘要 |
+| src/kernel/plugin/storage/ · memory/ · compute/ | 内核插件（服务实现 + 工具入口）；plugin/mod.rs 聚合内核插件清单（ADR-0035） |
 | src/kernel/agent/rpc/ | 帧类型、Kernel 组装与请求路由 |
 | src/main.rs | Tauri 壳：进程内 Kernel + Channel 桥接（standalone，唯一二进制） |
 | web/ | Vue 3 UI（src/App.vue、composables/useKernel.js，构建产物 web/dist） |

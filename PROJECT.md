@@ -38,7 +38,7 @@
 │  agent loop · 工具注册与调度 · 会话/消息树            │
 │  指令加载 · 事件流 · 护栏 · 审计 · 懒注册             │
 │  会话调度（Session scheduler，独立内核级模块，        │
-│  主模型决策：新消息先判断、回合内/末可切换）                 │
+│  会话新建由用户发起（ADR-0044）：模型不做自动切换决策 │
 ├─────────────────────────────────────────────────────┤
 │ 内核插件（信任边界内，处理敏感能力）                  │
 │  storage 会话/错题/审计 · compute 验算契约             │
@@ -75,15 +75,15 @@ v2 同一轮多个工具调用**串行执行**；并行列入后续（按依赖�
 **显式 tool-calling（用户发起，不绕过 LLM）**：用户在输入框输入 `namespace::tool`（如 `practice::generate`），前端弹候选框、按 Tab 确认后进入待调用状态（工具徽章 + `<可选参数>` 占位）；发送时 RPC 携带 `force_tool {entry, hint, display?}`（`display` = 前端原始展示文本，落盘为 user 消息的 `display_text`，重开会话后渲染仍友好；模型上下文仍用拼好的指令文本），kernel 开回合并让模型**首轮强制调用该工具**（Responses API `tool_choice`，整回合 `thinking=none`），工具结果回填后由模型继续生成回复——所有内容输出都走聊天框 LLM 侧。工具清单/标题/分组/图标/参数说明/用法示例全部来自 `list_tools`（后端唯一事实源），前端不写死（工具名 → 标题/图标的映射一律不允许在前端维护）。
 
 ### 会话与消息树
-- 会话调度由独立内核级模块（Session scheduler）承担：任务层由**主模型**决策（ADR-0030/0032）——**新消息到达先判断要不要切换上下文，再进入回合回答**；回合中可经 `session::switch` 工具主动切换；回合结束由 LlmTurnDecider 判断 continue / update_goal / start_new。判断依据是**会话目标（Goal）**（start_new 时主模型生成并写入会话元数据）。三动作：`continue`（目标不变）、`update_goal`（同会话内改写/细化 Goal，如"录入错题"→"讲解已录入的错题"）、`start_new`（仅当新目标明显无关且不依赖当前会话上下文）；偏向规则为**存疑即继续**。**start_new 是树内分叉**：不新建会话，在当前叶子节点下挂一棵「会话子树」（以「上一会话梗概」摘要节点开头，新用户消息随后），旧分支保留为兄弟版本（GUI `< / >` 可切回）；摘要节点同时是模型上下文边界——新会话上下文 = 摘要起算到当前，旧会话内容不进模型上下文；根会话无摘要，直接从首条用户消息开始。带频率护栏（1 小时 5 次），决策失败默认 continue。
-- 每次模型请求注入**当前会话 ID**（分叉会话 = 摘要节点 UUID，根会话 = 链首消息 UUID）：会话内保持不变、分叉后变化，模型可据此确认切换是否完成。
+- 会话调度由独立内核级模块（Session scheduler）承担：**会话新建只由用户发起**（ADR-0044）——经 `create_session` RPC 归档当前活动会话并开启一个独立 `SessionKey`（后端已就绪；GUI 的「新对话」入口见 [docs/TODO.md](docs/TODO.md) 第 1 项）。没有任何模型侧的自动判断：原先的三处（新消息到达的预决策 ADR-0032、回合内的 `session::switch` 工具、回合末的 `LlmTurnDecider` ADR-0030）已一并删除，`GuardModel` / `turn_decider_prompt` 随之退役。**失败降级逻辑随决策一起消失**（不再有决策，也就没有决策失败）。交接摘要由 RPC 参数 `carry_summary` 显式控制：为真且旧会话有非空内容时，把「上一会话梗概」作为新会话首条 system 消息。
+- 每次模型请求注入**当前会话 ID**（= 会话首条消息 UUID）：会话内保持不变，新建会话后变化。
 - 消息树：每条消息有 id/parentId，JSONL 追加式、永不截断；**编辑消息或"重新生成"会从该点派生新分支**，用户可用 GUI 的 `<` / `>` 翻看旧分支。LLM 上下文只包含活跃路径。
 - 会话是过程记录，业务真相在错题本（storage）——对话历史用完即弃，错题数据长期保留。
 
 ### 压缩（compaction）
 上下文用量达模型窗口 75% 时，在回合边界自动压缩活跃路径：最近 15 条不压，其余旧消息由 LLM 生成任务摘要（保留错题 id、知识点、未完成事项），摘要作为特殊条目写入 JSONL，**原始消息全量保留**。失败重试一次，再失败下回合再试。
 
-**会话切换 = 树内分叉（新版）**：整个历史是一棵消息树，`start_new` / 空闲超时 / `session::switch` 都在**当前消息节点下分叉出一棵会话子树**——以「上一会话梗概」摘要节点开头（摘要整条链，模型上下文从该节点起算），新用户消息随后；旧分支保留为兄弟版本，GUI `< / >` 即可切换旧会话/新会话。改错别字等消息编辑仍是消息级版本切换，与开会话无关。
+**会话新建 = 用户显式操作（新版）**：一个话题 = 一条独立会话。用户在 GUI 新建会话时，旧会话整体归档（可经 `list_sessions`/`read_session` 查回），新会话拿到全新的 `SessionKey`；需要延续上下文时由 `carry_summary` 决定是否把「上一会话梗概」作为新会话首条系统消息带入。消息编辑仍是消息级版本切换（`derive_branch`/`switch_branch`），与开会话无关。空闲超时（12h）只发 `session_idle` 事件提示用户，不自动开会话。
 
 ### 记忆路由（memory）
 记忆是第三个内核插件，按层级路径组织（`学科/知识点/条目`）。工具：`memory::save(path, content)`（模型自动保存，用户也可调）、`memory::show(path?)`（无参数列出全部条目名，带参数看详情）、`memory::remove(path)`（强制参数，**仅用户可调**）。上下文只注入一行入口提示，模型自行浏览（show 无参数 = 列目录）；路径由 memory 插件校验（拒绝越界）。
@@ -95,12 +95,12 @@ v2 同一轮多个工具调用**串行执行**；并行列入后续（按依赖�
 `compute::verify` 让模型跑 Python 验算（解方程、数值验证、单位换算）。执行端为 GUI WebView 内的 **Pyodide**（Python + SymPy/NumPy 的 WASM 构建），WASM 即沙箱（默认无文件、无网络），经 RPC 桥接；超时、审计由 kernel 侧 compute 插件负责。GUI 离线时验算不可用（可接受）。
 
 ### GUI 通信协议
-GUI → kernel：`send_user_message`、`trigger_command(entry, params)`、`edit_message`、`switch_branch`、`abort`、`get_state`、`get_settings/set_settings`、`list_sessions`、`read_session`、`list_tools`、`test_connection`、`check_balance`、`get_cache_stats`、`compute_result`（Pyodide 验算回执）。kernel → GUI：事件流（message_delta、reasoning_delta、tool_start/end、tool_progress、turn_end、session_switched、memory_changed、compaction、cache_stats_updated、compute_request、error）。**命令唯一通道是 trigger_command**：GUI 不传可任意执行的文本命令，前端门禁由此结构性成立；找不到同名 Command 时回退放行同名 Tool（用户对 UserAndModel/UserOnly 工具均可调）。
+GUI → kernel：`send_user_message`、`trigger_command(entry, params)`、`edit_message`、`switch_branch`、`create_session`、`abort`、`get_state`、`get_settings/set_settings`、`list_sessions`、`read_session`、`list_tools`、`test_connection`、`check_balance`、`get_cache_stats`、`compute_result`（Pyodide 验算回执）。kernel → GUI：事件流（message_delta、reasoning_delta、tool_start/end、tool_progress、turn_end、session_idle、memory_changed、compaction、cache_stats_updated、compute_request、error）。**命令唯一通道是 trigger_command**：GUI 不传可任意执行的文本命令，前端门禁由此结构性成立；找不到同名 Command 时回退放行同名 Tool（用户对 UserAndModel/UserOnly 工具均可调）。
 
 **Standalone（ADR-0029）**：kernel 直接运行在 Tauri GUI 进程内（mpsc + Channel 桥接），mistake-agent 不依赖任何外部进程/二进制；sidecar CLI 已彻底移除（2026-08-05），单二进制即全部交付物。
 
 ### 审计与日志
-- **审计（Audit）**：默认全覆盖——任何操作都记录（工具调用、消息完成、编辑、会话切换、记忆变更、配置变更、LLM 调用、compute 执行、越权拒绝、生命周期）。写 `audit/` JSONL，记元数据与引用（大内容不复制）；compute 的代码与结果全量记录。10MB 归档轮转。
+- **审计（Audit）**：默认全覆盖——任何操作都记录（工具调用、消息完成、编辑、会话新建、记忆变更、配置变更、LLM 调用、compute 执行、越权拒绝、生命周期）。写 `audit/` JSONL，记元数据与引用（大内容不复制）；compute 的代码与结果全量记录。10MB 归档轮转。
 - **日志（Diagnostic log）**：分级 DEBUG < INFO < WARN < ERROR < CRITICAL < PANIC，写 `logs/`；敏感值脱敏；panic hook 先记 PANIC 再退出，GUI 提示恢复。
 
 ## 6. 数据与配置
@@ -146,7 +146,7 @@ GUI → kernel：`send_user_message`、`trigger_command(entry, params)`、`edit_
 | 图片输入 | 不支持（占位替换）→ 视觉模型走 Chat Completions |
 | 来源 | [官方指南（英）](https://api-docs.deepseek.com/guides/responses_api/) / [（中）](https://api-docs.deepseek.com/zh-cn/guides/responses_api/)，2026-08-04 核对 |
 
-- 会话切换决策归主模型（LlmTurnDecider：新消息先判断 / 回合末三动作 / `session::switch` 工具）；会话分叉摘要与上下文压缩摘要由 LlmSummarizer 生成（≤300 字，保留错题 id/知识点/未完成事项，模型错误降级为计数摘要）。
+- 会话新建归用户（ADR-0044：`create_session` RPC；模型侧决策已全部删除）；交接摘要与上下文压缩摘要由 `LlmSummarizer` 生成（≤300 字，保留错题 id/知识点/未完成事项，模型错误降级为计数摘要），两个调用方共享同一实例。
 - 可选 Ollama 本地模型（离线场景，不填 key）。
 - 首次运行由设置向导引导填写。
 - 设置热更新：`set_settings` 落盘后双模型服务热替换（LiveSettingsModelService），下一轮模型调用即用新端点/模型/key；settings.json 仍为唯一持久事实。
@@ -206,25 +206,25 @@ mistake-agent/
 - 构建期插件自动发现（ADR-0036）：插件目录 `mod.rs` 即插件描述、`disabled` 标记即禁用（不编译不注册）；插件开发手册 + 参考模板（docs/plugin-dev/，复制即开工，include! 编译锚定测试保证与契约同步）。
 - **ADR-0037 剥离已迁出**：M1-M4 已从 mistake-agent 提取并迁出至独立 `so-lite-agent` 仓库（决策留痕见 [docs/adr/0037](adr/0037-so-lite-agent-crate-extraction.md)），mistake-agent 本仓库不再包含 `so-lite-agent/` 子目录（自 v0.1.0 起）；M5（crates.io 发布）待办，在新仓库推进。详见 [docs/plan/so-lite-agent.md](plan/so-lite-agent.md)（历史归档）。
 - DeepSeek thinking 回传修复：并行工具调用回放按调用复制 reasoning item（实测 DeepSeek 要求每个 function_call 前都有 reasoning），仍被拒时兜底剥离 reasoning + `effort=none` 重试；真实 API 复验通过。
-- 会话切换决策归主模型（ADR-0030/0032）：新消息先判断是否切换上下文、回合内 session::switch、回合末 LlmTurnDecider；消息树编辑/切分支（derive_branch/switch_branch）、上下文压缩（75% 阈值、最近 15 条保留）、InterruptBus 回合边界消费全部落地；审计记录点补齐（含 SessionSwitched/Memory*/SettingsChanged/Interrupt/MessageEdited/BranchSwitched）。
+- ~~会话切换决策归主模型（ADR-0030/0032）：新消息先判断是否切换上下文、回合内 session::switch、回合末 LlmTurnDecider~~（**ADR-0044 已下线**：三处模型侧决策一并删除，改为用户经 `create_session` 新建会话）；消息树编辑/切分支（derive_branch/switch_branch）、上下文压缩（75% 阈值、最近 15 条保留）、InterruptBus 回合边界消费全部落地；审计记录点补齐（含 SessionCreated/Memory*/SettingsChanged/Interrupt/MessageEdited/BranchSwitched）。
 - 聊天页上下文缓存命中率（ADR-0033）：get_cache_stats 按会话 + 全局聚合主模型回合 usage（Responses `cached_tokens` / Chat Completions `prompt_cache_*`）；真实链路实测命中率 97.3%（命中 4864 / 未命中 190 tokens）。
-- 会话切换防污染（ADR-0034）：session::switch 控制消息不落会话树、不随历史携带，切换后回答归新会话；真实链路实测后续回合不再反复切换。
+- ~~会话切换防污染（ADR-0034）：session::switch 控制消息不落会话树、不随历史携带~~（**ADR-0044 已下线**：`session::switch` 工具与树内分叉机制整体删除，该污染类别在结构上不再可能存在）。
 - Pyodide 验算执行端完整化：numpy/sympy（符号计算/物理单位）离线打包（`npm run fetch:pyodide` 预热，vite 构建校验存在性）；前端自检真实执行解方程/求导/积分/单位换算/运动学/numpy；live_api 覆盖 kernel→桥→回执→模型续答全链路。
-- 用户插件 7 个：hello、vision（看图理解：上传→读图→模型决定讲解/描述或判分归档）、grading（场景一：判分归档，输出 subject/reference_answer，含 get/update/remove/remove_many 错题管理命令，ADR-0038）、practice（场景二：生成/gaps/check，含智能出题与几何对拍）、report、exam、tracking；内核插件 5 个（storage/memory/compute/model/session），`memory::*`、`compute::verify`、`session::switch` 由内核模块经 KernelPlugin 契约注册（ADR-0035）——五个场景工具均可从会话内触达。
+- 用户插件 7 个：hello、vision（看图理解：上传→读图→模型决定讲解/描述或判分归档）、grading（场景一：判分归档，输出 subject/reference_answer，含 get/update/remove/remove_many 错题管理命令，ADR-0038）、practice（场景二：生成/gaps/check，含智能出题与几何对拍）、report、exam、tracking；内核插件 4 个（storage/memory/compute/model），`memory::*`、`compute::verify` 由内核模块经 KernelPlugin 契约注册（ADR-0035）——五个场景工具均可从会话内触达。
 - 场景二 practice 智能出题全链路落地（2026-08-09，设计见 docs/variants.md）：确定性模板库 15 个初高中知识点（几何模板带 diagram_spec 与前端渲染器同源协议）+ 高考真题池（data/gaokao_pool.json include_str! 编译期嵌入，difficulty=exam 走池内抽取）+ LLM 自由出题（json_schema 强约束，模板未命中时）；LLM 生成的几何图经 compute::verify（verify_geometry.py）做存在性/自洽性对拍，失败注入 prompt 重出（连续 3 次停，执行端不可用降级放行）；practice::check 把练习记录落 memory（practice/history），generate 出题前读近 30 天已掌握集合避重复（prompt 注入避开清单 + 真题池过滤）。
 - 场景一真实链路复验通过（2026-08-04）：图片/文本 PDF → Qwen3-VL OCR → deepseek-v4-flash（Responses API json_schema）判分 → 错题归档；assistant 消息落盘与 usage 解析已修复并有 live_api 断言。
 - Tauri GUI 正式化（Vue 3 + Vite，按 ui-ux-pro-max 设计系统）：聊天/错题本/会话历史/设置四页 + **OOBE 首次引导**（test_connection 连通性自检）；思维链默认折叠、流式打字机、工具进度、停止、消息树编辑与分支切换、Pyodide 验算执行端（本地 WASM）、Iconify 图标、Markdown+KaTeX+DOMPurify 防 XSS、附件（图片/PDF 持久展示）、错题本搜索/排序。
 - 英语练习模式（2026-08-15，ADR-0043）：settings.json `english_mode` 开关，开启后主对话/判分/出题/即时批改/图片理解/会话决策/摘要全链路模型输出切英文，GUI 文案保持中文；数据根 `AGENTS.md` 中文教学规则照常注入（不翻译），由静态层英文人设（B+C 演法：全听懂中文、假装只抓英文关键词、永远只回英文并用英文引导组句）保证输出全英文。
 - 设置页余额卡片（`check_balance` RPC）：DeepSeek `/user/balance` + SiliconFlow `/user/info` 真实查询，只读不落盘（ADR-0031）。
 - **Standalone**：kernel 内嵌 GUI 进程，mistake-agent 单二进制即可运行（sidecar 已彻底移除）。
-- 验收命令：`cd web && npm install && npm run fetch:pyodide && npm run build`；`cd web && npm run check:pyodide`；`cargo test`（149 项单元）；`cargo test --test live_api -- --ignored`（真实 API：hello 落盘+usage、三套样例、memory 往返、reasoning 回传回归 repro_reasoning、compute::verify 全链路）；`cargo run --bin mistake-agent`（GUI）。
+- 验收命令：`cd web && npm install && npm run fetch:pyodide && npm run build`；`cd web && npm run check:pyodide`；`cargo test`（146 项单元）；`cargo test --test live_api -- --ignored`（真实 API：hello 落盘+usage、三套样例、memory 往返、reasoning 回传回归 repro_reasoning、用户新建会话+交接摘要、compute::verify 全链路）；`cargo run --bin mistake-agent`（GUI）。
 
 ## 10. 里程碑
 
 | 里程碑 | 内容 | 验收标准 |
 |---|---|---|
 | M1 | 单 crate 骨架 + kernel 模块 | ✅ 完成：trait、注册表、dispatch、loop，hello 回合真实跑通 |
-| M1.5 | kernel 的 session 模块 | ✅ 完成：生命周期、切换决策、会话分叉摘要（LlmSummarizer） |
+| M1.5 | kernel 的 session 模块 | ✅ 完成：生命周期、会话交接摘要（LlmSummarizer）；~~切换决策、会话分叉~~ 已由 ADR-0044 下线（改用户手动新建会话） |
 | M2 | services：storage / model / memory | ✅ 完成：会话/审计文件持久化、双模型可调用（热更新）、记忆目录可读写 |
 | M3 | RPC + Tauri 壳 | ✅ 完成：GUI ↔ kernel 进程内 RPC 闭环（standalone） |
 | M4 | 五个插件 + compute::verify | ✅ 完成：7 用户插件 + 5 内核插件注册；场景一全链路 + Pyodide 验算桥接 |
@@ -260,13 +260,13 @@ mistake-agent/
 - 入口点命名：`namespace::tool`——插件只写短名（`upload`），kernel 拼全名（`grading::upload`），撞名从机制上不可能；模型可见名经 wire name 映射（`::`→`__`，如 `grading::upload` → `grading__upload`），内部名、审计名与 `trigger_command` 不变（ADR-0020）。
 - 三类入口点：**Tool**（LLM 调度）、**Command**（GUI/用户调度）、**Event**（kernel 生命周期调度）。
 - 内核服务：`ServiceId::{Storage, Memory, Compute, Model}`；内核插件经 `KernelPlugin` 两段式契约注册（info 声明 namespace/provides/入口点，register 绑定 handler，ADR-0035）。
-- 会话调度是独立内核级模块（kernel-session），**不占 ServiceId**；切换决策由主模型完成（LlmTurnDecider，失败降级 continue）。
+- 会话调度是独立内核级模块（kernel-session），**不占 ServiceId**；会话新建由用户发起（ADR-0044，`create_session` RPC），无模型侧决策。
 - 工具列表示例：`vision::read / grading::upload / grading::list / practice::generate / practice::gaps / practice::check / report::weekly / exam::compose / tracking::checkin / compute::verify / memory::save / memory::show / memory::remove`；会话历史经 RPC `list_sessions / read_session` 提供（不注册为模型工具）。
 
 ## 13. 术语表（浓缩）
 
 - **Kernel（内核）**：核心调度层——agent loop、会话、工具注册与调度、事件/RPC、指令加载。
-- **Kernel plugin（内核插件）**：信任边界内的特权子系统（storage/memory/compute/model + session 调度模块），经 `KernelPlugin` 两段式契约注册。
+- **Kernel plugin（内核插件）**：信任边界内的特权子系统（storage/memory/compute/model），经 `KernelPlugin` 两段式契约注册。（会话调度是独立内核级*模块*，不是内核插件。）
 - **User plugin（用户插件）**：注册工具/命令/事件回调的业务插件，回调由 kernel 主动调用。
 - **Service / Service handle**：内核插件提供的受控能力 / 注入用户插件的受限接口（等价 OS 的 fd）。
 - **CallerPolicy**：UserAndModel 或 UserOnly，决定入口点谁能调用。
@@ -274,10 +274,10 @@ mistake-agent/
 - **ToolDef / ToolError**：工具元数据（短名、描述、schema）/ 结构化错误（code、message、retryable）。
 - **Turn（回合）**：一次完整的 agent 执行单元。
 - **SessionKey**：内部会话路由键，对用户隐藏。
-- **Session scheduler**：独立内核级模块，负责会话调度；任务层由主模型决策（ADR-0030/0032），持久化委托 storage。
-- **Guard model（守卫模型）**：已退役（ADR-0030）——现切换决策全部归主模型：新消息到达先判断（ADR-0032）、回合内 `session::switch` 工具、回合末 LlmTurnDecider 判断三动作；失败一律 continue（存疑即继续）。
-- **Goal（会话目标）**：当前会话要完成的学习目标，主模型在 start_new 时生成并写入会话元数据，作为 continue / update_goal / start_new 的决策依据。
-- **History route（历史路由）**：session::history / session::read，模型按需翻阅完整消息树；新会话上下文只含本会话子树（从摘要节点起算），旧会话内容不进模型上下文。
+- **Session scheduler**：独立内核级模块，负责会话生命周期与交接摘要；会话新建只由用户发起（ADR-0044），持久化委托 storage。
+- **Guard model（守卫模型）**：已退役（ADR-0044）——守卫模型的最后一个调用方（会话切换决策）已删除，`GuardModel` trait / `guard_prompt` / `StubGuard` 全部移除。会话不再有 continue / update_goal / start_new 三动作，也就没有"失败降级 continue"。
+- **Goal（会话目标）**：会话元数据中的可选学习目标；`create_session` 可显式传入，不再是模型决策的产物。
+- **Session handoff（交接摘要）**：用户新建会话且 `carry_summary` 为真时，把「上一会话梗概」作为新会话首条 system 消息带入，让新会话延续旧会话的结论；旧会话本身不被写入。
 - **Message tree / Active path**：id/parentId 消息树 / 上下文只包含的当前路径。
 - **Memory route**：按层级路径组织的跨会话记忆。
 - **Compaction**：活跃路径旧消息的上下文摘要（原文保留）。

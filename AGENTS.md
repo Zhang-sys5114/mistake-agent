@@ -26,7 +26,7 @@ Mistake Agent v2：面向中学生的本地错题管理 + 辅助学习 Agent（W
 | 改设计 / 做架构决策 | docs/adr/ 全部 + CONTEXT.md | 决策留痕；新决策要新增 ADR 并更新术语 |
 | Agent core 剥离（已迁出，ADR-0037） | docs/plan/so-lite-agent.md + docs/adr/0037 | M1-M4 已落地并迁出至独立 `so-lite-agent` 仓库；M5（crates.io 发布）在新仓库推进；mistake-agent 本体保持单 crate |
 | 改内核机制（loop/调度/注册表） | PROJECT.md §4-§5 + docs/adr/0003~0010 | 两段式契约、CallerPolicy、护栏、容灾 |
-| 改会话 / 消息树 | PROJECT.md §5 会话 + docs/adr/0006、0007 | 双层调度、守卫模型、Goal、历史路由 |
+| 改会话 / 消息树 | PROJECT.md §5 会话 + docs/adr/0007、0044 | 用户新建会话（`create_session`）、单 Active、交接摘要、消息级分支；守卫模型已退役 |
 | 改内核插件（services） | PROJECT.md §4-§5 + docs/adr/0001、0014、0015、0016 | 服务句柄、ModelHandle、配置独占、compute 桥接 |
 | 改记忆 | PROJECT.md §5 记忆 + docs/adr/0008 | memory::save/show/remove、路径校验、路由式浏览 |
 | 改用户插件（plugin/） | PROJECT.md §3、§12 + docs/adr/0002、0003 | 五场景、命名规范、入口点、注册校验 |

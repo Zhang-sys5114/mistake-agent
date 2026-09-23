@@ -8,7 +8,7 @@ Kernel 是本地 Agent 的特权调度层，不实现批改、练习、报表等
 
 - Agent loop：组织模型请求、流式输出、工具调用、停止护栏和上下文压缩；
 - Dispatch：执行入口点，统一做 CallerPolicy、schema、超时、取消和审计；
-- Session scheduler：管理 SessionKey、Goal、消息树分叉、空闲超时和会话交接；
+- Session scheduler：管理 SessionKey、Goal、空闲超时和会话交接（新建会话只由用户发起，ADR-0044）；
 - Registry：注册 KernelPlugin/UserPlugin，校验入口点和服务能力；
 - RPC：GUI 与 kernel 的唯一通信面；
 - 内核插件：storage、memory、model、compute，以及 session 工具入口。
@@ -32,10 +32,9 @@ src/kernel/
 │   │   └── tests.rs
 │   └── session/                    Session scheduler
 │       ├── mod.rs                  公共类型与重导出
-│       ├── scheduler.rs            生命周期、Goal、分叉
-│       ├── guard.rs                LLM 决策与重试
-│       ├── summarize.rs             交接摘要
-│       ├── interrupt.rs             InterruptBus
+│       ├── scheduler.rs            生命周期、Goal、新建会话、空闲检测
+│       ├── summarize.rs            交接摘要与上下文压缩摘要（共用一个 LLM 实现）
+│       ├── interrupt.rs            InterruptBus
 │       └── clock.rs                 时钟抽象
 ├── plugin/
 │   ├── services/                   公共服务契约与句柄
@@ -51,8 +50,7 @@ src/kernel/
 │   │   └── mem.rs                  内存后端
 │   ├── memory/                     记忆服务
 │   ├── model/                      Responses/Chat Completions/路由
-│   ├── compute/                    Pyodide bridge
-│   └── session/                    session::switch 工具入口
+│   └── compute/                    Pyodide bridge
 ├── registry/                       注册表与插件描述
 ├── audit.rs                        AuditRecord/Auditor
 ├── bootstrap.rs                    数据根目录初始化
@@ -194,32 +192,32 @@ Caller
 - 模型不可用、传输失败和协议错误分类处理；
 - 上下文达到阈值时，在回合边界执行 compaction，原文仍保留。
 
-`session::switch` 是 loop 特殊处理的工具：不走普通用户插件 handler，而是调用 `SessionSwitch`，切换后的后半段消息使用新的上下文边界。当前设计是树内分叉，不新建 `SessionKey`。
-
 ## 8. Session scheduler
 
 `SessionScheduler` 是独立的内核级模块，不占 `ServiceId`。
 
 - `SessionKey`：内部路由键；
-- `Goal`：当前学习目标；
+- `Goal`：当前学习目标（可选）；
 - Active path：消息树中送入模型的当前路径；
-- Session handoff：在当前叶子下挂「上一会话梗概」摘要节点，旧内容保留但不进入新上下文；
-- 空闲超时：在回合边界按策略分叉；
+- **新建会话只由用户发起**（ADR-0044）：`create_new_session(goal, carry_summary)` 归档当前活动会话并新建独立 `SessionKey`。没有任何模型侧的自动判断——预决策、回合末决策与 `session::switch` 工具均已删除；
+- Session handoff：用户新建会话且 `carry_summary` 为真时，把「上一会话梗概」作为**新会话首条** system 消息（旧会话本身不被写入）；
+- 单 Active 不变量：归档**全部** Active 会话后再建新的（`list_sessions` 遍历 HashMap 顺序不定，两个 Active 会让"当前会话"变成随机）；
+- 空闲超时：检测保留，但只发 `Event::SessionIdle` 提示用户，**不再自动分叉**；
 - `InterruptBus`：环境变化信号，回合边界消费，不抢占当前工具。
 
-会话切换与消息编辑都采用追加式消息树，不物理截断历史。持久化由 `SessionStore` 负责，scheduler 不直接打开文件。
+会话新建与消息编辑都采用追加式消息树，不物理截断历史（消息级 `derive_branch` / `switch_branch` 与开会话无关）。持久化由 `SessionStore` 负责，scheduler 不直接打开文件。
 
 ## 9. RPC 与事件
 
 `agent/rpc/` 是 GUI 唯一通信面。主要请求包括：
 
 - `SendUserMessage`、`TriggerCommand`、`Abort`；
-- `GetState`、`ListSessions`、`ReadSession`、`ListTools`；
+- `GetState`、`ListSessions`、`ReadSession`、`CreateSession`、`ListTools`；
 - `EditMessage`、`SwitchBranch`；
 - `GetSettings`、`SetSettings`、`TestConnection`、`CheckBalance`、`GetCacheStats`；
 - `ComputeResult`：GUI/Pyodide 回执。
 
-内核向 GUI 输出 `Event`：消息增量、reasoning、工具开始/结束/进度、回合结束、会话切换、审计错误、压缩和缓存统计等。
+内核向 GUI 输出 `Event`：消息增量、reasoning、工具开始/结束/进度、回合结束、会话空闲提示、审计错误、压缩和缓存统计等。
 
 新增 GUI 能力优先扩展 `Method`/`RpcFrame` 和 handler；不要另开任意文本命令通道。工具/命令触发统一走 `trigger_command` 或现有 RPC 方法。
 

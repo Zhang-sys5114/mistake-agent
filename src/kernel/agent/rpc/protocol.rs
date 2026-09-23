@@ -46,6 +46,15 @@ pub enum Method {
     ListTools,
     /// 教学规则（数据根 AGENTS.md）加载状态：前端展示「规则已加载/回退静态提示」。
     GetRulesStatus,
+    /// 用户手动新建会话（GUI「新对话」，ADR-0044）：归档当前活动会话并开启全新会话。
+    CreateSession {
+        /// 是否携带交接摘要：true = 用旧会话生成摘要，作为新会话首条系统消息。
+        #[serde(default)]
+        carry_summary: bool,
+        /// 新会话目标（可选；缺省时若携带摘要则取摘要前 40 字）。
+        #[serde(default)]
+        goal: Option<String>,
+    },
 }
 
 /// 自定义方法兜底：未知 method 名连同 params 与其余字段一起交给 `RpcExtension`。

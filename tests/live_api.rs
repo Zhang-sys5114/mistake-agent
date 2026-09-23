@@ -480,11 +480,12 @@ async fn check_balance_real_api() {
     );
 }
 
-/// 链路 6：新消息先判断上下文再回答 —— 第二条消息走主模型预决策（ADR-0032），
-/// 随后正常进入回合；回合缓存统计应累计 2 次主模型调用。
+/// 链路 6：用户手动新建会话 + 按需携带交接摘要（ADR-0044）——
+/// 旧会话归档、新会话独立 SessionKey、摘要挂为新会话首条系统消息，
+/// 后续消息落在新会话且不再触发任何自动切换。
 #[tokio::test]
 #[ignore]
-async fn pre_turn_context_decision_real_api() {
+async fn create_session_carry_summary_real_api() {
     if !real_api_ready() {
         eprintln!("SKIP: 未配置真实 API key");
         return;
@@ -501,72 +502,6 @@ async fn pre_turn_context_decision_real_api() {
             asset: vec![],
         }
         .into(),
-    };
-    kernel
-        .handle(send(20, "帮我看看这道题"))
-        .await
-        .expect("首条消息失败");
-    assert!(
-        wait_idle(&kernel, Duration::from_secs(120)).await,
-        "首个回合 120s 内未结束"
-    );
-    // 第二条消息：先由主模型判断是否切换上下文（大概率 continue），再进入回合回答。
-    kernel
-        .handle(send(21, "继续讲一下"))
-        .await
-        .expect("第二条消息失败");
-    assert!(
-        wait_idle(&kernel, Duration::from_secs(120)).await,
-        "第二个回合 120s 内未结束"
-    );
-
-    let stats_frame = kernel
-        .handle(RpcRequest::custom(22, "get_cache_stats", json!({})))
-        .await
-        .expect("get_cache_stats 请求失败")
-        .expect("应有响应帧");
-    let stats = match stats_frame {
-        mistake_agent::kernel::agent::rpc::RpcFrame::Response { result, error, .. } => {
-            assert!(error.is_none(), "缓存统计不应报错：{error:?}");
-            result.expect("应有统计结果")
-        }
-        _ => panic!("缓存统计应返回 response 帧"),
-    };
-    assert!(
-        stats["main"]["calls"].as_u64().unwrap_or(0) >= 2,
-        "两个回合应累计 2 次主模型调用：{stats}"
-    );
-    eprintln!(
-        "预决策 + 双回合真实链路通过：主模型 {} 次调用，缓存命中率 {}",
-        stats["main"]["calls"], stats["main"]["hit_rate"]
-    );
-}
-
-/// 链路 7：session::switch 不污染新上下文 —— 强制切换后新会话不含切换控制消息，
-/// 后续普通回合模型不再重复切换。
-#[tokio::test]
-#[ignore]
-async fn switch_tool_call_not_polluting_next_context() {
-    if !real_api_ready() {
-        eprintln!("SKIP: 未配置真实 API key");
-        return;
-    }
-    let events = Arc::new(MemoryEventSink::default());
-    let kernel = Kernel::new(events.clone()).await.expect("kernel 启动失败");
-
-    let send = |id: u64, text: &str, force_tool: Option<ForcedToolRequest>| RpcRequest {
-        id,
-        method: Method::SendUserMessage {
-            text: text.to_string(),
-            force_tool,
-            file: vec![],
-            asset: vec![],
-        }
-        .into(),
-    };
-    let rpc = |id: u64, method: Method| RpcRequest {
-        id,
-        method: method.into(),
     };
     async fn session_count(kernel: &Arc<Kernel>) -> usize {
         let frame = kernel
@@ -585,37 +520,56 @@ async fn switch_tool_call_not_polluting_next_context() {
         }
     }
 
-    kernel
-        .handle(send(30, "你好", None))
-        .await
-        .expect("回合 1 失败");
-    assert!(
-        wait_idle(&kernel, Duration::from_secs(120)).await,
-        "回合 1 120s 内未结束"
-    );
+    // 4 个回合 = 8 条消息，让摘要器走真实 LLM 路径（<8 条会跳过模型调用）。
+    for (i, text) in ["帮我看看这道题", "继续讲第二题", "第三题呢", "再讲一道"]
+        .iter()
+        .enumerate()
+    {
+        kernel
+            .handle(send(20 + i as u64, text))
+            .await
+            .expect("回合失败");
+        assert!(
+            wait_idle(&kernel, Duration::from_secs(120)).await,
+            "回合 {} 120s 内未结束",
+            i + 1
+        );
+    }
+    assert_eq!(session_count(&kernel).await, 1, "全程只应有一个会话");
 
-    // 回合 2：强制调用 session::switch（模拟主模型主动切换上下文）。
-    kernel
-        .handle(send(
-            31,
-            "切换",
-            Some(ForcedToolRequest {
-                entry: "session::switch".into(),
-                hint: Some("批改英语作业".into()),
-                display: None,
-            }),
-        ))
+    // 用户手动新建会话：携带交接摘要。
+    let create_frame = kernel
+        .handle(RpcRequest {
+            id: 30,
+            method: Method::CreateSession {
+                carry_summary: true,
+                goal: None,
+            }
+            .into(),
+        })
         .await
-        .expect("回合 2 失败");
-    assert!(
-        wait_idle(&kernel, Duration::from_secs(120)).await,
-        "回合 2 120s 内未结束"
-    );
+        .expect("create_session 请求失败")
+        .expect("应有响应帧");
+    let created = match create_frame {
+        mistake_agent::kernel::agent::rpc::RpcFrame::Response { result, error, .. } => {
+            assert!(error.is_none(), "create_session 不应报错：{error:?}");
+            result.expect("应有新建结果")
+        }
+        _ => panic!("create_session 应返回 response 帧"),
+    };
+    assert_eq!(created["summary_attached"], true, "应携带交接摘要");
+    let new_key: SessionKey =
+        serde_json::from_value(created["session_key"].clone()).expect("解析新会话 key");
+    let archived_key: SessionKey =
+        serde_json::from_value(created["archived_session_key"].clone()).expect("解析归档会话 key");
+    assert_ne!(new_key, archived_key, "新会话应为独立 SessionKey");
 
-    // 树内分叉（ADR-0030）：switch 不新建 SessionKey，会话仍是 1 个，
-    // 但活跃路径应出现「上一会话梗概」摘要节点 = 分叉完成的标志。
+    // 归档 + 单 Active 不变量。
     let list_frame = kernel
-        .handle(rpc(32, Method::ListSessions))
+        .handle(RpcRequest {
+            id: 31,
+            method: Method::ListSessions.into(),
+        })
         .await
         .unwrap()
         .unwrap();
@@ -625,17 +579,25 @@ async fn switch_tool_call_not_polluting_next_context() {
         }
         _ => panic!("list_sessions 应返回 response 帧"),
     };
-    let active = list["sessions"]
-        .as_array()
-        .unwrap()
+    let sessions = list["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 2, "旧会话保留为归档条目");
+    assert_eq!(
+        sessions.iter().filter(|m| m["status"] == "active").count(),
+        1,
+        "归档后只应剩一个活动会话：{sessions:?}"
+    );
+    let archived = sessions
         .iter()
-        .find(|m| m["status"] == "active")
-        .expect("应有活动会话");
-    let active_key: SessionKey =
-        serde_json::from_str(&format!("\"{}\"", active["key"].as_str().unwrap()))
-            .expect("解析活动会话 key");
+        .find(|m| m["status"] == "archived")
+        .expect("应有归档会话");
+    assert_eq!(archived["key"].as_str().unwrap(), archived_key.to_string());
+
+    // 新会话首条消息 = 交接摘要。
     let detail_frame = kernel
-        .handle(rpc(33, Method::ReadSession { key: active_key }))
+        .handle(RpcRequest {
+            id: 32,
+            method: Method::ReadSession { key: new_key }.into(),
+        })
         .await
         .unwrap()
         .unwrap();
@@ -651,36 +613,47 @@ async fn switch_tool_call_not_polluting_next_context() {
             && m["kind"]["text"]
                 .as_str()
                 .is_some_and(|t| t.starts_with("上一会话梗概："))),
-        "切换后应出现「上一会话梗概」摘要节点（树内分叉标志）"
-    );
-    assert!(
-        msgs.iter()
-            .all(|m| m["kind"]["kind"] != "tool_call" || m["kind"]["entry"] != "session::switch"),
-        "新会话不应携带切换控制消息：{msgs:?}"
-    );
-    assert!(
-        msgs.iter().any(|m| m["kind"]["kind"] == "assistant"),
-        "切换后的回答应落在新会话"
+        "新会话应含「上一会话梗概」摘要节点：{msgs:?}"
     );
 
-    // 回合 3：普通消息。修复前模型会在新上下文看到 session::switch 而反复切换；
-    // 修复后应继续当前会话。
+    // 后续消息落在新会话，且不会自动新建/切换会话。
     kernel
-        .handle(send(34, "继续批改英语作业", None))
+        .handle(send(33, "换一道新题"))
         .await
-        .expect("回合 3 失败");
+        .expect("新会话首个回合失败");
     assert!(
         wait_idle(&kernel, Duration::from_secs(120)).await,
-        "回合 3 120s 内未结束"
+        "新会话回合 120s 内未结束"
     );
-    let count_after = session_count(&kernel).await;
     assert_eq!(
-        count_after, 1,
-        "树内分叉不新建会话（ADR-0030），应始终 1 个会话：{count_after}"
+        session_count(&kernel).await,
+        2,
+        "消息不落新会话、或又自动开了会话"
+    );
+    let after_frame = kernel
+        .handle(RpcRequest {
+            id: 34,
+            method: Method::ReadSession { key: new_key }.into(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let after = match after_frame {
+        mistake_agent::kernel::agent::rpc::RpcFrame::Response { result, .. } => {
+            result.expect("应有会话详情")
+        }
+        _ => panic!("read_session 应返回 response 帧"),
+    };
+    assert!(
+        after["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["kind"]["kind"] == "assistant"),
+        "新会话应有助手回复"
     );
     eprintln!(
-        "session::switch 防污染真实链路通过：活动会话 {} 条消息，无切换控制消息，后续回合不再切换",
-        msgs.len()
+        "用户新建会话 + 交接摘要真实链路通过：新会话 {new_key}，归档 {archived_key}，摘要已挂载"
     );
 }
 

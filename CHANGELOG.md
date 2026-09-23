@@ -10,6 +10,65 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- **User-driven session creation**
+  ([ADR-0044](docs/adr/0044-user-driven-session-creation.md)): a new
+  `create_session` RPC archives the current active session and opens a
+  brand-new, independent `SessionKey`. The optional `carry_summary`
+  flag controls whether the previous session's handoff summary is
+  attached as the new session's first system message. Starting a new
+  session while a turn is in flight is rejected (`turn_in_progress`).
+- **`session_idle` event**: emitted when the user speaks again in a
+  session that has been idle past the 12-hour threshold. It is a
+  prompt only — the session is no longer switched automatically.
+
+### Changed
+
+- **Session creation is now user-initiated**. One topic equals one
+  independent session, and the session boundary is visible to the user.
+  Previously "switching" was a silent in-tree fork inside a single
+  `SessionKey`, invisible to the user and decided entirely by the model.
+- **`InterruptBus` producers narrowed** to settings / memory /
+  compaction: `SessionSwitched` and `GoalUpdated` have been removed
+  along with their producers
+  ([ADR-0023](docs/adr/0023-interrupt-bus.md)).
+- **`start_new` semantics**: no longer a model-triggered action. The
+  handoff summary is carried only when the user creates a new session
+  and asks for it.
+- **Audit record `SessionSwitched` → `SessionCreated`**
+  (`{session, archived, summary_attached}`).
+
+### Removed
+
+- **Model auto session switching** (all three sites removed together,
+  superseding
+  [ADR-0030](docs/adr/0030-main-model-session-switching.md),
+  [ADR-0032](docs/adr/0032-new-message-pre-decision.md) and
+  [ADR-0034](docs/adr/0034-switch-tool-call-not-in-context.md)):
+  - the pre-turn decision in `SessionScheduler::on_new_message`;
+  - the end-of-turn `LlmTurnDecider`;
+  - the `session::switch` tool (the whole `src/kernel/plugin/session/`
+    directory is gone).
+- **`GuardModel` / `guard_prompt` / `StubGuard` / `turn_decider_prompt`**
+  retired: the guard model's last caller is gone. The failure-fallback
+  logic went with the decisions — there are no decisions left to fail.
+  `complete_with_retry` moved to `session/summarize.rs` (shared with
+  `LlmSummarizer`).
+- **In-tree session forking**, including its read side
+  (`scope_session_context`, `is_session_summary`, `fork_branch`) and the
+  switch-frequency guard rail (1/hour limit).
+- **`guard_model` placeholder plan**: it was only ever a note in
+  [ADR-0025](docs/adr/0025-guard-model-and-summarizer-live.md) — it
+  never landed in `settings.json`, so there is nothing to migrate.
+
+> **Accepted risk**: legacy tree-structured sessions (those containing a
+> summary node) now send their entire path to the model — the summary
+> node duplicates its ancestors' content, so token usage rises and the
+> model may mistake the old goal for the current one. The data itself is
+> unaffected (no errors, no missing fields) and **no migration is
+> needed**; users can sidestep it by creating a new session.
+
 ## [0.1.0-alpha] - 2026-08-19
 
 First **alpha** release of Mistake Agent v2 as a standalone product. The

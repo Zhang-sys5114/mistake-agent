@@ -10,11 +10,11 @@
 - **上传图片/PDF**：可一次选多张、混合图片与 PDF，附件挂在输入框上方（不进入聊天气泡），发送后模型逐个理解（`vision::read`：作业转写、角色/照片等描述内容），再根据图片内容与你的话决定——要批改就逐题判分、错题自动归档（LaTeX 公式增强渲染），只想讲解/描述就讲解。
 - **五个学习场景**：批改、变式练习（`practice::generate` 模板/LLM 智能出题，几何题带图形规格并经可解性对拍；`practice::gaps` 薄弱点定位；`practice::check` 即时批改，答错回写错题本；高考真题池）、周复盘（`report::weekly`）、组卷（`exam::compose`）、掌握度追踪（`tracking::checkin`，7/14/30 天重测计划）。
 - **显式工具调用**：输入功能名（如"生成练习题"）按 Tab 确认，或点输入框上方的工具按钮；模型被强制调用该工具并基于结果在聊天中讲解——不绕过 LLM。
-- **连续对话历史**：聊天记录是从第一次使用到现在的完整消息树（会话切换无感知、旧消息自动携带），支持编辑/重新生成与分支切换。
+- **连续对话历史**：会话内聊天记录完整保留（旧消息自动携带），支持编辑/重新生成与分支切换；**模型不会自作主张换话题**，开新会话由用户决定、旧会话归档保留（[ADR-0044](docs/adr/0044-user-driven-session-creation.md)）；一个会话沉寂超过 12 小时后再发言只做提示，不自动开会话。
 - **跨会话记忆**：`memory::save/show/remove` 文件持久化，重启不丢。
 - **Python 验算**：`compute::verify` 在应用内 Pyodide（WASM 沙箱）执行。
 - **英语练习模式**：设置页开启后，对话、判分、出题与复盘全部以英文输出，界面文字保持中文。
-- **安全与鲁棒**：文件只经系统临时目录暂存、kernel 不读任意本地路径；守卫/摘要/回合对瞬时错误自动重试；审计默认全覆盖、日志脱敏。
+- **安全与鲁棒**：文件只经系统临时目录暂存、kernel 不读任意本地路径；摘要/回合对瞬时错误自动重试；审计默认全覆盖、日志脱敏。
 
 ## 插件开发
 
@@ -29,14 +29,14 @@
 Tauri GUI（Vue 3，进程内 Kernel，standalone 单二进制）
         │  RPC（Tauri Channel/命令桥接，JSON Lines 协议）
         ▼
-Kernel（agent loop · 工具注册与调度 · 会话调度（主模型决策）· 审计）
+Kernel（agent loop · 工具注册与调度 · 会话调度（用户新建会话）· 审计）
         ├─ 内核插件：storage · memory · compute · model · session（KernelPlugin 两段式契约，ADR-0035）
         └─ 用户插件：vision · grading · practice · report · exam · tracking
 ```
 
 - 主模型：DeepSeek `deepseek-v4-flash`（Responses API，thinking + 工具调用）
 - 视觉模型：SiliconFlow `Qwen/Qwen3-VL-32B-Instruct`（图片理解：作业转写、其它图片描述内容，不判分）
-- 会话调度：主模型在回合边界做 continue / update_goal / start_new 决策（ADR-0030/0032），失败一律"存疑即继续"
+- 会话调度：会话新建由用户发起（ADR-0044），模型不做任何自动切换——不再有 continue / update_goal / start_new 决策，也没有"存疑即继续"的兜底
 
 ## 快速开始
 

@@ -52,6 +52,42 @@ pub(crate) fn message_text(msg: &Message) -> String {
     }
 }
 
+/// 带重试的模型 complete：对瞬时错误（503/限流/超时）退避重试；
+/// 系统性错误（鉴权/余额/模型下架）与取消不重试。
+pub(crate) async fn complete_with_retry(
+    model: &Arc<dyn ModelService>,
+    request: &ModelRequest,
+    timeout: Duration,
+    retries: usize,
+    delay: Duration,
+) -> Result<ModelResponse, ModelError> {
+    let mut attempt = 0usize;
+    loop {
+        match tokio::time::timeout(timeout, model.complete(request, &AbortSignal::new())).await {
+            Ok(Ok(resp)) => return Ok(resp),
+            Ok(Err(e)) => {
+                if e.is_systemic() || matches!(e, ModelError::Cancelled) {
+                    return Err(e);
+                }
+                if attempt >= retries {
+                    return Err(e);
+                }
+                attempt += 1;
+                log::warn!("模型调用失败（{attempt}/{retries} 重试）：{e}");
+                tokio::time::sleep(delay * attempt as u32).await;
+            }
+            Err(_) => {
+                if attempt >= retries {
+                    return Err(ModelError::Timeout);
+                }
+                attempt += 1;
+                log::warn!("模型调用超时（{attempt}/{retries} 重试）");
+                tokio::time::sleep(delay * attempt as u32).await;
+            }
+        }
+    }
+}
+
 /// 生产摘要器：LLM 生成 ≤300 字任务摘要；模型失败降级为 stub 式摘要。
 pub struct LlmSummarizer {
     model: Arc<dyn ModelService>,
