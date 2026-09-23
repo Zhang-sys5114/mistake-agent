@@ -10,3 +10,9 @@ node_modules/
 Thumbs.db
 .idea/
 .vscode/
+
+# 图标提取临时产物与本地杂项（不入库）
+extract_installed.py
+installed-icon-*.png
+new-exe-icon-32512.bin
+docs/competition/
