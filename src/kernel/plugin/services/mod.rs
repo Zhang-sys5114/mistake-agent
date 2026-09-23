@@ -69,8 +69,8 @@ pub use crate::mistake::{Mistake, MistakeFilter, MistakeId, MistakePatch, Mistak
 pub use compute::{ComputeError, ComputeHandle, ComputeRequest, ComputeResult, ComputeService};
 pub use memory::{MemoryError, MemoryHandle, MemoryPath, MemoryService, MemoryView};
 pub use model::{
-    ItemKind, ModelChunk, ModelError, ModelHandle, ModelKind, ModelRequest, ModelResponse,
-    ModelService, ModelStream, ResponseFormat, TokenUsage, ToolCallSpec, ToolChoice, ToolSchema,
+    ItemKind, ModelChunk, ModelError, ModelHandle, ModelRequest, ModelResponse, ModelService,
+    ModelStream, ResponseFormat, TokenUsage, ToolCallSpec, ToolChoice, ToolSchema,
 };
 pub use storage::{
     Domain, DomainIo, RelPath, SessionStore, StorageError, StorageHandle, StorageService, TmpIo,

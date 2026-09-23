@@ -166,7 +166,6 @@ impl Summarizer for LlmSummarizer {
             transcript.push('\n');
         }
         let request = ModelRequest {
-            model: ModelKind::Main,
             messages: vec![
                 Message::system(summarize_prompt(self.english_mode())),
                 Message::user(format!("目标：{goal_text}\n\n对话：\n{transcript}")),

@@ -12,8 +12,7 @@ use uuid::Uuid;
 
 use crate::kernel::message::{Message, MessageId};
 use crate::kernel::plugin::services::{
-    AbortSignal, ModelError, ModelKind, ModelRequest, ModelResponse, ModelService, SessionStore,
-    StorageError,
+    AbortSignal, ModelError, ModelRequest, ModelResponse, ModelService, SessionStore, StorageError,
 };
 use crate::kernel::prompt::summarize_prompt;
 

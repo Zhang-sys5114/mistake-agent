@@ -5,8 +5,8 @@ mod protocol;
 
 pub(crate) use handlers::{KernelState, TurnHandle, persist_turn_messages};
 pub use protocol::{
-    CustomMethod, ForcedToolRequest, Method, RpcError, RpcExtension, RpcFrame, RpcRequest,
-    WireMethod,
+    AttachmentInfo, CustomMethod, ForcedToolRequest, Method, RpcError, RpcExtension, RpcFrame,
+    RpcRequest, WireMethod,
 };
 
 use std::sync::Arc;
@@ -29,9 +29,9 @@ use crate::kernel::logger::{Logger, LoggerHandle};
 use crate::kernel::message::{Message, MessageId};
 use crate::kernel::plugin::compute::BridgeCompute;
 use crate::kernel::plugin::memory::{FileMemoryService, InMemoryMemory};
-use crate::kernel::plugin::model::{LiveSettingsModelService, RoutingModelService};
+use crate::kernel::plugin::model::LiveSettingsModelService;
 use crate::kernel::plugin::services::{
-    AbortSignal, ComputeHandle, MemoryHandle, MemoryService, ModelHandle, ModelKind, ModelRequest,
+    AbortSignal, ComputeHandle, MemoryHandle, MemoryService, ModelHandle, ModelRequest,
     ModelService, ServiceHandles, SessionStore, StorageHandle,
 };
 use crate::kernel::plugin::storage::{AnyStorage, FileStorage};
@@ -253,7 +253,6 @@ struct AppRpc {
     settings: Arc<std::sync::RwLock<Settings>>,
     store: Arc<dyn SessionStore>,
     main_service: Arc<LiveSettingsModelService>,
-    vision_service: Arc<LiveSettingsModelService>,
     compute: Arc<BridgeCompute>,
     cache: Arc<CacheTracker>,
     interrupt_bus: InterruptBus,
@@ -288,12 +287,10 @@ impl RpcExtension for AppRpc {
                     settings.public_view()
                 };
                 log::info!(
-                    "设置已保存并热更新：main_key_set={} vision_key_set={}",
-                    view["main_model"]["key_set"],
-                    view["vision_model"]["key_set"]
+                    "设置已保存并热更新：main_key_set={}",
+                    view["main_model"]["key_set"]
                 );
                 self.main_service.refresh();
-                self.vision_service.refresh();
                 self.interrupt_bus.send(Interrupt::ConfigChanged);
                 self.auditor.record(AuditRecord::SettingsChanged);
                 crate::kernel::bootstrap::init_data_root(
@@ -328,9 +325,7 @@ impl RpcExtension for AppRpc {
             }
             "test_connection" => {
                 let started = std::time::Instant::now();
-                let is_vision = params.get("model").and_then(Value::as_str) == Some("vision");
                 let model_req = ModelRequest {
-                    model: ModelKind::Main,
                     messages: vec![Message::user("回复：ok")],
                     tools: None,
                     reasoning_effort: Some("none".into()),
@@ -342,38 +337,15 @@ impl RpcExtension for AppRpc {
                     && !key.trim().is_empty()
                 {
                     let snapshot = self.settings.read().expect("settings poisoned").clone();
-                    let mut model_cfg = if is_vision {
-                        snapshot.vision_model.clone()
-                    } else {
-                        snapshot.main_model.clone()
-                    };
+                    let mut model_cfg = snapshot.main_model.clone();
                     model_cfg.api_key = key.trim().to_string();
-                    let temp_settings = if is_vision {
-                        crate::kernel::settings::Settings {
-                            log_level: snapshot.log_level,
-                            english_mode: snapshot.english_mode,
-                            main_model: snapshot.main_model.clone(),
-                            vision_model: model_cfg,
-                        }
-                    } else {
-                        crate::kernel::settings::Settings {
-                            log_level: snapshot.log_level,
-                            english_mode: snapshot.english_mode,
-                            main_model: model_cfg,
-                            vision_model: snapshot.vision_model.clone(),
-                        }
+                    let temp_settings = crate::kernel::settings::Settings {
+                        log_level: snapshot.log_level,
+                        english_mode: snapshot.english_mode,
+                        main_model: model_cfg,
+                        vision_model: snapshot.vision_model.clone(),
                     };
-                    if is_vision {
-                        crate::kernel::plugin::model::build_vision_service(&temp_settings)
-                            .complete(&model_req, &AbortSignal::new())
-                            .await
-                    } else {
-                        crate::kernel::plugin::model::build_main_service(&temp_settings)
-                            .complete(&model_req, &AbortSignal::new())
-                            .await
-                    }
-                } else if is_vision {
-                    self.vision_service
+                    crate::kernel::plugin::model::build_main_service(&temp_settings)
                         .complete(&model_req, &AbortSignal::new())
                         .await
                 } else {
@@ -392,10 +364,8 @@ impl RpcExtension for AppRpc {
             "check_balance" => {
                 let settings = self.settings.read().expect("settings poisoned").clone();
                 let report = crate::kernel::agent::balance::check_balance(&settings).await;
-                self.auditor.record(AuditRecord::BalanceChecked {
-                    main_ok: report.main.ok,
-                    vision_ok: report.vision.ok,
-                });
+                self.auditor
+                    .record(AuditRecord::BalanceChecked { ok: report.main.ok });
                 Ok(Some(
                     serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({})),
                 ))
@@ -450,21 +420,16 @@ impl Kernel {
             }
         };
         let compute = Arc::new(BridgeCompute::new(events.clone()));
-        let main_service = Arc::new(LiveSettingsModelService::new(
-            settings.clone(),
-            ModelKind::Main,
-        ));
-        let vision_service = Arc::new(LiveSettingsModelService::new(
-            settings.clone(),
-            ModelKind::Vision,
-        ));
+        let main_service = Arc::new(LiveSettingsModelService::new(settings.clone()));
         let cache = Arc::new(CacheTracker::default());
 
         let auditor = Auditor::new(storage.clone());
-        let router = Arc::new(RoutingModelService::new(
-            main_service.clone() as Arc<dyn crate::kernel::plugin::services::ModelService>,
-            vision_service.clone() as Arc<dyn crate::kernel::plugin::services::ModelService>,
-        ));
+        let model: Arc<dyn crate::kernel::plugin::services::ModelService> = Arc::new(
+            crate::kernel::plugin::model::AttachmentResolvingModelService::new(
+                main_service.clone(),
+                storage.clone() as Arc<dyn crate::kernel::plugin::services::DomainIo>,
+            ),
+        );
         let handles = ServiceHandles::default()
             .with_storage(
                 StorageHandle::new(storage.clone()).with_io(storage.clone(), storage.clone()),
@@ -476,7 +441,7 @@ impl Kernel {
             ))
             .with_compute(ComputeHandle::new(compute.clone()))
             .with_model(ModelHandle::new(
-                router,
+                model.clone(),
                 std::time::Duration::from_secs(180),
                 auditor.clone(),
             ));
@@ -486,7 +451,6 @@ impl Kernel {
             settings: settings.clone(),
             store: storage.clone(),
             main_service: main_service.clone(),
-            vision_service: vision_service.clone(),
             compute: compute.clone(),
             cache: cache.clone(),
             interrupt_bus: interrupt_bus.clone(),
@@ -509,7 +473,7 @@ impl Kernel {
             })
             .service_handles(handles)
             .session_store(storage.clone())
-            .main_model(main_service.clone())
+            .main_model(model)
             .auditor(auditor)
             .cache(cache.clone())
             .interrupt_bus(interrupt_bus)

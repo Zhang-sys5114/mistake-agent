@@ -14,7 +14,7 @@ use crate::kernel::contract::{ToolError, ToolErrorCode};
 use crate::kernel::events::{Event, EventSink};
 use crate::kernel::message::{Message, MessageId, MessageKind, append_to_path};
 use crate::kernel::plugin::services::{
-    ItemKind, ModelChunk, ModelKind, ModelRequest, ModelService, TokenUsage, ToolChoice,
+    ItemKind, ModelChunk, ModelRequest, ModelService, TokenUsage, ToolChoice,
 };
 
 /// 系统提示提供者：人格/教学规则注入点，替代 loop 直接调用静态 prompt。
@@ -141,7 +141,6 @@ impl AgentLoop {
             let mut req_messages = vec![Message::system((self.system_prompt)())];
             req_messages.extend(conversation.iter().cloned());
             let mut request = ModelRequest {
-                model: ModelKind::Main,
                 messages: req_messages,
                 tools: Some(input.tools.clone()),
                 reasoning_effort: if reasoning_off {

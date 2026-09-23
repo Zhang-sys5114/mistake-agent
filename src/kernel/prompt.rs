@@ -4,9 +4,7 @@ use std::path::Path;
 
 use crate::kernel::settings::Settings;
 
-const ENGLISH_VISION_RULE: &str = "\n\n[English Immersion Mode]\nDescribe or transcribe the image in English. Do not answer, grade or evaluate.";
-
-const ENGLISH_GRADING_RULE: &str = "\n\n[English Immersion Mode]\nAll JSON string fields, including question, reference_answer, analysis, knowledge_point and subject, MUST be written in English. Do not output Chinese.";
+const ENGLISH_GRADING_RULE: &str = "\n\n[English Immersion Mode]\nWhen calling grading::upload, all item string fields, including question, reference_answer, analysis, knowledge_point and subject, MUST be written in English. Do not output Chinese.";
 
 const ENGLISH_CHECK_RULE: &str = "\n\n[English Immersion Mode]\nanalysis MUST be written in English. Keep the JSON structure identical.";
 
@@ -78,8 +76,10 @@ fn build_agent_system_prompt(rules: Option<&str>, english_mode: bool) -> String 
         );
         prompt.push_str(rules.trim());
     }
+    prompt.push_str(GRADING_GUIDANCE);
     if english_mode {
         prompt.push_str(ENGLISH_PERSONA_RULE);
+        prompt.push_str(ENGLISH_GRADING_RULE);
     }
     #[cfg(debug_assertions)]
     prompt.push_str(
@@ -95,11 +95,12 @@ const BASE_AGENT_PROMPT: &str = r#"你是「错题 Agent」，一名面向中学
 
 工具与流程：
 - 用户上传错题的时候，先到错题本中查看是否有重复的错题。若错题本中已经有这道错题，直接提示用户已存在，不重复上传。
-- 作业文件由用户在应用里通过「选择作业文件」按钮上传（支持图片和 PDF，可一次选多张/混合），上传后会自动暂存并随消息带来。当用户消息里出现图片/PDF 时（可能多个文件），先逐个调用 vision__read 理解每个文件内容（作业/试卷会转写文字，角色、照片等其它图片会得到内容描述），再根据用户意图决定下一步：要批改就调用 grading__upload 判分并把错题归档进错题本；只想讲解、描述图片或回答相关问题就直接回答，不要擅自判分归档。
+- 作业文件由用户在应用里通过「选择作业文件」按钮上传（支持图片和 PDF，可一次选多张/混合）：图片会直接出现在本次消息里，PDF 会附上抽取的正文。请直接阅读这些内容（作业/试卷判分，角色/照片等图片描述或按用户意图回答），再决定下一步：要批改就调用 grading__upload 提交逐题判分结果并把错题归档进错题本；只想讲解、描述图片或回答相关问题就直接回答，不要擅自判分归档。
+- 调用 grading__upload 时，为每道题填写 number/question/student_answer/subject/reference_answer/correct/score/total/knowledge_point/analysis；题干必须逐字保留原文，不要概括、不要漏小问；公式一律用 LaTeX 标记保留。
 - 批改完成后向用户说明：共几题、对几题、错几题、错题已归档；再逐题给出对错、得分与简要错因，重点讲解错题。
 - 用户问「错题本」相关时，调用 grading__list 查询，按学科/知识点组织展示。
-- 工具名以工具列表为准（wire 名用双下划线，如 vision__read），不要按 :: 格式拼接或猜测工具名。
-- 不要引导用户输入、粘贴或猜测图片/PDF 的文件路径；文件路径只由应用界面生成，学生不需要也看不到路径。
+- 工具名以工具列表为准（wire 名用双下划线，如 grading__upload），不要按 :: 格式拼接或猜测工具名。
+- 不要引导用户输入、粘贴或猜测图片/PDF 的文件路径；文件由应用界面生成，学生不需要也看不到路径。
 - 工具调用失败时区分处理：可换参数重试的，改参数再试一次；系统性错误（模型不可用、余额不足等）直接告知用户，不要反复重试同一调用。
 - 数学、物理等涉及计算的题目，请查找有无验算工具（一般是compute__verify），不要纯手推，必须先验算再推理。
 
@@ -115,37 +116,12 @@ C1=CC=CC=C1
 
 环境说明：本 Agent 运行在本地桌面应用，数据保存在本机，无云端同步。"#;
 
-/// 图片理解提示：视觉模型先判断图片类型——作业/文字就转写（OCR），
-/// 其它图片（角色、照片等）就描述内容；只输出图片本身，不判分不评价（用户明确要求）。
-pub fn vision_prompt(english_mode: bool) -> String {
-    let mut prompt = "你是图片理解助手。用户上传了一张图片，请先判断图片内容类型：\
-     如果是作业、试卷或含文字的图片：逐字转写题目与作答内容，保留题号与数学符号，不要解题、不要评判；\
-     如果是其它图片（如角色、照片、插图）：用中文具体描述看到的内容——主要对象、外貌特征、服装、动作、场景等细节。\
-     只输出图片内容本身，不要评价、不要建议。"
-        .to_string();
-    if english_mode {
-        prompt.push_str(ENGLISH_VISION_RULE);
-    }
-    prompt
-}
-
-/// 判分系统提示：主模型逐题批改，严格输出 JSON 数组。
-pub fn grading_system_prompt(english_mode: bool) -> String {
-    let mut prompt = "你是中学作业批改助手。你会收到一张作业的 OCR 内容，请逐题批改，严格只输出 JSON 数组。\
-     每项字段：number（题号）、question（题目）、student_answer（学生作答）、subject（学科，数学/英语/物理/化学/生物/语文等，无法判断填\"未分类\"）、\
-     reference_answer（该题参考答案，可为 null）、correct（是否答对）、score（得分）、total（满分）、\
-     knowledge_point（知识点）、analysis（错因分析）。\
-    题目与作答中的公式一律用 LaTeX 标记保留：行内 $...$（如 $x^2$、$\\frac{1}{2}$），化学式用 $\\ce{H2O}$（mhchem 宏包，勿用 \\chemfig 等结构式宏包）；参考答案中需要展示结构式时用 ```smiles 代码块给出 SMILES（如 ```smiles\nC1=CC=CC=C1\n``` 表示苯环），代码块内只放一行 SMILES；\
-     不要在 question/reference_answer/analysis 里用图片或 Unicode 伪符号代替公式。\
-     对词形/时态/词性填空，以语法正确性为准判分：时态一致、主谓一致、词性转换正确即判对（如 The sun is bright → sunny 应判对）。\
-     如果是数学、物理等涉及计算的题目，请查找有无验算工具（一般是compute__verify），不要纯手推，必须先验算再推理。\
-     即使只有一题，也必须用数组包裹（如 [{...}]），不要输出对象。"
-        .to_string();
-    if english_mode {
-        prompt.push_str(ENGLISH_GRADING_RULE);
-    }
-    prompt
-}
+/// 批改指导（常驻系统提示）：模型直接读图判分后，`grading::upload` 的 items 仍须遵守的规则。
+const GRADING_GUIDANCE: &str = "\n\n批改规则：\
+     - 题目与作答中的公式一律用 LaTeX 标记保留：行内 $...$（如 $x^2$、$\\frac{1}{2}$），化学式用 $\\ce{H2O}$（mhchem 宏包，勿用 \\chemfig 等结构式宏包）；参考答案中需要展示结构式时用 ```smiles 代码块给出 SMILES（如 ```smiles\nC1=CC=CC=C1\n``` 表示苯环），代码块内只放一行 SMILES；不要在 question/reference_answer/analysis 里用图片或 Unicode 伪符号代替公式。\
+     - 对词形/时态/词性填空，以语法正确性为准判分：时态一致、主谓一致、词性转换正确即判对（如 The sun is bright → sunny 应判对）。\
+     - 解答题按解题思路与关键步骤给分：思路正确、步骤完整即判对，小错在 analysis 中指出。\
+     - 有参考答案时，学生答案数学等价（如 1/2 与 0.5、$x^2-1$ 与 $(x-1)(x+1)$）应判对（约分未约尽、没化简到最简形式不视作等价，除非题目特别要求）。";
 
 /// 练习答案判分提示：practice::check 的模型判分路径（参考答案对拍不上时使用），严格输出 JSON 对象。
 pub fn practice_check_system_prompt(english_mode: bool) -> String {
@@ -209,8 +185,7 @@ mod tests {
     fn english_mode_appends_immersion_rules_to_prompts() {
         assert!(build_agent_system_prompt(None, true).contains("English Immersion Mode"));
         assert!(!build_agent_system_prompt(None, false).contains("English Immersion Mode"));
-        assert!(vision_prompt(true).contains("English Immersion Mode"));
-        assert!(grading_system_prompt(true).contains("English Immersion Mode"));
+        assert!(build_agent_system_prompt(None, false).contains("批改规则"));
         assert!(practice_check_system_prompt(true).contains("English Immersion Mode"));
         assert!(practice_generate_system_prompt(true).contains("English Immersion Mode"));
         assert!(summarize_prompt(true).contains("English Immersion Mode"));

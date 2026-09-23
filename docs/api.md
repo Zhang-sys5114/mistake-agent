@@ -30,14 +30,14 @@
 
 | method | 参数 | 状态 | 说明 |
 |---|---|---|---|
-| `send_user_message` | `text: string`, `force_tool?: {entry, hint?, display?}`, `file?: string[]`, `asset?: {path,name}[]` | ✅ M1 | 开新回合；`force_tool` = 显式工具调用：强制 LLM 首轮调用指定工具（tool_choice + 全程 thinking=none），输出仍由 LLM 生成；`display` = 前端原始展示文本，落盘为 user 消息的 `display_text`（模型上下文仍用拼好的指令 `text`）；`file` = 暂存路径列表（模型读图/判分作 file 参数，可多文件），`asset` = 持久副本列表（落进消息文本供前端展示附件，路径不出现在展示文本） |
+| `send_user_message` | `text: string`, `display_text?: string`, `force_tool?: {entry, hint?, display?}`, `file?: string[]`, `asset?: {path,name}[]` | ✅ M1 | 开新回合；`force_tool` = 显式工具调用：强制 LLM 首轮调用指定工具（tool_choice + 全程 thinking=none），输出仍由 LLM 生成；`display_text` = 前端展示文本（PDF 正文并入 `text` 时的干净展示）；`asset` = 上传附件（图片存为消息附件引用直入上下文，ADR-0046）；`file` 已弃用 |
 | `trigger_command` | `entry: string`, `params: object` | ✅ M1 | 唯一命令通道，校验 EntryPoint + CallerPolicy |
 | `abort` | — | ✅ M1 | 停止当前回合（SIGTERM → 宽限 → SIGKILL） |
 | `get_state` | — | ✅ M1 | 返回 `{status: idle\|busy, session_key}` |
 | `edit_message` | `message_id`, `text` | ✅ M5 | 消息树编辑：仅 user 消息可编辑，从被编辑消息的父节点派生新分支，返回 `{session_key, messages}`（新活跃路径）；编辑 = 改完重发，保存后自动开启新一轮回答 |
 | `switch_branch` | `message_id` | ✅ M5 | 消息树切分支：设置 active_path，返回 `{session_key, messages}` |
 | `get_settings` | — | ✅ M2/M5 | 返回设置公开视图（**不含 api_key**，只含 `key_set` 标记；含 `english_mode`） |
-| `set_settings` | `patch` | ✅ M2/M5 | 应用设置补丁并持久化（含 `english_mode`）；模型配置变化时热替换双模型服务；成功后发 `settings_changed` 事件 |
+| `set_settings` | `patch` | ✅ M2/M5 | 应用设置补丁并持久化（含 `english_mode`）；模型配置变化时热替换模型服务；成功后发 `settings_changed` 事件 |
 | `list_sessions` | — | ✅ M5 | 返回 `{sessions:[{key,goal,status,created_at,last_activity_at}]}` |
 | `read_session` | `key` | ✅ M5 | 返回 `{meta,messages}`（会话历史/消息树完整记录） |
 | `create_session` | `carry_summary?: bool`, `goal?: string` | ✅ | 用户手动新建会话（ADR-0044）：归档当前活动会话并开启全新独立 `SessionKey`，返回 `{session_key, archived_session_key, summary_attached}`；`carry_summary` 显式控制是否把旧会话摘要作为新会话首条 system 消息；回合在飞时拒绝（`turn_in_progress`） |
@@ -104,8 +104,7 @@ pub trait UserPlugin {
 | 全名 | 类型 | 策略 | 说明 |
 |---|---|---|---|
 | `demo::hello` | tool | user_and_model | 链路自检 |
-| `vision::read` | tool | user_and_model | `{file: 路径}` 图片理解：作业/试卷转写文字，角色/照片等描述内容；不判分不归档；上传后模型先调它理解内容，再根据内容与用户意图决定下一步（判分走 grading::upload） |
-| `grading::upload` | tool | user_and_model | 场景一：`{file: 路径}` 图片(png/jpg/jpeg/webp/bmp)或文本型 PDF |
+| `grading::upload` | tool | user_and_model | 场景一：`{items:[GradedItem]}` 归档模型读图判分结果（ADR-0046；题干逐字保留） |
 | `grading::list` | tool | user_and_model | `{subject?, knowledge_point?}` 列出错题本 |
 | `grading::get` | command | user_only | `{id}` 获取单条错题详情，软删除后返回不存在 |
 | `grading::update` | command | user_only | `{id, subject?, knowledge_point?, question?, student_answer?, reference_answer?, analysis?, is_correct?, pinned?}` 单题编辑、置顶/取消置顶、标记已掌握 |
@@ -135,14 +134,14 @@ pub trait UserPlugin {
 | Storage | `SessionStore` + `MistakeStore` + `AuditSink` + `DomainIo` + `TmpIo` | `StorageHandle`（错题本、附件暂存、运行时数据文件语义面） | 会话/错题/审计；文件持久化（sessions/*.jsonl、mistakes.json、audit.jsonl，10MB 轮转） |
 | Memory | `MemoryService`（save/show/remove，remove 删子树） | `MemoryHandle` | 路径类型化校验；文件持久化到数据根目录 memory/（失败回退内存实现） |
 | Compute | `ComputeService::run` | `ComputeHandle` | BridgeCompute：经 `compute_request` 事件把代码发给 GUI，等待 `compute_result` 回执；超时/取消由 kernel 侧负责 |
-| Model | `ModelService::stream/complete` | `ModelHandle`（仅 complete + 超时/abort/审计） | 路由主/视觉模型；设置变更时经共享持有器热替换，已注册插件的句柄同步生效 |
+| Model | `ModelService::stream/complete` | `ModelHandle`（仅 complete + 超时/abort/审计） | 单份 DeepSeek 配置承担对话/调度/图片理解（ADR-0045）；设置变更时经共享持有器热替换，已注册插件的句柄同步生效 |
 
 ## 5. 真实模型 API 对接
 
 ### 5.1 主模型：DeepSeek Responses API（第一方，ADR-0020）
 
 - Endpoint：`POST https://api.deepseek.com/responses`（无状态：每次请求全量历史，不支持 `previous_response_id`/`conversation`/`store`）。
-- 模型：`deepseek-v4-flash`（2026-08 起官方支持；v4-pro 待官方放开）。
+- 模型：`deepseek-flash`（V4.1-Flash；旧名 `deepseek-v4-flash` 已退役）。
 - 流式：语义 SSE 事件（`event:`/`data:` 行，空行分隔），结束事件 `response.completed` / `response.incomplete` / `response.failed`，**没有 `data: [DONE]`**（src/kernel/plugin/model/responses.rs `SseParser`）。
 - 事件映射：`output_text.delta`→TextDelta、`reasoning_text.delta`→ReasoningDelta、`function_call_arguments.delta`→ToolCallDelta、`output_item.done`→ItemDone（气泡/工具调用边界）、`response.completed`→Usage+Done。
 - JSON 严格要求：`text.format` 支持 `json_object` 与 `json_schema`（判分用 json_schema 数组，schema 必须内联扁平、避免 `$defs/$ref`，DeepSeek 端不解析引用）。
@@ -154,12 +153,12 @@ pub trait UserPlugin {
 - **reasoning 回传兜底**：若请求仍被拒（`reasoning_text must be passed back`），`ResponsesModelService` 自动重试一次：剥离全部 reasoning item + `reasoning.effort=none`（关闭 thinking）。宁可丢思考连续性也不让回合失败；不做 LLM 改写，因为校验要求原样回传。
 - 传输兜底：客户端强制 IPv4 本地地址（无 IPv6 环境稳定连通）。
 
-### 5.2 视觉模型：SiliconFlow Chat Completions（仅 OCR，不判分）
+### 5.2 图片输入：Responses `input_image`（图片直入上下文，ADR-0045/0046）
 
-- Endpoint：`POST https://api.siliconflow.cn/v1/chat/completions`。
-- 模型：`Qwen/Qwen3-VL-32B-Instruct`（settings 可配 `SILICONFLOW_MODEL`）。
-- 图片：`content` 数组 `{"type":"image_url","image_url":{"url":"data:<mime>;base64,...","detail":"high"}}` + `{"type":"text","text":"仅转写，不要解题"}`（`src/plugin/grading/core.rs` OCR 流程）。
-- PDF：文本型 PDF 用 `pdf-extract` 提取文字；扫描版 PDF 明确报错提示拍照上传。
+- 图片理解不需要独立视觉端点，也没有独立读图工具：上传图片以 `uploads/` 路径引用存进用户消息（`MessageKind::User.attachment_refs`，消息树不落图片字节）。
+- 请求构建时 `AttachmentResolvingModelService` 按引用读盘、base64 回填运行时 `attachments`，再在 `messages_to_responses_input` 中展开为 `input_image`：`{"type":"input_image","image_url":"data:<mime>;base64,...","detail":"high"}` + `{"type":"input_text","text":"..."}`（`src/kernel/plugin/model/mod.rs` / `routing.rs`；Chat Completions 回退走 `messages_to_cc` 的 `image_url`）。
+- 仅允许出现在 `user`/`developer` 消息与 `function_call_output`；base64 data URL 或 http(s) URL 均可。
+- PDF：Responses API 不支持文件输入，文本型 PDF 由 GUI 边界（`stage_files`）用 `pdf-extract` 抽取正文并入消息文本；扫描版 PDF 提示拍照上传。
 
 ### 5.3 settings.json（数据根目录 `~/Documents/.mistake-agent/`）
 
@@ -167,12 +166,11 @@ pub trait UserPlugin {
 {
   "log_level": "info",
   "english_mode": false,
-  "main_model": { "api_url": "https://api.deepseek.com", "api_key": "...", "model": "deepseek-v4-flash", "transport": "responses" },
-  "vision_model": { "api_url": "https://api.siliconflow.cn/v1", "api_key": "...", "model": "Qwen/Qwen3-VL-32B-Instruct" }
+  "main_model": { "api_url": "https://api.deepseek.com", "api_key": "...", "model": "deepseek-flash", "transport": "responses" }
 }
 ```
 
-环境变量回退：`DEEPSEEK_API_KEY` / `DEEPSEEK_API_URL` / `SILICONFLOW_API_KEY` / `SILICONFLOW_API_URL` / `SILICONFLOW_MODEL` / `MISTAKE_AGENT_LOG_LEVEL`。
+`vision_model` 字段仅为兼容旧配置保留、运行时不再读取（ADR-0045）。环境变量回退：`DEEPSEEK_API_KEY` / `DEEPSEEK_API_URL` / `MISTAKE_AGENT_LOG_LEVEL`。
 
 ## 6. 超时与取消模型（ADR-0022）
 

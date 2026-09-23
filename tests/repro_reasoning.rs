@@ -10,9 +10,7 @@ use mistake_agent::kernel::agent::rpc::{Kernel, Method, RpcRequest};
 use mistake_agent::kernel::events::MemoryEventSink;
 use mistake_agent::kernel::message::Message;
 use mistake_agent::kernel::plugin::model::build_main_service;
-use mistake_agent::kernel::plugin::services::{
-    AbortSignal, ModelChunk, ModelKind, ModelRequest, ToolSchema,
-};
+use mistake_agent::kernel::plugin::services::{AbortSignal, ModelChunk, ModelRequest, ToolSchema};
 use mistake_agent::kernel::settings::Settings;
 use std::sync::Arc;
 
@@ -100,7 +98,6 @@ async fn replay_real_session_history() {
         other => panic!("unknown mode {other}"),
     }
     let req = ModelRequest {
-        model: ModelKind::Main,
         messages,
         tools: Some(tools),
         reasoning_effort: if mode == "thinking_off" {

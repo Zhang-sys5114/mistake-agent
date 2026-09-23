@@ -38,6 +38,30 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   and asks for it.
 - **Audit record `SessionSwitched` → `SessionCreated`**
   (`{session, archived, summary_attached}`).
+- **Single DeepSeek model** ([ADR-0045](docs/adr/0045-single-deepseek-model.md)):
+  one `main_model` config (`deepseek-flash`, Responses API) now covers
+  chat, scheduling, summarization and image understanding. The Responses
+  API gained native image input (`input_image`), so user attachments are
+  sent to the same model. `ModelKind` / `ModelRequest.model` and
+  `RoutingModelService` are removed; `LiveSettingsModelService` rebuilds
+  a single adapter. `check_balance` now queries DeepSeek only
+  (`BalanceReport.main`, `AuditRecord::BalanceChecked { ok }`). Settings
+  page drops the vision-model card and SiliconFlow balance item; the OOBE
+  wizard is now three steps. The legacy `vision_model` field is kept in
+  `settings.json` for backward compatibility but is never read.
+  (Supersedes [ADR-0019](docs/adr/0019-model-plan-dual-endpoints.md).)
+- **Images go straight into the model context**
+  ([ADR-0046](docs/adr/0046-images-in-context-grading-archive.md)):
+  uploaded images are stored as `uploads/` path references on the user
+  message (`attachment_refs`) and resolved to `input_image` parts by a
+  new `AttachmentResolvingModelService` at request time; the message
+  tree no longer carries image bytes. `grading::upload` now takes the
+  model's structured grading result (`{items: [...]}`) and only
+  archives it — the plugin no longer calls the model or reads files.
+  Text PDFs are extracted at the GUI boundary. User messages gain
+  `display_text` on `send_user_message`, and the prompt set drops
+  `vision_prompt` / `grading_system_prompt` in favour of the always-on
+  `GRADING_GUIDANCE`.
 
 ### Removed
 
@@ -61,6 +85,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **`guard_model` placeholder plan**: it was only ever a note in
   [ADR-0025](docs/adr/0025-guard-model-and-summarizer-live.md) — it
   never landed in `settings.json`, so there is nothing to migrate.
+- **`vision::read` tool and the `vision` plugin**
+  ([ADR-0046](docs/adr/0046-images-in-context-grading-archive.md)): the
+  separate image-reading step is gone; the model reads images directly
+  from context. `map_model_error` moved into the `practice` plugin, and
+  the `grading` plugin no longer requires the `Model` service.
 
 > **Accepted risk**: legacy tree-structured sessions (those containing a
 > summary node) now send their entire path to the model — the summary

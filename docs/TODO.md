@@ -15,14 +15,15 @@
 
 ### 2. 设置删掉硅基流动等视觉模型，统一只用 DeepSeek
 
-目标：单份 DeepSeek 配置同时承担**主模型 + 调度模型 + 视觉理解模型**。
+目标：单份 DeepSeek 配置同时承担**主模型 + 调度模型 + 视觉理解模型**。✅ **已落地（2026-09-23，ADR-0045）**
 
-- [ ] settings.json 收敛为一份模型配置（`api_url` / `api_key` / `model` / `transport`），删除 `vision_model` 字段（[src/kernel/settings.rs](../src/kernel/settings.rs)）。
-- [ ] 设置页删「视觉模型（OCR / 图片理解）」卡片与 SiliconFlow 余额卡片；OOBE 同步去掉视觉模型输入项（[SettingsPage.vue](../web/src/components/SettingsPage.vue)、[OobePage.vue](../web/src/components/OobePage.vue)）。
-- [ ] 调度/摘要（`LlmTurnDecider` / `LlmSummarizer`）与视觉理解（vision::read → [routing.rs](../src/kernel/plugin/model/routing.rs)）全部改走同一配置，按用途选模型的入口收敛。
-- [ ] 余额查询去掉 SiliconFlow 专用分支（[balance.rs](../src/kernel/agent/balance.rs) 的 `siliconflow_url`；ADR-0019/0031 需修订）。
-- [ ] 存量配置兼容：旧 settings.json 带 `vision_model` 时忽略并清理，启动不报错。
-- [ ] **先验证**：DeepSeek 端点是否支持图片输入（多模态）。若不支持，OCR / 图片理解链路需另定方案（本地 OCR 或保留可选视觉端点）——此点确认后再改 `vision__read` 的实现。
+- [x] settings.json 收敛为一份模型配置（`api_url` / `api_key` / `model` / `transport`），默认模型改 `deepseek-flash`。**决策调整**：`vision_model` 字段未删除，按"保留字段但不再使用"处理（兼容旧配置、解析不报错），运行时不再读取；前端不再展示。
+- [x] 设置页删「视觉模型（OCR / 图片理解）」卡片与 SiliconFlow 余额项；OOBE 由四步收敛为三步。（[SettingsPage.vue](../web/src/components/SettingsPage.vue)、[OobePage.vue](../web/src/components/OobePage.vue)）
+- [x] 调度/摘要与图片理解全部改走同一配置；**删除 `ModelKind` 与 `ModelRequest.model`**、`RoutingModelService`、`build_vision_service`，按用途选模型的入口彻底收敛（[routing.rs](../src/kernel/plugin/model/routing.rs)、[services/model.rs](../src/kernel/plugin/services/model.rs)）。
+- [x] 余额查询去掉 SiliconFlow 专用分支（[balance.rs](../src/kernel/agent/balance.rs)；ADR-0019/0031 已修订）。
+- [x] 存量配置兼容：旧 settings.json 带 `vision_model` 被忽略、启动不报错。
+- [x] **已验证**：DeepSeek `deepseek-flash` 的 Responses API 原生支持图片输入（`input_image` content part，base64 data URL / http(s) URL）。
+- [x] **后续（ADR-0046）**：进一步删除 `vision::read` 工具，图片以 `uploads/` 路径引用直入消息上下文（`AttachmentRef` + `AttachmentResolvingModelService`）；`grading::upload` 改为 `{items}` 只归档模型判分结果；PDF 在 GUI 边界抽文。
 
 ### 3. 加入服务端：教师端班级管理 + 出题下发（学生端登录接入）
 
@@ -77,8 +78,8 @@
 
 - [ ] **知识图谱力导向图**：方案已定（`tracking::graph` Command → trigger_command → ECharts graph，实现见场景 5 对应项）。
 - [ ] **错题本导出 Anki 卡组**：前端导出 tab 分隔文本（问题\t答案\t知识点标签\t错因），Anki「文件→导入」直接成卡组；PDF 复用复习清单打印。
-- [ ] **语音提问**：MediaRecorder 录音 → SiliconFlow `audio/transcriptions`（SenseVoice）→ 文本回填输入框（用户确认后发送）；**拍照讲解**：getUserMedia 进附件管线（vision::read）。
-- [ ] **手写 OCR 评测**：🔬 待测——vision::read 功能已覆盖；答辩兜底：用现有 3 套样例（含 1 真实手写）端到端跑通结果整理进 docs/testing.md 作鲁棒性证据，暂不建评测集。
+- [ ] **语音提问**：MediaRecorder 录音 → SiliconFlow `audio/transcriptions`（SenseVoice）→ 文本回填输入框（用户确认后发送）；**拍照讲解**：getUserMedia 进附件管线（图片直入模型上下文，ADR-0046）。
+- [ ] **手写 OCR 评测**：🔬 待测——图片理解已内化为模型能力（ADR-0046 直入上下文）；答辩兜底：用现有 3 套样例（含 1 真实手写）端到端跑通结果整理进 docs/testing.md 作鲁棒性证据，暂不建评测集。
 - [ ] **家长端报表订阅**：⏸ 挂起——候选形态为设置页 PIN 家长模式 + 学情总览视图（复用 ReportChart），未排期。
 
 ### 交付物缺口（任务书必交）
@@ -122,7 +123,7 @@
 
 ## 近期：桌面输入方式增强（剪贴板已落地，摄像头未落地）
 
-- [x] **剪贴板粘贴截图**：WebView 监听 `paste`（Ctrl+V / 右键粘贴），图片直接进入附件暂存，与「选择作业文件」共用 vision__read → 判分归档管线。✅ 已落地（2026-08-17）：新增 `stage_clipboard_image` Tauri 命令（`stage_bytes` 与选文件共用落盘），ChatPage 根节点 `@paste` 监听，粘贴截图入 `pendingAttachments` 走同一暂存/判分管线。
+- [x] **剪贴板粘贴截图**：WebView 监听 `paste`（Ctrl+V / 右键粘贴），图片直接进入附件暂存，与「选择作业文件」共用 附件 → 判分归档管线。✅ 已落地（2026-08-17）：新增 `stage_clipboard_image` Tauri 命令（`stage_bytes` 与选文件共用落盘），ChatPage 根节点 `@paste` 监听，粘贴截图入 `pendingAttachments` 走同一暂存/判分管线。
 - [ ] **摄像头拍题**：调用 WebView `getUserMedia` 拍题入队，拍完即走同一条 OCR 管线；需处理 WebView2 相机权限与设备选择。
 
 ## 中期：Android 手机 / 平板适配（规划，未落地）

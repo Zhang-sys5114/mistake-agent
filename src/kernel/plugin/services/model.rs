@@ -4,13 +4,6 @@ use super::*;
 
 // ---------- Model 契约（Q6 + ADR-0014/0020） ----------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelKind {
-    Main,
-    Vision,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseFormat {
@@ -24,7 +17,6 @@ pub enum ResponseFormat {
 
 #[derive(Debug, Clone)]
 pub struct ModelRequest {
-    pub model: ModelKind,
     pub messages: Vec<Message>,
     pub tools: Option<Vec<ToolSchema>>,
     /// DeepSeek 思考模式 effort（none/minimal/low/medium/high/xhigh/max）。
@@ -47,9 +39,8 @@ pub enum ToolChoice {
 }
 
 impl ModelRequest {
-    pub fn chat(model: ModelKind, messages: Vec<Message>) -> Self {
+    pub fn chat(messages: Vec<Message>) -> Self {
         Self {
-            model,
             messages,
             tools: None,
             reasoning_effort: None,
@@ -245,10 +236,7 @@ impl ModelHandle {
             Ok(Ok(resp)) => {
                 self.auditor.record(AuditRecord::LlmCall {
                     provider: "handle".into(),
-                    model: match request.model {
-                        ModelKind::Main => "main".into(),
-                        ModelKind::Vision => "vision".into(),
-                    },
+                    model: "main".into(),
                     kind: "complete".into(),
                     tokens_in: resp.usage.as_ref().and_then(|u| u.input_tokens),
                     tokens_out: resp.usage.as_ref().and_then(|u| u.output_tokens),
@@ -260,10 +248,7 @@ impl ModelHandle {
             Ok(Err(e)) => {
                 self.auditor.record(AuditRecord::LlmCall {
                     provider: "handle".into(),
-                    model: match request.model {
-                        ModelKind::Main => "main".into(),
-                        ModelKind::Vision => "vision".into(),
-                    },
+                    model: "main".into(),
                     kind: "complete".into(),
                     tokens_in: None,
                     tokens_out: None,

@@ -1,7 +1,9 @@
 # 0031 — 账户余额查询（check_balance RPC）
 
 日期：2026-08-04
-状态：已采纳
+状态：已修订（2026-09-23，ADR-0045：退役 SiliconFlow 分支，只查 DeepSeek）
+
+> **修订（2026-09-23，ADR-0045）**：视觉端点退役后，余额查询只保留 DeepSeek 分支；`BalanceReport` 只含 `main`，`AuditRecord::BalanceChecked { ok }`，前端设置页删除 SiliconFlow 余额项。下方 SiliconFlow 相关内容仅作历史留痕。
 
 ## 背景
 

@@ -1,54 +1,23 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
+use base64::Engine;
+
+use crate::kernel::message::{Attachment, MessageKind};
 use crate::kernel::plugin::services::{
-    AbortSignal, ModelError, ModelKind, ModelRequest, ModelResponse, ModelService, ModelStream,
+    AbortSignal, Domain, DomainIo, ModelError, ModelRequest, ModelResponse, ModelService,
+    ModelStream, RelPath,
 };
 use crate::kernel::settings::{Settings, Transport};
 
 use super::*;
-
-pub struct RoutingModelService {
-    main: Arc<dyn ModelService>,
-    vision: Arc<dyn ModelService>,
-}
-
-impl RoutingModelService {
-    pub fn new(main: Arc<dyn ModelService>, vision: Arc<dyn ModelService>) -> Self {
-        Self { main, vision }
-    }
-}
-
-#[async_trait::async_trait]
-impl ModelService for RoutingModelService {
-    async fn stream(
-        &self,
-        request: &ModelRequest,
-        signal: &AbortSignal,
-    ) -> Result<ModelStream, ModelError> {
-        match request.model {
-            ModelKind::Main => self.main.stream(request, signal).await,
-            ModelKind::Vision => self.vision.stream(request, signal).await,
-        }
-    }
-
-    async fn complete(
-        &self,
-        request: &ModelRequest,
-        signal: &AbortSignal,
-    ) -> Result<ModelResponse, ModelError> {
-        match request.model {
-            ModelKind::Main => self.main.complete(request, signal).await,
-            ModelKind::Vision => self.vision.complete(request, signal).await,
-        }
-    }
-}
 
 pub fn build_main_service(settings: &Settings) -> Arc<dyn ModelService> {
     let cfg = &settings.main_model;
     let model = cfg
         .model
         .clone()
-        .unwrap_or_else(|| "deepseek-v4-flash".into());
+        .unwrap_or_else(|| "deepseek-flash".into());
     match cfg.transport.unwrap_or_default() {
         Transport::Responses => Arc::new(ResponsesModelService::new(
             cfg.api_url.clone(),
@@ -63,38 +32,20 @@ pub fn build_main_service(settings: &Settings) -> Arc<dyn ModelService> {
     }
 }
 
-pub fn build_vision_service(settings: &Settings) -> Arc<dyn ModelService> {
-    let cfg = &settings.vision_model;
-    let model = cfg
-        .model
-        .clone()
-        .unwrap_or_else(|| "Qwen/Qwen3-VL-32B-Instruct".into());
-    Arc::new(ChatCompletionsModelService::new(
-        cfg.api_url.clone(),
-        cfg.api_key.clone(),
-        model,
-    ))
-}
-
-/// 配置热更新的模型服务（ADR-0015/0019）：持有共享 Settings，按 ModelKind 重建底层适配器。
+/// 配置热更新的模型服务（ADR-0015/0027/0045）：持有共享 Settings，按当前配置重建底层适配器。
 /// `refresh()` 在 set_settings 保存成功后调用，下一次模型调用即用新配置；
 /// 不重建时行为与构建期快照完全一致。
 pub struct LiveSettingsModelService {
     settings: Arc<std::sync::RwLock<Settings>>,
-    kind: ModelKind,
     current: std::sync::RwLock<Arc<dyn ModelService>>,
 }
 
 impl LiveSettingsModelService {
-    pub fn new(settings: Arc<std::sync::RwLock<Settings>>, kind: ModelKind) -> Self {
+    pub fn new(settings: Arc<std::sync::RwLock<Settings>>) -> Self {
         let snapshot = settings.read().expect("settings poisoned").clone();
-        let current = match kind {
-            ModelKind::Main => build_main_service(&snapshot),
-            ModelKind::Vision => build_vision_service(&snapshot),
-        };
+        let current = build_main_service(&snapshot);
         Self {
             settings,
-            kind,
             current: std::sync::RwLock::new(current),
         }
     }
@@ -102,10 +53,7 @@ impl LiveSettingsModelService {
     /// 按当前 settings 重建底层适配器（set_settings 成功后调用）。
     pub fn refresh(&self) {
         let snapshot = self.settings.read().expect("settings poisoned").clone();
-        let rebuilt = match self.kind {
-            ModelKind::Main => build_main_service(&snapshot),
-            ModelKind::Vision => build_vision_service(&snapshot),
-        };
+        let rebuilt = build_main_service(&snapshot);
         *self.current.write().expect("model service poisoned") = rebuilt;
     }
 }
@@ -128,6 +76,110 @@ impl ModelService for LiveSettingsModelService {
     ) -> Result<ModelResponse, ModelError> {
         let svc = self.current.read().expect("model service poisoned").clone();
         svc.complete(request, signal).await
+    }
+}
+
+/// 图片附件解析包装层（ADR-0046）：用户消息只持久化 uploads/ 路径引用，
+/// 构建模型请求时按引用读盘、base64 回填运行时 `attachments`，让图片直入 Responses `input_image`。
+/// 读取结果按文件名进程内缓存（消息不可变，避免每回合重复磁盘 IO 与审计噪声）。
+pub struct AttachmentResolvingModelService {
+    inner: Arc<dyn ModelService>,
+    io: Arc<dyn DomainIo>,
+    cache: Mutex<HashMap<String, Attachment>>,
+}
+
+impl AttachmentResolvingModelService {
+    pub fn new(inner: Arc<dyn ModelService>, io: Arc<dyn DomainIo>) -> Self {
+        Self {
+            inner,
+            io,
+            cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn resolve(&self, request: &ModelRequest) -> ModelRequest {
+        let mut resolved = request.clone();
+        for msg in &mut resolved.messages {
+            if let MessageKind::User {
+                attachment_refs,
+                attachments,
+                ..
+            } = &mut msg.kind
+            {
+                if attachment_refs.is_empty() || !attachments.is_empty() {
+                    continue;
+                }
+                for r in attachment_refs.iter() {
+                    match self.load(&r.name).await {
+                        Ok(mut att) => {
+                            if !r.mime.is_empty() {
+                                att.mime = r.mime.clone();
+                            }
+                            attachments.push(att);
+                        }
+                        Err(e) => log::warn!("附件读取失败（{}）：{e}", r.name),
+                    }
+                }
+            }
+        }
+        resolved
+    }
+
+    async fn load(&self, name: &str) -> Result<Attachment, String> {
+        if let Some(hit) = self.cache.lock().expect("cache poisoned").get(name) {
+            return Ok(hit.clone());
+        }
+        let rel = RelPath::parse(name).map_err(|e| e.to_string())?;
+        let bytes = self
+            .io
+            .read(Domain::Uploads, &rel)
+            .await
+            .map_err(|e| e.to_string())?;
+        let att = Attachment {
+            mime: mime_for_name(name).into(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        };
+        self.cache
+            .lock()
+            .expect("cache poisoned")
+            .insert(name.to_string(), att.clone());
+        Ok(att)
+    }
+}
+
+fn mime_for_name(name: &str) -> &'static str {
+    match name
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        _ => "image/png",
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelService for AttachmentResolvingModelService {
+    async fn stream(
+        &self,
+        request: &ModelRequest,
+        signal: &AbortSignal,
+    ) -> Result<ModelStream, ModelError> {
+        let resolved = self.resolve(request).await;
+        self.inner.stream(&resolved, signal).await
+    }
+
+    async fn complete(
+        &self,
+        request: &ModelRequest,
+        signal: &AbortSignal,
+    ) -> Result<ModelResponse, ModelError> {
+        let resolved = self.resolve(request).await;
+        self.inner.complete(&resolved, signal).await
     }
 }
 
@@ -198,10 +250,9 @@ mod tests {
         let svc = ResponsesModelService::new(
             format!("http://{addr}"),
             "test-key".into(),
-            "deepseek-v4-flash".into(),
+            "deepseek-flash".into(),
         );
         let request = ModelRequest {
-            model: ModelKind::Main,
             messages: vec![Message::user("北京天气？")],
             tools: None,
             reasoning_effort: None,

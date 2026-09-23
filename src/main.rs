@@ -80,18 +80,16 @@ fn kernel_send(state: State<'_, KernelBridge>, line: String) -> Result<(), Strin
     state.req_tx.send(line).map_err(|e| e.to_string())
 }
 
-/// 上传结果：temp_path 给 kernel（安全暂存，处理后删除）；
-/// asset_path 是数据根目录 uploads/ 的持久副本，供前端展示（不随 temp 删除）。
+/// 上传结果（ADR-0046）：asset_path 是数据根目录 uploads/ 的持久副本（消息只引用它），
+/// `text` 是 PDF 抽取的文本（图片为 None；模型经 Responses input_image 直读图片）。
 #[derive(Serialize)]
 struct PickResult {
-    temp_path: String,
     asset_path: String,
     name: String,
+    text: Option<String>,
 }
 
-/// 作业文件选择器：所选文件同时生成两份副本——
-/// 1) 系统临时目录（mistake-agent- 前缀，kernel 白名单，处理后即删）；
-/// 2) 数据根目录 uploads/（持久化，前端图片/PDF 展示用）。
+/// 作业文件选择器：持久化到数据根目录 uploads/；文本型 PDF 顺带抽取正文给模型。
 #[tauri::command]
 async fn pick_homework_file() -> Result<Option<PickResult>, String> {
     // 异步文件对话框：阻塞式 pick_file() 在 Linux 上需要主线程/走 portal，
@@ -103,7 +101,7 @@ async fn pick_homework_file() -> Result<Option<PickResult>, String> {
     picked.map(|p| stage_files(p.path())).transpose()
 }
 
-/// 复制到系统临时目录，文件名带 mistake-agent- 前缀（kernel 白名单依据）。
+/// 读取所选文件到 uploads/ 持久副本；PDF 在此抽取文本（图片直接进上下文，不抽文）。
 fn stage_files(source: &Path) -> Result<PickResult, String> {
     let ext = source
         .extension()
@@ -116,17 +114,24 @@ fn stage_files(source: &Path) -> Result<PickResult, String> {
         .and_then(|n| n.to_str())
         .unwrap_or("附件")
         .to_string();
-    stage_bytes(&bytes, &ext, name)
+    let text = if ext.eq_ignore_ascii_case("pdf") {
+        pdf_extract::extract_text_from_mem(&bytes)
+            .ok()
+            .filter(|t| !t.trim().is_empty())
+    } else {
+        None
+    };
+    stage_bytes(&bytes, &ext, name, text)
 }
 
-/// 把附件字节写入两份副本——1) 系统临时目录（mistake-agent- 前缀，kernel 白名单，处理后即删）；
-/// 2) 数据根目录 uploads/（持久化，前端图片/PDF 展示用）。「选择作业文件」与「剪贴板粘贴」共用。
-fn stage_bytes(bytes: &[u8], ext: &str, name: String) -> Result<PickResult, String> {
+/// 把附件字节写入数据根目录 uploads/ 持久副本（「选择作业文件」与「剪贴板粘贴」共用）。
+fn stage_bytes(
+    bytes: &[u8],
+    ext: &str,
+    name: String,
+    text: Option<String>,
+) -> Result<PickResult, String> {
     let uuid = uuid::Uuid::new_v4();
-    let temp_name = format!("mistake-agent-{uuid}.{ext}");
-    let temp_dest = std::env::temp_dir().join(&temp_name);
-    std::fs::write(&temp_dest, bytes).map_err(|e| format!("暂存文件失败：{e}"))?;
-
     let root = mistake_agent::kernel::settings::Settings::data_root();
     let uploads = root.join("uploads");
     std::fs::create_dir_all(&uploads).map_err(|e| format!("创建附件目录失败：{e}"))?;
@@ -135,9 +140,9 @@ fn stage_bytes(bytes: &[u8], ext: &str, name: String) -> Result<PickResult, Stri
     std::fs::write(&asset_dest, bytes).map_err(|e| format!("附件持久化失败：{e}"))?;
 
     Ok(PickResult {
-        temp_path: temp_dest.to_string_lossy().into_owned(),
         asset_path: asset_dest.to_string_lossy().into_owned(),
         name,
+        text,
     })
 }
 
@@ -149,7 +154,7 @@ fn stage_clipboard_image(mime: String, data_base64: String) -> Result<PickResult
         .decode(data_base64.trim())
         .map_err(|e| format!("图片数据解码失败：{e}"))?;
     let ext = ext_for_mime(&mime);
-    stage_bytes(&bytes, ext, format!("粘贴截图.{ext}"))
+    stage_bytes(&bytes, ext, format!("粘贴截图.{ext}"), None)
 }
 
 /// 剪贴板图片 MIME → 文件扩展名（截图几乎总是 png，未知类型兜底 png）。
@@ -165,11 +170,11 @@ fn ext_for_mime(mime: &str) -> &'static str {
 }
 
 /// 读取 uploads/ 持久附件（base64），前端渲染图片/PDF 用。
-/// 安全白名单：只允许数据根目录 uploads/ 下的文件（canonicalize 防符号链接逃逸）。
+/// `path` 可为绝对路径（上传当次）或 uploads/ 内相对文件名（历史消息引用，ADR-0046）；
+/// 安全白名单：canonicalize 后必须落在 uploads/ 内（防符号链接逃逸）。
 #[tauri::command]
 fn read_upload(path: String) -> Result<String, String> {
-    let uploads = mistake_agent::kernel::settings::Settings::data_root().join("uploads");
-    let canonical = verify_in_uploads(&path, &uploads)?;
+    let canonical = resolve_upload(&path)?;
     use base64::Engine;
     let bytes = std::fs::read(&canonical).map_err(|e| format!("读取附件失败：{e}"))?;
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
@@ -178,9 +183,19 @@ fn read_upload(path: String) -> Result<String, String> {
 /// 用系统默认程序打开附件（PDF 预览兜底：WebView 打不开时学生也能看）。
 #[tauri::command]
 fn open_attachment(path: String) -> Result<(), String> {
-    let uploads = mistake_agent::kernel::settings::Settings::data_root().join("uploads");
-    let canonical = verify_in_uploads(&path, &uploads)?;
+    let canonical = resolve_upload(&path)?;
     open_with_system(&canonical)
+}
+
+/// 把附件路径解析为 uploads/ 内的规范绝对路径：绝对路径直接用，相对路径按 uploads/ 拼接。
+fn resolve_upload(path: &str) -> Result<PathBuf, String> {
+    let uploads = mistake_agent::kernel::settings::Settings::data_root().join("uploads");
+    let candidate = if Path::new(path).is_absolute() {
+        PathBuf::from(path)
+    } else {
+        uploads.join(path)
+    };
+    verify_in_uploads(&candidate.to_string_lossy(), &uploads)
 }
 
 /// 用系统默认程序打开教学规则文件（数据根 AGENTS.md，家长/老师编辑用）。
@@ -277,19 +292,14 @@ mod tests {
     }
 
     #[test]
-    fn stage_clipboard_image_writes_temp_and_uploads() {
+    fn stage_clipboard_image_writes_uploads() {
         use base64::Engine;
         let bytes: &[u8] = b"fake-clipboard-image-bytes";
         let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
         let picked = stage_clipboard_image("image/png".into(), b64).unwrap();
         assert!(picked.name.ends_with(".png"));
-        assert!(
-            picked.temp_path.contains("mistake-agent-"),
-            "temp 需带白名单前缀"
-        );
-        assert_eq!(std::fs::read(&picked.temp_path).unwrap(), bytes);
+        assert!(picked.text.is_none(), "图片不应抽取文本");
         assert_eq!(std::fs::read(&picked.asset_path).unwrap(), bytes);
-        let _ = std::fs::remove_file(&picked.temp_path);
         let _ = std::fs::remove_file(&picked.asset_path);
     }
 

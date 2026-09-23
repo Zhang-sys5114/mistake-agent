@@ -1,7 +1,5 @@
-//! 余额查询（账户外部 API 轻量封装，2026-08-04 双提供商实测通过）：
-//! - DeepSeek：`GET {base}/user/balance`，返回 `balance_infos`（可能多币种，取第一条）；
-//! - SiliconFlow：`GET {base}/user/info`，返回 `data.balance`（赠送余额）、
-//!   `chargeBalance`（充值余额，实际可用）、`totalBalance`（总额）。
+//! 余额查询（账户外部 API 轻量封装，2026-08-04 实测通过；ADR-0045 收敛为 DeepSeek 单账户）：
+//! - DeepSeek：`GET {base}/user/balance`，返回 `balance_infos`（可能多币种，取第一条）。
 //!
 //! 只读账户信息，绝不把 api_key 放进返回值或审计；未配置时给出结构化占位。
 
@@ -15,10 +13,8 @@ use crate::kernel::settings::Settings;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BalanceReport {
-    /// DeepSeek（主模型）。
+    /// DeepSeek（单模型）。
     pub main: ProviderBalance,
-    /// SiliconFlow（视觉模型）。
-    pub vision: ProviderBalance,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -32,7 +28,7 @@ pub struct ProviderBalance {
     pub data: Option<Value>,
 }
 
-/// 查询两个提供商余额（各一次真实 HTTP 请求；5xx 临时错误重试一次）。
+/// 查询 DeepSeek 余额（一次真实 HTTP 请求；5xx 临时错误重试一次）。
 pub async fn check_balance(settings: &Settings) -> BalanceReport {
     let client = Client::builder()
         .timeout(Duration::from_secs(20))
@@ -47,13 +43,6 @@ pub async fn check_balance(settings: &Settings) -> BalanceReport {
             &settings.main_model,
             deepseek_url(&settings.main_model.api_url),
             deepseek_display,
-        )
-        .await,
-        vision: provider_balance(
-            &client,
-            &settings.vision_model,
-            siliconflow_url(&settings.vision_model.api_url),
-            siliconflow_display,
         )
         .await,
     }
@@ -139,17 +128,6 @@ fn deepseek_url(api_url: &str) -> String {
     format!("{base}/user/balance")
 }
 
-/// SiliconFlow 余额端点：OpenAI 兼容基址带 /v1；用户可能只配了裸域，自动补全。
-fn siliconflow_url(api_url: &str) -> String {
-    let base = api_url.trim_end_matches('/');
-    let base = if base.ends_with("/v1") {
-        base.to_string()
-    } else {
-        format!("{base}/v1")
-    };
-    format!("{base}/user/info")
-}
-
 /// 提炼 DeepSeek balance_infos（多币种取第一条）。
 fn deepseek_display(raw: &Value) -> Value {
     let info = raw
@@ -164,17 +142,5 @@ fn deepseek_display(raw: &Value) -> Value {
         "total_balance": info.get("total_balance").cloned().unwrap_or(Value::Null),
         "granted_balance": info.get("granted_balance").cloned().unwrap_or(Value::Null),
         "topped_up_balance": info.get("topped_up_balance").cloned().unwrap_or(Value::Null),
-    })
-}
-
-/// 提炼 SiliconFlow data 字段。
-fn siliconflow_display(raw: &Value) -> Value {
-    let data = raw.get("data").cloned().unwrap_or_default();
-    json!({
-        "name": data.get("name").cloned().unwrap_or(Value::Null),
-        "status": data.get("status").cloned().unwrap_or(Value::Null),
-        "balance": data.get("balance").cloned().unwrap_or(Value::Null),
-        "charge_balance": data.get("chargeBalance").cloned().unwrap_or(Value::Null),
-        "total_balance": data.get("totalBalance").cloned().unwrap_or(Value::Null),
     })
 }

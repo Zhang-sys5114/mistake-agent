@@ -9,7 +9,7 @@
 3. **失败可恢复**：明确区分"换参数重试"与"系统性错误直接告知"，配合内核护栏（同码连续失败 3 次即停）。
 4. **不泄露思维链**：reasoning 不进学生可见内容（UI 侧默认折叠仅为调试/透明）。
 5. **输出结构化**：判分用 json_schema 强约束（服务端强制数组结构），不靠"请输出 JSON"的软约束。
-6. **理解不判分**：视觉模型按图片类型处理——作业/试卷转写文字，角色/照片等其它图片描述内容（用户明确要求），判分交给主模型。
+6. **理解不判分**：图片理解按图片类型处理——作业/试卷转写文字，角色/照片等其它图片描述内容（用户明确要求），判分交给主模型。
 7. **语言跟随**：`english_mode=true` 时，主对话、判分、出题、即时批改、图片理解、会话决策与摘要等全部模型提示追加英文输出规则；GUI 文案保持中文。
 
 ## Prompt 清单
@@ -20,9 +20,10 @@
 
 - 角色与受众（中学生、中文、耐心）。
 - `english_mode=true` 时系统提示追加 English Immersion Mode 规则，要求所有发给学生的文本使用英文。
-- 工具流程：先 `vision__read`（图片理解，不判分；多个文件逐个调用）→ 按用户意图决定：`grading__upload`（判分→归档→讲解）或直接讲解/描述；`grading__list`（错题本查询）。
-- 工具名一律用 wire 名（双下划线，如 `vision__read`），与模型工具列表一致，不许按 `::` 格式猜测（模型工具列表读 info 声明、第一轮就有全部工具；懒插件在 wire 调用命中时由内核触发加载）。
-- 不引导用户输入图片/PDF 路径：作业文件由界面「选择作业文件」按钮上传并自动暂存，模型只用消息里给出的暂存路径。
+- 工具流程：图片直接出现在消息里（PDF 附抽取正文），模型直接阅读 → 按用户意图决定：`grading__upload`（提交逐题判分结果并归档→讲解）或直接讲解/描述；`grading__list`（错题本查询）。（ADR-0046 后不再有 `vision__read`。）
+- 工具名一律用 wire 名（双下划线，如 `grading__upload`），与模型工具列表一致，不许按 `::` 格式猜测（模型工具列表读 info 声明、第一轮就有全部工具；懒插件在 wire 调用命中时由内核触发加载）。
+- 不引导用户输入图片/PDF 路径：作业文件由界面「选择作业文件」按钮上传，图片作为消息附件直入上下文，学生不需要也看不到路径。
+- 常驻「批改规则」段（`GRADING_GUIDANCE`）：公式 LaTeX/SMILES 保留、语法/时态/词性填空判分标准、解答题按步骤给分、数学等价判断。
 - 失败处理分级（可重试一次 / 系统性错误直接告知）。
 - 表达规范（数学记号、不展示 reasoning、敏感话题引导求助）。
 - **LaTeX 增强渲染**：数学/物理/化学等富文本一律用 `$...$` / `$$...$$` 标记（`\frac`、`\sqrt`、`\vec`、`pmatrix`），化学式用 `\ce{}`（mhchem 宏包，如 `$\ce{H2O}$`），前端 KaTeX 渲染；**禁用 `\chemfig` 等 TikZ 结构式宏包**（KaTeX 无法渲染）。
@@ -37,16 +38,14 @@
 - 本地运行环境说明。
 - **教学规则（AGENTS.md）加载（2026-08-10 落地）**：静态基底之后、debug 段之前追加「【教学规则（AGENTS.md，家长/老师可编辑；与本提示冲突时以本文件为准）】+ 文件全文」。加载逻辑 `load_agents_md`：路径 = 数据根目录拼接固定文件名（无用户输入路径、无目录遍历面）；文件缺失（Missing）/ 非 UTF-8（InvalidUtf8）/ 超过 64KB（TooLarge）时**回退静态文本**。家长/老师编辑保存后，下个模型请求即生效（无缓存）。前端设置页经 `get_rules_status` 展示已加载/回退状态与原因，`open_rules_file`（Tauri 命令）一键用系统默认程序打开编辑。
 
-### 2. 图片理解提示（vision_prompt）
+### 2. 图片理解（已并入主系统提示，ADR-0046）
 
-视觉模型（Qwen/Qwen3-VL-32B-Instruct）使用：先判断图片类型——作业/试卷/含文字图片逐字转写题目与作答（保留题号与数学符号），角色/照片/插图等其它图片用中文描述内容（主要对象、外貌、服装、动作、场景）；只输出图片内容本身，**不解题、不判分、不评价**。
+`vision_prompt` 已退役：图片以 `input_image` 直入主模型上下文，不再有独立的图片理解提示词。主系统提示指导模型直接阅读图片（作业/试卷判分，角色/照片等按用户意图描述），批改规则见 `GRADING_GUIDANCE`。
 
-### 3. 判分系统提示（grading_system_prompt）
+### 3. 批改规则（GRADING_GUIDANCE，常驻系统提示）
 
-主模型使用，配合 `text.format = json_schema`（内联扁平数组 schema，`src/plugin/grading/core.rs`）：
-逐题输出 number/question/student_answer/correct/score/total/knowledge_point/analysis/subject/reference_answer；
-`subject` 为学科（数学/英语/物理/化学/生物/语文等，无法判断填"未分类"），`reference_answer` 为该题参考答案（可 null）；
-强制数组包裹。
+模型直接读图判分后，`grading::upload` 的 `items` 入参由工具 schema 描述字段（number/question/student_answer/subject/reference_answer/correct/score/total/knowledge_point/analysis）；常驻规则补充：
+LaTeX/SMILES 保留、语法/时态/词性填空判分标准、解答题按步骤给分、数学等价判断。原 `grading_system_prompt`（模型判分 JSON 调用）已退役。
 
 ### 4. ~~会话切换决策提示（turn_decider_prompt）~~ — 已退役，ADR-0044
 
@@ -85,6 +84,8 @@ compute::verify（Pyodide）做可解性对拍，失败带原因重出、连续 
 
 | 日期 | 变更 | 原因/结果 |
 |---|---|---|
+| 2026-09-23 | `vision_prompt` / `grading_system_prompt` 退役；新增常驻 `GRADING_GUIDANCE`；系统提示作业流程改为「直读图片/PDF 正文 → grading__upload(items)」 | ADR-0046：图片直入上下文，grading 只归档 |
+| 2026-09-23 | 图片理解改由 `deepseek-flash` 承担（Responses `input_image`） | 视觉端点退役（ADR-0045）：单份 DeepSeek 配置同时负责对话、判分与图片理解 |
 | 2026-09-21 | `turn_decider_prompt` / `ENGLISH_DECIDER_RULE` 删除 | 模型自动切换整体下线（ADR-0044）：会话新建改由用户发起，提示词与三动作决策一并退役 |
 | 2026-08-15 | 新增英语练习模式提示规则（settings `english_mode`） | 沉浸式英语环境：主对话/判分/出题/即时批改/图片理解/会话决策/摘要全链路英文，GUI 文案保持中文；`agent_system_prompt` 注入英文人设（B+C 演法：全听懂中文、假装只抓英文关键词、永远只回英文并用英文引导组句），中文教学规则（AGENTS.md）照常注入不翻译 |
 | 2026-08-10 | Agent 系统提示加载数据根 AGENTS.md 教学规则全文（缺失/损坏/超限回退静态文本，64KB 上限） | TODO「AGENTS.md 加载进系统提示」落地：家长/老师编辑即生效；设置页展示加载状态 + 一键打开编辑 |

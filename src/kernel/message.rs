@@ -27,11 +27,23 @@ impl std::fmt::Display for MessageId {
     }
 }
 
-/// 附件（图片 base64；M4 上传链路使用）。
+/// 运行时附件（图片 base64；构建模型请求前由 `AttachmentResolvingModelService` 填充，不落盘）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Attachment {
     pub mime: String,
     pub data_base64: String,
+}
+
+/// 用户附件的持久引用（ADR-0046）：只存 uploads/ 域内文件名，消息树不落图片字节；
+/// 构建模型请求时按引用读盘还原为 `Attachment`（图片直入 Responses `input_image`）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachmentRef {
+    /// uploads/ 域内相对文件名（RelPath 白名单内）。
+    pub name: String,
+    pub mime: String,
+    /// 原始文件名（前端展示用）。
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,7 +55,11 @@ pub enum MessageKind {
         /// 缺省时前端回退渲染 `text`。模型上下文始终使用 `text`（拼好的指令）。
         #[serde(default)]
         display_text: Option<String>,
+        /// 图片附件引用（路径持久化，ADR-0046）。
         #[serde(default)]
+        attachment_refs: Vec<AttachmentRef>,
+        /// 运行时解析出的图片字节：仅内存，不落盘（由模型服务包装层填充）。
+        #[serde(skip, default)]
         attachments: Vec<Attachment>,
     },
     Assistant {
@@ -86,12 +102,22 @@ impl Message {
     }
 
     pub fn user_with_display(text: impl Into<String>, display_text: Option<String>) -> Self {
+        Self::user_with_attachments(text, display_text, Vec::new())
+    }
+
+    /// 带图片附件引用的用户消息（ADR-0046：图片随消息进入上下文）。
+    pub fn user_with_attachments(
+        text: impl Into<String>,
+        display_text: Option<String>,
+        attachment_refs: Vec<AttachmentRef>,
+    ) -> Self {
         Self {
             id: MessageId::new(),
             parent_id: None,
             kind: MessageKind::User {
                 text: text.into(),
                 display_text,
+                attachment_refs,
                 attachments: Vec::new(),
             },
             created_at: chrono::Utc::now(),

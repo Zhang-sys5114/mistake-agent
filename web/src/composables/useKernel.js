@@ -95,7 +95,7 @@ export function useKernel() {
     return invoke("pick_homework_file");
   }
 
-  /** 剪贴板粘贴截图：把图片字节（MIME + base64）交给后端暂存，返回 {temp_path, asset_path, name}。 */
+  /** 剪贴板粘贴截图：把图片字节（MIME + base64）交给后端写入 uploads/，返回 {asset_path, name, text}。 */
   function stageClipboardImage(mime, dataBase64) {
     return invoke("stage_clipboard_image", { mime, dataBase64 });
   }

@@ -25,6 +25,34 @@ pub(crate) async fn persist_turn_messages(
     Ok(last_kept)
 }
 
+/// 从上传附件构造图片引用（ADR-0046）：仅图片进上下文，PDF 正文由 GUI 抽取并入消息文本。
+fn attachment_refs_from_assets(
+    asset: &[AttachmentInfo],
+) -> Vec<crate::kernel::message::AttachmentRef> {
+    asset
+        .iter()
+        .filter_map(|a| {
+            let name = std::path::Path::new(&a.path)
+                .file_name()?
+                .to_str()?
+                .to_string();
+            let ext = name.rsplit('.').next()?.to_ascii_lowercase();
+            let mime = match ext.as_str() {
+                "png" => "image/png",
+                "jpg" | "jpeg" => "image/jpeg",
+                "webp" => "image/webp",
+                "bmp" => "image/bmp",
+                _ => return None,
+            };
+            Some(crate::kernel::message::AttachmentRef {
+                name,
+                mime: mime.into(),
+                display_name: Some(a.name.clone()),
+            })
+        })
+        .collect()
+}
+
 pub(crate) struct TurnHandle {
     pub(crate) key: SessionKey,
     pub(crate) signal: AbortSignal,
@@ -62,8 +90,9 @@ impl Kernel {
         match method {
             Method::SendUserMessage {
                 text,
+                display_text,
                 force_tool,
-                file,
+                file: _,
                 asset,
             } => {
                 {
@@ -76,7 +105,7 @@ impl Kernel {
                     }
                 }
                 let mut user_text = text.clone();
-                let mut display_text: Option<String> = None;
+                let mut display_text = display_text;
                 let mut forced_wire: Option<String> = None;
                 if let Some(ft) = force_tool {
                     let entry = self
@@ -110,17 +139,14 @@ impl Kernel {
                             });
                     forced_wire = Some(full_to_wire(&ft.entry));
                 }
-                for f in &file {
-                    user_text.push_str(&format!("\n暂存文件：{f}"));
-                    display_text.get_or_insert_with(|| text.clone());
-                }
-                for a in &asset {
-                    user_text.push_str(&format!("\n附件：{}|{}", a.path, a.name));
-                    display_text.get_or_insert_with(|| text.clone());
-                }
+                let attachment_refs = attachment_refs_from_assets(&asset);
                 let ctx = self
                     .scheduler
-                    .on_new_message_with_display(&user_text, display_text.as_deref())
+                    .on_new_message_with_attachments(
+                        &user_text,
+                        display_text.as_deref(),
+                        attachment_refs,
+                    )
                     .await
                     .map_err(|e| RpcError::new("scheduler_error", e.to_string()))?;
                 let key = ctx.session_key;

@@ -1,20 +1,14 @@
-//! grading 核心实现：上传 handler（图片理解 → 判分 → 归档）、进度播报。
-//! 图片理解（读图/PDF）复用 vision 插件（crate::plugin::vision::read_content）。
+//! grading 核心实现：upload handler（归档模型判分结果）、进度播报。
+//! 判分由主模型直接阅读上下文中的作业图片/PDF 正文完成（ADR-0046），本插件只落库。
 
 use serde_json::{Value, json};
 
 use crate::kernel::agent::dispatch::ToolCallContext;
 use crate::kernel::contract::ToolError;
 use crate::kernel::events::Event;
-use crate::kernel::message::Message;
-use crate::kernel::plugin::services::{
-    AbortSignal, Mistake, MistakeId, MistakePatch, ModelHandle, ModelKind, ModelRequest,
-    ResponseFormat, StorageHandle,
-};
-use crate::kernel::prompt::grading_system_prompt;
-use crate::plugin::vision::{map_model_error, read_content};
+use crate::kernel::plugin::services::{Mistake, MistakeId, MistakePatch, StorageHandle};
 
-use super::params::{GetParams, GradedItem, RemoveManyParams, RemoveParams, UpdateParams, UploadParams};
+use super::params::{GetParams, RemoveManyParams, RemoveParams, UpdateParams, UploadParams};
 
 fn parse_mistake_id(raw: &str) -> Result<MistakeId, ToolError> {
     uuid::Uuid::parse_str(raw)
@@ -102,23 +96,15 @@ pub(crate) async fn upload_handler(
     ctx: &ToolCallContext,
     params: Value,
     storage: StorageHandle,
-    model: ModelHandle,
 ) -> Result<Value, ToolError> {
     let p: UploadParams =
         serde_json::from_value(params).map_err(|e| ToolError::invalid_params(e.to_string()))?;
-    // 先读图（vision::read_content：图片理解/PDF 抽文），不删文件；读完确认内容后判分，
-    // 再经 StorageHandle 清理暂存副本（ADR-0042 磁盘 IO 铁律，插件不持有文件句柄）。
-    let content =
-        read_content(&model, &storage, &p.file, &ctx.events, "grading::upload", ctx.english_mode).await?;
-    storage
-        .remove_staged(&p.file)
-        .await
-        .map_err(|e| ToolError::handler(format!("清理暂存文件失败：{e}")))?;
+    if p.items.is_empty() {
+        return Err(ToolError::invalid_params("items 不能为空"));
+    }
+    emit_progress(ctx, "grading::upload", "正在归档错题…");
 
-    emit_progress(ctx, "grading::upload", "正在逐题判分…");
-    let grading_text = grade_content(&model, &content, ctx).await?;
-    let items: Vec<GradedItem> = parse_grading_json(&grading_text)?;
-
+    let items = p.items;
     let mut wrong_count = 0usize;
     let mut archived = 0usize;
     for item in &items {
@@ -167,67 +153,6 @@ pub(crate) async fn upload_handler(
         "archived_mistakes": archived,
         "items": items,
     }))
-}
-
-/// 判分：主模型按图片理解内容逐题批改，输出 JSON 数组。
-async fn grade_content(
-    model: &ModelHandle,
-    content: &str,
-    ctx: &ToolCallContext,
-) -> Result<String, ToolError> {
-    let system = Message::system(grading_system_prompt(ctx.english_mode));
-    let user = Message::user(format!("作业 OCR 内容：\n{content}\n请逐题批改。"));
-    let mut request = ModelRequest::chat(ModelKind::Main, vec![system, user]);
-    // 内联扁平数组 schema：避免 $defs/$ref（DeepSeek json_schema 端不解析引用）。
-    let item_schema = serde_json::to_value(schemars::schema_for!(GradedItem)).unwrap_or_default();
-    let schema = json!({
-        "type": "array",
-        "items": item_schema,
-    });
-    request.response_format = Some(ResponseFormat::JsonSchema {
-        name: "graded_items".into(),
-        schema: serde_json::to_value(schema).unwrap_or_default(),
-    });
-    request.reasoning_effort = Some("none".into());
-    let response = model
-        .complete(&request, &AbortSignal::new())
-        .await
-        .map_err(map_model_error)?;
-    ctx.events.emit(Event::ToolProgress {
-        entry: "grading::upload".into(),
-        message: "判分完成".into(),
-        icon: Some("mdi:upload".into()),
-    });
-    Ok(response.text)
-}
-
-fn parse_grading_json(text: &str) -> Result<Vec<GradedItem>, ToolError> {
-    let trimmed = text.trim();
-    if let Ok(items) = serde_json::from_str::<Vec<GradedItem>>(trimmed) {
-        return Ok(items);
-    }
-    // 容灾：单对象（模型可能没按数组输出）。
-    if let Ok(item) = serde_json::from_str::<GradedItem>(trimmed) {
-        return Ok(vec![item]);
-    }
-    // 容灾：从文本中截取第一个 [ 到最后一个 ]。
-    if let (Some(s), Some(e)) = (trimmed.find('['), trimmed.rfind(']')) {
-        let slice = &trimmed[s..=e];
-        if let Ok(items) = serde_json::from_str::<Vec<GradedItem>>(slice) {
-            return Ok(items);
-        }
-    }
-    // 容灾：截取第一个 { 到最后一个 }（单对象）。
-    if let (Some(s), Some(e)) = (trimmed.find('{'), trimmed.rfind('}')) {
-        let slice = &trimmed[s..=e];
-        if let Ok(item) = serde_json::from_str::<GradedItem>(slice) {
-            return Ok(vec![item]);
-        }
-    }
-    Err(ToolError::handler(format!(
-        "判分结果无法解析：{}",
-        text.chars().take(200).collect::<String>()
-    )))
 }
 
 fn emit_progress(ctx: &ToolCallContext, entry: &str, message: &str) {

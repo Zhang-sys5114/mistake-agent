@@ -91,6 +91,7 @@ async fn session_append_and_archive() {
         kind: MessageKind::User {
             text: "你好".into(),
             display_text: None,
+            attachment_refs: vec![],
             attachments: vec![],
         },
         created_at: chrono::Utc::now(),
@@ -161,12 +162,14 @@ async fn edit_user_message_keeps_attachments_and_clears_display_text() {
         id: MessageId::new(),
         parent_id: None,
         kind: MessageKind::User {
-            text: "帮我看看这道题\n附件：/tmp/mistake-agent-x|math.png".into(),
+            text: "帮我看看这道题".into(),
             display_text: Some("展示文本".into()),
-            attachments: vec![crate::kernel::message::Attachment {
+            attachment_refs: vec![crate::kernel::message::AttachmentRef {
+                name: "x.png".into(),
                 mime: "image/png".into(),
-                data_base64: "AAAA".into(),
+                display_name: Some("math.png".into()),
             }],
+            attachments: vec![],
         },
         created_at: chrono::Utc::now(),
     };
@@ -183,11 +186,12 @@ async fn edit_user_message_keeps_attachments_and_clears_display_text() {
             MessageKind::User {
                 text,
                 display_text,
-                attachments,
+                attachment_refs,
+                ..
             } if text == "帮我看看这道题（改错字）"
                 && display_text.is_none()
-                && attachments.len() == 1
-                && attachments[0].data_base64 == "AAAA"
+                && attachment_refs.len() == 1
+                && attachment_refs[0].name == "x.png"
         )
     );
     // 只能编辑 user：assistant / system 均拒绝。

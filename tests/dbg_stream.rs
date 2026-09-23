@@ -3,9 +3,7 @@
 use futures_util::StreamExt;
 use mistake_agent::kernel::message::Message;
 use mistake_agent::kernel::plugin::model::build_main_service;
-use mistake_agent::kernel::plugin::services::{
-    AbortSignal, ModelChunk, ModelKind, ModelRequest, ToolSchema,
-};
+use mistake_agent::kernel::plugin::services::{AbortSignal, ModelChunk, ModelRequest, ToolSchema};
 use mistake_agent::kernel::settings::Settings;
 
 #[tokio::test]
@@ -19,7 +17,6 @@ async fn dump_chunks() {
         input_schema: serde_json::json!({"type": "object", "properties": {}}),
     }];
     let req = ModelRequest {
-        model: ModelKind::Main,
         messages: vec![Message::user("必须调用 demo__hello 工具，然后简短说明结果")],
         tools: Some(tools.clone()),
         reasoning_effort: None,
@@ -68,7 +65,6 @@ async fn dump_chunks() {
         Ok(serde_json::json!({"reply": "你好"})),
     );
     let req2 = ModelRequest {
-        model: ModelKind::Main,
         messages: vec![Message::user("继续"), reasoning, call],
         tools: Some(tools),
         reasoning_effort: None,

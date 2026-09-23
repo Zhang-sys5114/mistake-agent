@@ -11,11 +11,11 @@ use serde_json::{Value, json};
 use crate::kernel::contract::ToolError;
 use crate::kernel::message::Message;
 use crate::kernel::plugin::services::{
-    AbortSignal, Mistake, MistakeId, ModelHandle, ModelKind, ModelRequest, ResponseFormat,
-    MemoryHandle, StorageHandle,
+    AbortSignal, Mistake, MistakeId, MemoryHandle, ModelHandle, ModelRequest, ResponseFormat,
+    StorageHandle,
 };
 use crate::kernel::prompt::practice_check_system_prompt;
-use crate::plugin::vision::map_model_error;
+use super::map_model_error;
 
 use super::history::record_attempt;
 use super::templates::Difficulty;
@@ -190,7 +190,7 @@ async fn model_check(
         lines.push(format!("题型：{k}"));
     }
     let user = Message::user(lines.join("\n"));
-    let mut request = ModelRequest::chat(ModelKind::Main, vec![system, user]);
+    let mut request = ModelRequest::chat(vec![system, user]);
     request.response_format = Some(ResponseFormat::JsonSchema {
         name: "practice_check".into(),
         schema: serde_json::to_value(schemars::schema_for!(CheckResult)).unwrap_or_default(),

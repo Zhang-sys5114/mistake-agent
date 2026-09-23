@@ -7,7 +7,7 @@
 
 ## 功能
 
-- **上传图片/PDF**：可一次选多张、混合图片与 PDF，附件挂在输入框上方（不进入聊天气泡），发送后模型逐个理解（`vision::read`：作业转写、角色/照片等描述内容），再根据图片内容与你的话决定——要批改就逐题判分、错题自动归档（LaTeX 公式增强渲染），只想讲解/描述就讲解。
+- **上传图片/PDF**：可一次选多张、混合图片与 PDF，附件挂在输入框上方（不进入聊天气泡），发送后图片直接进入模型上下文（PDF 自动抽取正文），模型直接阅读后决定——要批改就逐题判分、调用 `grading::upload` 归档错题（LaTeX 公式增强渲染），只想讲解/描述就讲解。
 - **五个学习场景**：批改、变式练习（`practice::generate` 模板/LLM 智能出题，几何题带图形规格并经可解性对拍；`practice::gaps` 薄弱点定位；`practice::check` 即时批改，答错回写错题本；高考真题池）、周复盘（`report::weekly`）、组卷（`exam::compose`）、掌握度追踪（`tracking::checkin`，7/14/30 天重测计划）。
 - **显式工具调用**：输入功能名（如"生成练习题"）按 Tab 确认，或点输入框上方的工具按钮；模型被强制调用该工具并基于结果在聊天中讲解——不绕过 LLM。
 - **连续对话历史**：会话内聊天记录完整保留（旧消息自动携带），支持编辑/重新生成与分支切换；**模型不会自作主张换话题**，开新会话由用户决定、旧会话归档保留（[ADR-0044](docs/adr/0044-user-driven-session-creation.md)）；一个会话沉寂超过 12 小时后再发言只做提示，不自动开会话。
@@ -34,8 +34,7 @@ Kernel（agent loop · 工具注册与调度 · 会话调度（用户新建会�
         └─ 用户插件：vision · grading · practice · report · exam · tracking
 ```
 
-- 主模型：DeepSeek `deepseek-v4-flash`（Responses API，thinking + 工具调用）
-- 视觉模型：SiliconFlow `Qwen/Qwen3-VL-32B-Instruct`（图片理解：作业转写、其它图片描述内容，不判分）
+- 模型：DeepSeek `deepseek-flash`（Responses API，thinking + 工具调用 + 图片理解 `input_image`），单份配置承担对话、调度、判分与图片理解（ADR-0045）
 - 会话调度：会话新建由用户发起（ADR-0044），模型不做任何自动切换——不再有 continue / update_goal / start_new 决策，也没有"存疑即继续"的兜底
 
 ## 快速开始
@@ -51,16 +50,13 @@ Kernel（agent loop · 工具注册与调度 · 会话调度（用户新建会�
   "main_model": {
     "api_url": "https://api.deepseek.com",
     "api_key": "你的 DeepSeek key",
-    "model": "deepseek-v4-flash",
+    "model": "deepseek-flash",
     "transport": "responses"
-  },
-  "vision_model": {
-    "api_url": "https://api.siliconflow.cn/v1",
-    "api_key": "你的 SiliconFlow key",
-    "model": "Qwen/Qwen3-VL-32B-Instruct"
   }
 }
 ```
+
+单份 DeepSeek 配置即承担对话、调度、判分与图片理解；`vision_model` 字段仅为兼容旧配置保留，运行时不再读取。
 
 也可以在应用「设置」页里填写（Key 只显示"已配置"状态，不回显）。
 

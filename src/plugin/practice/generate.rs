@@ -10,11 +10,10 @@ use serde_json::Value;
 use crate::kernel::contract::ToolError;
 use crate::kernel::message::Message;
 use crate::kernel::plugin::services::{
-    AbortSignal, ComputeError, ComputeHandle, ModelHandle, ModelKind, ModelRequest,
-    ResponseFormat,
+    AbortSignal, ComputeError, ComputeHandle, ModelHandle, ModelRequest, ResponseFormat,
 };
 use crate::kernel::prompt::practice_generate_system_prompt;
-use crate::plugin::vision::map_model_error;
+use super::map_model_error;
 
 use super::geometry_check::verify_diagram;
 use super::templates::{Difficulty, PracticeItem};
@@ -67,7 +66,7 @@ pub async fn model_generate(
         ));
     }
     let user = Message::user(lines.join("\n"));
-    let mut request = ModelRequest::chat(ModelKind::Main, vec![system, user]);
+    let mut request = ModelRequest::chat(vec![system, user]);
     request.response_format = Some(ResponseFormat::JsonSchema {
         name: "practice_generate".into(),
         schema: serde_json::to_value(schemars::schema_for!(GeneratedItem)).unwrap_or_default(),

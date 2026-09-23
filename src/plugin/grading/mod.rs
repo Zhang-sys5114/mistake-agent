@@ -1,8 +1,8 @@
-//! grading 插件（任务三·场景一）：上传作业 → 读图（vision::read）→ 判分 → 错题归档。
+//! grading 插件（任务三·场景一）：模型读图判分 → `grading::upload` 归档错题。
 //!
-//! 插件信息：namespace = grading，requires = [Storage, Model]
-//! tools = [upload（判分归档）, list（错题本）]；看图（vision::read）独立成 vision 插件。
-//! 实现拆分（Linux 内核风格）：`params.rs` 参数与结果 schema / `core.rs` 判分·归档 handler
+//! 插件信息：namespace = grading，requires = [Storage]（ADR-0046 后不再调模型）
+//! tools = [upload（归档模型判分结果）, list（错题本）]。
+//! 实现拆分（Linux 内核风格）：`params.rs` 参数与结果 schema / `core.rs` 归档 handler
 
 use serde_json::{Value, json};
 
@@ -27,10 +27,7 @@ impl UserPlugin for GradingPlugin {
             namespace: "grading".into(),
             // 默认懒加载：工具列表（model_tools）读 info 声明，第一轮即可见；
             // 模型 wire 调用命中未加载插件时由 resolve_wire 触发懒加载（ADR-0003）。
-            requires: vec![
-                crate::kernel::plugin::services::ServiceId::Storage,
-                crate::kernel::plugin::services::ServiceId::Model,
-            ],
+            requires: vec![crate::kernel::plugin::services::ServiceId::Storage],
             tools: vec![
                 ToolDef {
                     name: "upload".into(),
@@ -38,11 +35,11 @@ impl UserPlugin for GradingPlugin {
                     title: Some("上传作业批改".into()),
                     group: Some("批改".into()),
                     description:
-                        "上传作业图片或文本型 PDF，自动识别题目与作答、判分、把错题归档进错题本。文件由应用「选择作业文件」按钮上传后自动暂存，file 参数使用消息里给出的暂存路径。"
+                        "把逐题判分结果（items）归档进错题本：直接阅读本次消息里的作业图片/PDF 正文后，为每道题填写 number/question/student_answer/subject/reference_answer/correct/score/total/knowledge_point/analysis，错题会自动落库。题干必须逐字保留原文，不要概括或漏小问。"
                             .into(),
                     params: schemars::schema_for!(UploadParams),
                     policy: CallerPolicy::UserAndModel,
-                    timeout: Some(180),
+                    timeout: Some(60),
                     icon: Some("mdi:upload".into()),
                 },
                 ToolDef {
@@ -105,19 +102,13 @@ impl UserPlugin for GradingPlugin {
             .storage()
             .cloned()
             .ok_or_else(|| PluginError::Internal("缺少 Storage 句柄".into()))?;
-        let model = ctx
-            .handles
-            .model()
-            .cloned()
-            .ok_or_else(|| PluginError::Internal("缺少 Model 句柄".into()))?;
 
         let storage_upload = storage.clone();
         ctx.registrar.tool(
             "upload",
             std::sync::Arc::new(move |call_ctx: &ToolCallContext, params: Value| {
                 let storage = storage_upload.clone();
-                let model = model.clone();
-                Box::pin(async move { upload_handler(call_ctx, params, storage, model).await })
+                Box::pin(async move { upload_handler(call_ctx, params, storage).await })
             }),
         )?;
 

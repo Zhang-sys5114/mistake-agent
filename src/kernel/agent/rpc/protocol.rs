@@ -13,13 +13,16 @@ pub enum Method {
     /// 通用子集：新 Agent 直接可用，不依赖使用方业务。
     SendUserMessage {
         text: String,
+        /// 前端展示文本（与 `text` 不同时使用，如 PDF 正文并入 `text` 后的干净展示）。
+        #[serde(default)]
+        display_text: Option<String>,
         /// 显式工具调用：强制 LLM 首轮调用指定工具（不绕过 LLM）。
         #[serde(default)]
         force_tool: Option<ForcedToolRequest>,
-        /// 暂存文件路径列表（mistake-agent- 前缀临时路径）：模型读图/判分时作为 file 参数。
+        /// 兼容字段（已弃用，ADR-0046 后附件走 `asset` 引用直入上下文）。
         #[serde(default)]
         file: Vec<String>,
-        /// 持久附件列表（数据根目录 uploads/ 副本）：落进消息文本供前端展示。
+        /// 持久附件列表（数据根目录 uploads/ 副本）：作为图片引用存入消息并直入模型上下文。
         #[serde(default)]
         asset: Vec<AttachmentInfo>,
     },

@@ -32,7 +32,7 @@ Mistake Agent v2：面向中学生的本地错题管理 + 辅助学习 Agent（W
 | 改用户插件（plugin/） | PROJECT.md §3、§12 + docs/adr/0002、0003 | 五场景、命名规范、入口点、注册校验 |
 | 改 practice 出题（变式/真题/几何校验） | docs/variants.md + PROJECT.md §3、§9 | 出题架构与落地状态、未落地项 |
 | 改 GUI / 协议 | PROJECT.md §5 通信 + docs/adr/0013 | trigger_command 唯一命令通道、事件流 |
-| 改模型 / 设置 | PROJECT.md §6 + docs/adr/0015、0019 | 双模型配置、用户独占写、明文 key 取舍 |
+| 改模型 / 设置 | PROJECT.md §6 + docs/adr/0015、0019、0045 | 单模型配置、用户独占写、明文 key 取舍 |
 | 改审计 / 日志 | PROJECT.md §5 审计日志 + docs/adr/0017、0018 | 全覆盖审计、分级日志、脱敏 |
 | 抄开源代码 | 该项目 LICENSE + PROJECT.md §2 开源策略 | 保留许可声明、注明来源；机制可抄，业务自写 |
 | 写测试 | PROJECT.md §10 里程碑验收标准 + 各模块 tests | 按验收标准补测试 |
@@ -53,7 +53,7 @@ cargo fmt --check
 - CallerPolicy：`UserAndModel` 工具必须配同名用户入口；`UserOnly` 不得进入模型工具列表
 - 入口点命名 `namespace::tool`：插件只写短名，kernel 拼全名，撞名由注册表拒绝
 - 审计默认全覆盖、日志分级、敏感值（API key 等）脱敏
-- 模型：主模型 deepseek-v4-flash；视觉模型 qwen3-VL（SiliconFlow）；settings 配 API_URL/API_KEY
+- 模型：单份 DeepSeek 配置（默认 deepseek-flash，Responses API 含图片输入）；settings 配 API_URL/API_KEY/model/transport
 - 抄开源代码必须保留原许可证声明并在文档注明来源
 
 ## 开发约定

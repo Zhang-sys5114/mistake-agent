@@ -1,6 +1,6 @@
-//! model 服务适配器（ADR-0020）：
-//! - 主模型：DeepSeek Responses API（POST /responses，SSE 语义事件，无状态）；
-//! - 视觉模型：SiliconFlow Chat Completions（image_url base64 直读，仅提取内容不判分）。
+//! model 服务适配器（ADR-0020/0045）：
+//! - 主链路：DeepSeek Responses API（POST /responses，SSE 语义事件，无状态，支持 input_image）；
+//! - 兼容回退：Ollama 等不兼容端点经 transport=chat_completions 走 Chat Completions。
 
 use std::error::Error;
 
@@ -19,13 +19,13 @@ mod routing;
 pub use chat::ChatCompletionsModelService;
 pub use responses::ResponsesModelService;
 pub use routing::{
-    LiveSettingsModelService, RoutingModelService, build_main_service, build_vision_service,
+    AttachmentResolvingModelService, LiveSettingsModelService, build_main_service,
 };
 
 // ---------- 内核插件入口（ADR-0035）：model 服务身份声明 ----------
 //
-// 服务实例（双模型 LiveSettingsModelService + RoutingModelService）由 Kernel::new
-// 引导构造（依赖 settings 热更新），注册表侧只声明 ServiceId 提供与 namespace 占用。
+// 服务实例（LiveSettingsModelService）由 Kernel::new 引导构造（依赖 settings 热更新），
+// 注册表侧只声明 ServiceId 提供与 namespace 占用。
 
 use crate::kernel::context::KernelContext;
 use crate::kernel::contract::{Info, PluginError};
@@ -86,7 +86,8 @@ pub(crate) fn tool_to_function(t: &ToolSchema) -> Value {
 }
 
 /// 内部 Message 树 → Responses API input items。
-/// ToolCall 一条消息展开为 function_call + function_call_output（call_id = 消息 id）。
+/// ToolCall 一条消息展开为 function_call + function_call_output（call_id = 消息 id）；
+/// User 附件展开为 `input_image`（base64 data URL），由 deepseek-flash 直接理解。
 pub(crate) fn messages_to_responses_input(messages: &[Message]) -> Result<Vec<Value>, ModelError> {
     messages_to_responses_input_impl(messages, true)
 }
@@ -110,13 +111,28 @@ fn messages_to_responses_input_impl(
     let mut calls_since_reasoning = 0usize;
     for msg in messages {
         match &msg.kind {
-            MessageKind::User { text, .. } => {
+            MessageKind::User {
+                text,
+                attachments,
+                ..
+            } => {
                 pending_reasoning = None;
                 calls_since_reasoning = 0;
+                let mut content: Vec<Value> = Vec::new();
+                for att in attachments {
+                    content.push(json!({
+                        "type": "input_image",
+                        "image_url": format!("data:{};base64,{}", att.mime, att.data_base64),
+                        "detail": "high",
+                    }));
+                }
+                if !text.is_empty() || content.is_empty() {
+                    content.push(json!({"type": "input_text", "text": text}));
+                }
                 items.push(json!({
                     "type": "message",
                     "role": "user",
-                    "content": [{"type": "input_text", "text": text}],
+                    "content": content,
                 }));
             }
             MessageKind::Assistant { text } => items.push(json!({
@@ -295,6 +311,25 @@ pub(crate) fn reqwest_chain(e: &reqwest::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::message::Attachment;
+
+    #[test]
+    fn responses_input_expands_user_attachments_as_input_image() {
+        let mut msg = Message::user("看图");
+        if let MessageKind::User { attachments, .. } = &mut msg.kind {
+            attachments.push(Attachment {
+                mime: "image/png".into(),
+                data_base64: "AAAA".into(),
+            });
+        }
+        let items = messages_to_responses_input(&[msg]).unwrap();
+        assert_eq!(items.len(), 1);
+        let content = items[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "input_image");
+        assert_eq!(content[0]["image_url"], "data:image/png;base64,AAAA");
+        assert_eq!(content[1]["type"], "input_text");
+        assert_eq!(content[1]["text"], "看图");
+    }
 
     #[test]
     fn reasoning_item_replays_text_with_id() {

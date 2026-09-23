@@ -144,7 +144,12 @@ export function renderPath(view, opts = {}) {
       const kind = m.kind || {};
       if (kind.kind === "user") {
         const raw = kind.text || "";
-        const attachments = parseAttachments(raw);
+        // ADR-0046：附件以路径引用持久化（attachment_refs），历史回放据此渲染；
+        // 旧数据回退解析文本里的「附件：路径|名称」标记。
+        const refs = kind.attachment_refs || [];
+        const attachments = refs.length
+          ? refs.map((r) => ({ path: r.name, name: r.display_name || r.name }))
+          : parseAttachments(raw);
         let shown = (kind.display_text || raw)
           .replace(ATTACH_RE, "")
           .replace(TMP_PATH_RE, "")

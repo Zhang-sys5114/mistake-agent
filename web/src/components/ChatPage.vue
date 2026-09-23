@@ -179,7 +179,7 @@ function closeOverflow() {
 const quickActions = [
   { id: "upload", label: "上传图片/PDF", desc: "看图提问、讲解或批改归档", icon: "mdi:upload", action: "upload" },
   { id: "mistakes", label: "查看错题本", desc: "按学科与知识点回顾错因", icon: "mdi:format-list-bulleted", action: "navigate" },
-  { id: "settings", label: "配置模型", desc: "设置主模型与视觉模型密钥", icon: "mdi:cog-outline", action: "navigate" },
+  { id: "settings", label: "配置模型", desc: "设置 DeepSeek 模型密钥", icon: "mdi:cog-outline", action: "navigate" },
 ];
 
 function onQuickAction(a) {
@@ -570,11 +570,14 @@ async function sendMessage() {
     path: a.asset_path,
     name: a.name,
   }));
+  // PDF 正文由后端抽取（PickResult.text），并入模型可见文本；展示仍用用户原文。
+  const pdfText = pendingAttachments.value
+    .map((a) => a.text)
+    .filter((t) => t && t.trim())
+    .join("\n\n");
+  const sendText = pdfText ? (text ? `${text}\n\n${pdfText}` : pdfText) : text;
   const extra = pendingAttachments.value.length
-    ? {
-        file: pendingAttachments.value.map((a) => a.temp_path),
-        asset: attachments,
-      }
+    ? { asset: attachments, display_text: text || "我上传了图片/PDF" }
     : {};
   if (armedTool.value) {
     const tool = armedTool.value;
@@ -612,7 +615,7 @@ async function sendMessage() {
   busy.value = true;
   setStatus(true, "正在回答");
   try {
-    pendingSendId = await props.kernel.sendLine("send_user_message", { text, ...extra });
+    pendingSendId = await props.kernel.sendLine("send_user_message", { text: sendText, ...extra });
   } catch (err) {
     addBubble({ type: "error", text: `发送失败：${err}` });
     busy.value = false;
@@ -634,9 +637,9 @@ async function pickHomework() {
 /** 附件挂起（选文件 / 粘截图共用）：不立即发送，输入区上方预览，发送时一起带上。 */
 function addPendingAttachment(picked) {
   const item = {
-    temp_path: picked.temp_path,
     asset_path: picked.asset_path,
     name: picked.name,
+    text: picked.text || null,
     preview: null,
   };
   pendingAttachments.value.push(item);
@@ -650,7 +653,7 @@ function addPendingAttachment(picked) {
   inputEl.value?.focus();
 }
 
-/** 剪贴板粘贴截图（Ctrl+V / 右键粘贴）：图片直接进入附件暂存，复用 vision::read → 判分管线。 */
+/** 剪贴板粘贴截图（Ctrl+V / 右键粘贴）：图片写入 uploads/，发送时随消息直入模型上下文（ADR-0046）。 */
 async function onPaste(event) {
   const items = event.clipboardData?.items;
   if (!items || !items.length) return;

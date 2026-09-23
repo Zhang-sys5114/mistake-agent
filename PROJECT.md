@@ -1,6 +1,6 @@
 # Mistake Agent v2 — 项目总览
 
-> 本文档自包含：只看这一份文件即可了解项目全貌、技术决策与分工方式。详细决策留痕见 `docs/adr/`（43 条 ADR）与 `CONTEXT.md`（术语表），但理解本项目不要求先读它们。
+> 本文档自包含：只看这一份文件即可了解项目全貌、技术决策与分工方式。详细决策留痕见 `docs/adr/`（46 条 ADR）与 `CONTEXT.md`（术语表），但理解本项目不要求先读它们。
 
 ## 1. 项目一句话
 
@@ -17,13 +17,13 @@
 
 | 场景 | 一句话 | 主要入口 |
 |---|---|---|
-| 1. 上传作业 / 自动批改 | 图片或 PDF 上传 → 视觉模型理解图片（`vision::read`：作业转写 / 图片描述）→ 模型按内容与用户意图决定：讲解、描述或判分归档 | `vision::read` + `grading::*` |
+| 1. 上传作业 / 自动批改 | 图片或文本型 PDF 上传 → 图片直接进模型上下文（PDF 抽文）→ 模型按内容与用户意图决定：讲解、描述或逐题判分并调 `grading::upload` 归档 | `grading::*` |
 | 2. 薄弱点定位 / 分层练习 | 基于错题定位知识漏洞 → 基础补漏 → 变式 → 拔高 → 真题 | `practice::generate` / `practice::gaps` / `practice::check` |
 | 3. 多周期复盘 | 按日 / 周 / 单元 / 月考 / 学期生成可视化报告 | `report::*` |
 | 4. 阶段性考核 | 按薄弱点自动组卷、限时作答、判分、掌握度判定 | `exam::*` |
 | 5. 长效追踪 | 知识点图谱、掌握度状态、7/14/30 天强制重测 | `tracking::*` |
 
-辅助能力：`vision::read`（图片理解：作业转写 / 内容描述）、`compute::verify`（数学/物理验算，跑 Python 代码验证答案）、`memory::*`（跨会话记忆）。
+辅助能力：`compute::verify`（数学/物理验算，跑 Python 代码验证答案）、`memory::*`（跨会话记忆）。
 
 ## 4. 总体架构：OS 式三层
 
@@ -42,10 +42,10 @@
 ├─────────────────────────────────────────────────────┤
 │ 内核插件（信任边界内，处理敏感能力）                  │
 │  storage 会话/错题/审计 · compute 验算契约             │
-│  memory 记忆路由 · model 模型服务（双模型）           │
+│  memory 记忆路由 · model 模型服务（单模型）           │
 ├─────────────────────────────────────────────────────┤
 │ 用户插件（业务，只见受限服务句柄）                    │
-│  vision · grading · practice · report               │
+│  grading · practice · report · exam · tracking      │
 │  exam · tracking                                    │
 └─────────────────────────────────────────────────────┘
 ```
@@ -118,38 +118,38 @@ GUI → kernel：`send_user_message`、`trigger_command(entry, params)`、`edit_
 └── settings.json     配置（用户独占写）
 ```
 
-**模型方案（双模型，均 OpenAI 兼容端点）**：
+**模型方案（单模型 DeepSeek，OpenAI 兼容端点）**：
 
 ```json
 {
   "log_level": "INFO",
   "english_mode": false,
-  "main_model":  { "api_url": "https://api.deepseek.com",  "api_key": "...", "transport": "responses" },
-  "vision_model":{ "api_url": "https://api.siliconflow.cn/v1", "api_key": "..." }
+  "main_model": { "api_url": "https://api.deepseek.com", "api_key": "...", "model": "deepseek-flash", "transport": "responses" }
 }
 ```
 
-- 主模型：deepseek-v4-flash，负责调度与对话（agent loop）；默认经 **DeepSeek Responses API**（`POST /responses`，官方 2026-08 起支持、为 agent 优化）接入，`transport: "responses"`；Ollama 等不兼容端点可配 `"chat_completions"`。
-- 视觉模型：硅基流动（SiliconFlow）的 qwen3-VL，负责 OCR / 图片理解（grading 插件经 ModelHandle 调用，模型选择 `Main | Vision`）；Responses API 不支持图片输入，视觉模型固定走 Chat Completions。
+- 单份配置承担**主对话 + 调度/摘要 + 图片理解**：模型默认 `deepseek-flash`，负责 agent loop 调度与对话；默认经 **DeepSeek Responses API**（`POST /responses`，官方 2026-08 起支持、为 agent 优化）接入，`transport: "responses"`；Ollama 等不兼容端点可配 `"chat_completions"`。
+- 图片理解不需要独立视觉端点，也**不再有独立读图工具**：上传图片以 `uploads/` 路径引用存进用户消息，请求构建时解析为 `input_image`（base64 data URL）直入上下文，与主链路共用同一配置；PDF 在 GUI 边界抽文（ADR-0046）。
+- `vision_model` 字段仅为兼容旧 `settings.json` 保留、运行时不再读取（ADR-0045）。
 
 **Responses API 速览（详见 ADR-0020）**：
 
 | 项 | 现状 |
 |---|---|
 | Endpoint | `POST https://api.deepseek.com/responses`（base_url 与 Chat Completions 相同） |
-| 模型支持 | 仅 `deepseek-v4-flash`；v4-pro 官方计划 2026-08 初支持 |
+| 模型支持 | `deepseek-flash`（V4.1-Flash）/ `deepseek-v4-pro`；旧名 `deepseek-v4-flash` 已退役 |
 | 会话状态 | 无状态：不支持 `previous_response_id`/`conversation`/`store`，每回合发全量历史 |
 | 流式 | SSE 语义事件，`response.completed`/`incomplete`/`failed` 结束，无 `data: [DONE]` |
 | 思考模式 | 默认开启（`reasoning` 可调 effort）；thinking 下 `temperature`/`top_p` 无效 |
 | 工具 | `function` / `web_search`；function 名限 `^[a-zA-Z0-9_-]+$` → 内部 `namespace::tool` 经 wire name 映射（`::`→`__`） |
 | 并行工具调用 | 恒开启（参数被忽略）；v2 loop 仍串行执行（ADR-0010） |
-| 图片输入 | 不支持（占位替换）→ 视觉模型走 Chat Completions |
-| 来源 | [官方指南（英）](https://api-docs.deepseek.com/guides/responses_api/) / [（中）](https://api-docs.deepseek.com/zh-cn/guides/responses_api/)，2026-08-04 核对 |
+| 图片输入 | 支持 `input_image`（base64 data URL 或 http(s) URL；仅 user/developer 消息与 function_call_output） |
+| 来源 | [官方指南（英）](https://api-docs.deepseek.com/guides/responses_api/) / [（中）](https://api-docs.deepseek.com/zh-cn/guides/responses_api/)，2026-09-23 核对 |
 
 - 会话新建归用户（ADR-0044：`create_session` RPC；模型侧决策已全部删除）；交接摘要与上下文压缩摘要由 `LlmSummarizer` 生成（≤300 字，保留错题 id/知识点/未完成事项，模型错误降级为计数摘要），两个调用方共享同一实例。
 - 可选 Ollama 本地模型（离线场景，不填 key）。
 - 首次运行由设置向导引导填写。
-- 设置热更新：`set_settings` 落盘后双模型服务热替换（LiveSettingsModelService），下一轮模型调用即用新端点/模型/key；settings.json 仍为唯一持久事实。
+- 设置热更新：`set_settings` 落盘后模型服务热替换（LiveSettingsModelService），下一轮模型调用即用新端点/模型/key；settings.json 仍为唯一持久事实。
 
 ## 7. 技术栈
 
@@ -160,7 +160,7 @@ GUI → kernel：`send_user_message`、`trigger_command(entry, params)`、`edit_
 | 通信 | 进程内 RPC（Tauri Channel/命令桥接，standalone 单二进制） |
 | 存储 | 本地文件：JSONL（会话/审计/记忆）+ 错题本 JSON |
 | 验算 | Pyodide（WASM Python + SymPy/NumPy，跑在 WebView） |
-| LLM | 主模型走 DeepSeek Responses API；视觉模型走 OpenAI 兼容 Chat Completions（SiliconFlow / Ollama） |
+| LLM | DeepSeek Responses API（默认，含图片输入）；Ollama 等 OpenAI 兼容端点可回退 Chat Completions |
 | 参数 schema | serde + schemars（JSON Schema 派生） |
 | 安装包 | Tauri bundler / NSIS（Windows setup.exe） |
 
@@ -188,7 +188,7 @@ mistake-agent/
 │   │   ├── contract.rs  context.rs
 │   │   └── events.rs  audit.rs  logger.rs  message.rs  prompt.rs  settings.rs
 │   └── plugin.rs                 ← 用户插件入口（mod plugin;）
-│       └── plugin/               ← 用户插件（hello/ vision/ grading/ practice/ report/ exam/ tracking/）
+│       └── plugin/               ← 用户插件（hello/ grading/ practice/ report/ exam/ tracking/）
 ├── web/                          ← GUI 前端资源（Tauri 加载）
 └── assets/
 ```
@@ -199,7 +199,7 @@ mistake-agent/
 
 ## 9. 当前状态
 
-- **M1–M6 全部完成**（含 Windows 打包实测：`错题 Agent_0.1.0_x64-setup.exe` 在 Windows 环境安装运行通过），设计文档 43 条 ADR（0001–0043）+ 术语表（CONTEXT.md）。
+- **M1–M6 全部完成**（含 Windows 打包实测：`错题 Agent_0.1.0_x64-setup.exe` 在 Windows 环境安装运行通过），设计文档 46 条 ADR（0001–0043）+ 术语表（CONTEXT.md）。
 - **磁盘 IO 铁律 + 数据运行时化落地**（2026-08-10，ADR-0042）：`DomainIo`（数据根目录域内文件：域枚举 + canonicalize 兜底 + 原子写 + 审计）+ `TmpIo`（系统 temp 暂存：`mistake-agent-` 前缀白名单）+ `RelPath`（类型层无目录遍历，fail-closed）；memory 收编（中文路径 base64url 段编码经 DomainIo 落盘）；vision/grading 附件读写、practice 真题池全经 StorageHandle 语义方法（插件零文件句柄）；`data/` 子目录 + 真题池运行时化（`gaokao_pool.json` 文件优先、内置种子兜底，`read_pool_json` 真实链路测试）；verify_geometry.py 维持 include_str!（执行代码非数据）。
 - **指令加载落地**（2026-08-10）：数据根 `AGENTS.md`（教学规则，家长/老师可编辑）全文进主模型系统提示（静态基底之后、debug 段之前，`load_agents_md`，缺失/损坏/超限 64KB 回退静态文本，路径仅由数据根拼接固定文件名）；文件保存即生效（无缓存）；设置页「教学规则」卡片经 `get_rules_status` 展示加载状态 + `open_rules_file` 一键打开编辑。
 - kernel：注册表/两段式契约（用户插件 UserPlugin + 内核插件 KernelPlugin，ADR-0035）/dispatch/loop/RPC/session 调度全链路；四服务全部生产实现——storage（文件持久化：会话 JSONL/错题 JSON/审计 JSONL 轮转）、memory（文件持久化 + MemoryHandle 事件/审计）、model（Responses API + Chat Completions，LiveSettingsModelService 热更新）、compute（BridgeCompute → GUI Pyodide）。
@@ -210,12 +210,12 @@ mistake-agent/
 - 聊天页上下文缓存命中率（ADR-0033）：get_cache_stats 按会话 + 全局聚合主模型回合 usage（Responses `cached_tokens` / Chat Completions `prompt_cache_*`）；真实链路实测命中率 97.3%（命中 4864 / 未命中 190 tokens）。
 - ~~会话切换防污染（ADR-0034）：session::switch 控制消息不落会话树、不随历史携带~~（**ADR-0044 已下线**：`session::switch` 工具与树内分叉机制整体删除，该污染类别在结构上不再可能存在）。
 - Pyodide 验算执行端完整化：numpy/sympy（符号计算/物理单位）离线打包（`npm run fetch:pyodide` 预热，vite 构建校验存在性）；前端自检真实执行解方程/求导/积分/单位换算/运动学/numpy；live_api 覆盖 kernel→桥→回执→模型续答全链路。
-- 用户插件 7 个：hello、vision（看图理解：上传→读图→模型决定讲解/描述或判分归档）、grading（场景一：判分归档，输出 subject/reference_answer，含 get/update/remove/remove_many 错题管理命令，ADR-0038）、practice（场景二：生成/gaps/check，含智能出题与几何对拍）、report、exam、tracking；内核插件 4 个（storage/memory/compute/model），`memory::*`、`compute::verify` 由内核模块经 KernelPlugin 契约注册（ADR-0035）——五个场景工具均可从会话内触达。
+- 用户插件 6 个：hello、grading（场景一：图片直入上下文 → 模型判分 → 归档 `grading::upload`，含 get/update/remove/remove_many 错题管理命令，ADR-0038/0046）、practice（场景二：生成/gaps/check，含智能出题与几何对拍）、report、exam、tracking；内核插件 4 个（storage/memory/compute/model），`memory::*`、`compute::verify` 由内核模块经 KernelPlugin 契约注册（ADR-0035）——五个场景工具均可从会话内触达。
 - 场景二 practice 智能出题全链路落地（2026-08-09，设计见 docs/variants.md）：确定性模板库 15 个初高中知识点（几何模板带 diagram_spec 与前端渲染器同源协议）+ 高考真题池（data/gaokao_pool.json include_str! 编译期嵌入，difficulty=exam 走池内抽取）+ LLM 自由出题（json_schema 强约束，模板未命中时）；LLM 生成的几何图经 compute::verify（verify_geometry.py）做存在性/自洽性对拍，失败注入 prompt 重出（连续 3 次停，执行端不可用降级放行）；practice::check 把练习记录落 memory（practice/history），generate 出题前读近 30 天已掌握集合避重复（prompt 注入避开清单 + 真题池过滤）。
-- 场景一真实链路复验通过（2026-08-04）：图片/文本 PDF → Qwen3-VL OCR → deepseek-v4-flash（Responses API json_schema）判分 → 错题归档；assistant 消息落盘与 usage 解析已修复并有 live_api 断言。
+- 场景一真实链路复验通过（2026-08-04）：图片/文本 PDF → `deepseek-flash` 图片理解（Responses API `input_image`）→ 同模型 json_schema 判分 → 错题归档；assistant 消息落盘与 usage 解析已修复并有 live_api 断言。
 - Tauri GUI 正式化（Vue 3 + Vite，按 ui-ux-pro-max 设计系统）：聊天/错题本/会话历史/设置四页 + **OOBE 首次引导**（test_connection 连通性自检）；思维链默认折叠、流式打字机、工具进度、停止、消息树编辑与分支切换、Pyodide 验算执行端（本地 WASM）、Iconify 图标、Markdown+KaTeX+DOMPurify 防 XSS、附件（图片/PDF 持久展示）、错题本搜索/排序。
 - 英语练习模式（2026-08-15，ADR-0043）：settings.json `english_mode` 开关，开启后主对话/判分/出题/即时批改/图片理解/会话决策/摘要全链路模型输出切英文，GUI 文案保持中文；数据根 `AGENTS.md` 中文教学规则照常注入（不翻译），由静态层英文人设（B+C 演法：全听懂中文、假装只抓英文关键词、永远只回英文并用英文引导组句）保证输出全英文。
-- 设置页余额卡片（`check_balance` RPC）：DeepSeek `/user/balance` + SiliconFlow `/user/info` 真实查询，只读不落盘（ADR-0031）。
+- 设置页余额卡片（`check_balance` RPC）：DeepSeek `/user/balance` 真实查询，只读不落盘（ADR-0031，ADR-0045 后仅 DeepSeek）。
 - **Standalone**：kernel 内嵌 GUI 进程，mistake-agent 单二进制即可运行（sidecar 已彻底移除）。
 - 验收命令：`cd web && npm install && npm run fetch:pyodide && npm run build`；`cd web && npm run check:pyodide`；`cargo test`（146 项单元）；`cargo test --test live_api -- --ignored`（真实 API：hello 落盘+usage、三套样例、memory 往返、reasoning 回传回归 repro_reasoning、用户新建会话+交接摘要、compute::verify 全链路）；`cargo run --bin mistake-agent`（GUI）。
 
@@ -225,9 +225,9 @@ mistake-agent/
 |---|---|---|
 | M1 | 单 crate 骨架 + kernel 模块 | ✅ 完成：trait、注册表、dispatch、loop，hello 回合真实跑通 |
 | M1.5 | kernel 的 session 模块 | ✅ 完成：生命周期、会话交接摘要（LlmSummarizer）；~~切换决策、会话分叉~~ 已由 ADR-0044 下线（改用户手动新建会话） |
-| M2 | services：storage / model / memory | ✅ 完成：会话/审计文件持久化、双模型可调用（热更新）、记忆目录可读写 |
+| M2 | services：storage / model / memory | ✅ 完成：会话/审计文件持久化、模型可调用（热更新）、记忆目录可读写 |
 | M3 | RPC + Tauri 壳 | ✅ 完成：GUI ↔ kernel 进程内 RPC 闭环（standalone） |
-| M4 | 五个插件 + compute::verify | ✅ 完成：7 用户插件 + 5 内核插件注册；场景一全链路 + Pyodide 验算桥接 |
+| M4 | 五个插件 + compute::verify | ✅ 完成：6 用户插件 + 5 内核插件注册；场景一全链路 + Pyodide 验算桥接 |
 | M5 | 消息树 / 记忆路由 / 设置向导 / 审计日志 | ✅ 完成：编辑/切分支、memory 工具、设置页、审计补全 |
 | M6 | Windows 打包 + 测试 + 文档 | ✅ 完成：142 单测 + 真实 API 链路 + 文档同步；Windows setup.exe 安装运行实测通过（2026-08-09） |
 
@@ -237,7 +237,7 @@ mistake-agent/
 
 | 阶段 | 内容 | 关键点 |
 |---|---|---|
-| 近期（桌面输入增强） | 剪贴板粘贴截图（Ctrl+V）；摄像头拍题 | 走现有附件暂存管线（vision__read → 判分归档）；WebView2 摄像头权限 |
+| 近期（桌面输入增强） | 剪贴板粘贴截图（Ctrl+V）；摄像头拍题 | 图片直入模型上下文（ADR-0046）；WebView2 摄像头权限 |
 | 中期（Android 手机/平板） | Tauri v2 Android target：移动壳 + 触控/窄屏响应式 + 相册/摄像头/剪贴板输入 + Pyodide 移动端验证 | 移动存储路径与权限模型、离线包体积、性能；Windows 装 Android SDK 即可构建，不依赖 macOS |
 | 长期（iOS / iPadOS） | Android 落地后追加 iOS/iPadOS target | 本机无 macOS：构建/签名/发布走云 macOS（GitHub Actions macOS runner——公开仓库免费额度，优先；备选 Codemagic / MacStadium）、Apple 权限模型 |
 
@@ -246,7 +246,7 @@ mistake-agent/
 | 角色 | 负责 | 对应里程碑 |
 |---|---|---|
 | A. Kernel 工程师 ×1-2 | kernel crate：trait、loop、dispatch、注册表、会话调度、RPC、护栏、审计 | M1、M1.5、M3 内核侧 |
-| B. 服务工程师 ×1 | storage（会话/审计/错题）、model（双模型）、memory 路由 | M2 |
+| B. 服务工程师 ×1 | storage（会话/审计/错题）、model（单模型）、memory 路由 | M2 |
 | C. 插件工程师 ×1-2 | grading（含 OCR 流程）优先，其余四个随后；compute::verify 契约 | M4 |
 | D. GUI 工程师 ×1 | Tauri 壳、聊天/消息树 UI、设置向导、事件渲染 | M3、M5 |
 | E. 测试/打包（可兼任） | Windows 安装包、端到端样例、文档 | M6 |
@@ -261,7 +261,7 @@ mistake-agent/
 - 三类入口点：**Tool**（LLM 调度）、**Command**（GUI/用户调度）、**Event**（kernel 生命周期调度）。
 - 内核服务：`ServiceId::{Storage, Memory, Compute, Model}`；内核插件经 `KernelPlugin` 两段式契约注册（info 声明 namespace/provides/入口点，register 绑定 handler，ADR-0035）。
 - 会话调度是独立内核级模块（kernel-session），**不占 ServiceId**；会话新建由用户发起（ADR-0044，`create_session` RPC），无模型侧决策。
-- 工具列表示例：`vision::read / grading::upload / grading::list / practice::generate / practice::gaps / practice::check / report::weekly / exam::compose / tracking::checkin / compute::verify / memory::save / memory::show / memory::remove`；会话历史经 RPC `list_sessions / read_session` 提供（不注册为模型工具）。
+- 工具列表示例：`grading::upload / grading::list / practice::generate / practice::gaps / practice::check / report::weekly / exam::compose / tracking::checkin / compute::verify / memory::save / memory::show / memory::remove`；会话历史经 RPC `list_sessions / read_session` 提供（不注册为模型工具）。
 
 ## 13. 术语表（浓缩）
 
@@ -283,7 +283,7 @@ mistake-agent/
 - **Compaction**：活跃路径旧消息的上下文摘要（原文保留）。
 - **Audit / Diagnostic log**：操作事实记录（默认全覆盖）/ 分级诊断日志。
 - **Data root**：`~/Documents/.mistake-agent`，一切数据所在。
-- **Main model / Vision model**：deepseek-v4-flash / SiliconFlow qwen3-VL。
+- **Model（模型）**：单份 DeepSeek 配置（v2 默认 `deepseek-flash`，经 Responses API 接入）承担主对话、调度与图片理解；视觉端点已退役（ADR-0045）。
 - **ModelHandle**：注入插件的受限模型服务句柄（带超时/abort/审计）。
 - **Command channel**：trigger_command，GUI 触发命令的唯一通道。
 - **Compute backend**：验算执行端（v2 为 WebView 内 Pyodide）。

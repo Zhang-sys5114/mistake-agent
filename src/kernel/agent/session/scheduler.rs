@@ -82,6 +82,17 @@ impl SessionScheduler {
         text: &str,
         display_text: Option<&str>,
     ) -> Result<TurnContext, SchedulerError> {
+        self.on_new_message_with_attachments(text, display_text, Vec::new())
+            .await
+    }
+
+    /// 带图片附件引用的新消息（ADR-0046：图片随消息进入上下文）。
+    pub async fn on_new_message_with_attachments(
+        &self,
+        text: &str,
+        display_text: Option<&str>,
+        attachment_refs: Vec<crate::kernel::message::AttachmentRef>,
+    ) -> Result<TurnContext, SchedulerError> {
         let now = self.clock.now();
         let metas = self.store.list_sessions().await?;
         let active = metas
@@ -98,7 +109,9 @@ impl SessionScheduler {
                     now,
                 )
                 .await?;
-            return self.append_user(&to, text, display_text).await;
+            return self
+                .append_user(&to, text, display_text, &attachment_refs)
+                .await;
         };
 
         let idle = now - meta.last_activity_at
@@ -110,7 +123,8 @@ impl SessionScheduler {
                 idle_seconds: (now - meta.last_activity_at).num_seconds(),
             });
         }
-        self.continue_in(&meta, text, display_text, now).await
+        self.continue_in(&meta, text, display_text, &attachment_refs, now)
+            .await
     }
 
     /// 在活动会话中追加用户消息并推进 active_path。
@@ -119,10 +133,15 @@ impl SessionScheduler {
         meta: &SessionMeta,
         text: &str,
         display_text: Option<&str>,
+        attachment_refs: &[crate::kernel::message::AttachmentRef],
         now: DateTime<Utc>,
     ) -> Result<TurnContext, SchedulerError> {
         self.store.set_last_activity(&meta.key, now).await?;
-        let mut user_msg = Message::user_with_display(text, display_text.map(str::to_string));
+        let mut user_msg = Message::user_with_attachments(
+            text,
+            display_text.map(str::to_string),
+            attachment_refs.to_vec(),
+        );
         let path = self.store.read_path(&meta.key).await?;
         user_msg.parent_id = path.last().map(|m| m.id);
         self.store.append_message(&meta.key, &user_msg).await?;
@@ -141,8 +160,13 @@ impl SessionScheduler {
         key: &SessionKey,
         text: &str,
         display_text: Option<&str>,
+        attachment_refs: &[crate::kernel::message::AttachmentRef],
     ) -> Result<TurnContext, SchedulerError> {
-        let mut user_msg = Message::user_with_display(text, display_text.map(str::to_string));
+        let mut user_msg = Message::user_with_attachments(
+            text,
+            display_text.map(str::to_string),
+            attachment_refs.to_vec(),
+        );
         let path = self.store.read_path(key).await?;
         user_msg.parent_id = path.last().map(|m| m.id);
         self.store.append_message(key, &user_msg).await?;

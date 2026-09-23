@@ -2,14 +2,14 @@
 
 ## 1. 测试策略
 
-- **单元测试**：`cargo test`（146 项），覆盖注册表校验、dispatch、session 调度（新建会话/归档/交接摘要/空闲提示/压缩/中断）、storage（文件/内存/DomainIo/TmpIo/迁移）、memory（文件 CRUD/路径越界/旧布局迁移）、model（SSE/usage 解析）、settings（patch/public_view）、prompt（英语模式规则 + AGENTS.md 加载/回退/拼接）、compute 桥接与 handler、插件入口（schema/模板/聚合）。
-- **真实 API 集成测试**：`cargo test --test live_api -- --ignored --nocapture`，直接接 DeepSeek/SiliconFlow（无 key 自动跳过）。
+- **单元测试**：`cargo test`（144 项），覆盖注册表校验、dispatch、session 调度（新建会话/归档/交接摘要/空闲提示/压缩/中断）、storage（文件/内存/DomainIo/TmpIo/迁移）、memory（文件 CRUD/路径越界/旧布局迁移）、model（SSE/usage 解析）、settings（patch/public_view）、prompt（英语模式规则 + AGENTS.md 加载/回退/拼接）、compute 桥接与 handler、插件入口（schema/模板/聚合）。
+- **真实 API 集成测试**：`cargo test --test live_api -- --ignored --nocapture`，直接接 DeepSeek（无 key 自动跳过）。
 - **样例端到端**：`samples/` 三套作业图片逐一走 上传→OCR→判分→归档 全链路。
 - **前端自检**：`cd web && npm run check:pyodide`（真实加载 Pyodide WASM 并执行 Python：算术、符号计算（sympy 解方程/求导/积分）、物理（单位换算/运动学）、numpy 数值、异常路径）；`node scripts/katex-check.mjs`（KaTeX 行内/块级/化学式/矩阵/非法公式容错）。
 
 ## 2. 用例与结果（单元测试 2026-09-21 实测；真实 API 部分为 2026-08-10 实测，本次未复验）
 
-### 单元测试：146 项全过
+### 单元测试：144 项全过
 
 | 模块 | 覆盖点 |
 |---|---|
@@ -28,12 +28,12 @@
 
 ### 真实 API 链路
 
-当前 `live_api` 共 8 个 ignored 用例，使用本地 `settings.json` 中的真实主模型/视觉模型配置。
+当前 `live_api` 共 8 个 ignored 用例，使用本地 `settings.json` 中的真实 DeepSeek 模型配置（单模型，ADR-0045）。
 
 | 用例 | 结果 |
 |---|---|
 | hello 回合（send_user_message → Responses API 流式） | ✅ 通过；**断言 assistant 消息已落盘、审计 llm_call 的 tokens 非空** |
-| 三套样例批改（grading::upload） | ✅ 通过（subject/reference_answer 已入库） |
+| 三套样例批改（图片直入上下文 → 模型判分 → `grading::upload` 归档，ADR-0046） | ✅ 通过（subject/reference_answer 已入库） |
 | memory 工具往返（save/show/remove + 文件落盘） | ✅ 通过 |
 | LaTeX 输出（模型按 prompt 输出 $...$ 公式） | ✅ 通过（勾股定理，$a$/$b$/$c$） |
 | compute::verify 全链路（事件→回执→工具成功→模型续答） | ✅ 通过：测试模拟 GUI 执行端回执固定 stdout，kernel→桥→回执→续答闭环 |
@@ -71,8 +71,8 @@
 
 ## 4. 成本观察（真实调用）
 
-- 视觉 OCR（Qwen3-VL-32B）：线代题图 prompt 267 / completion 815 tokens。
-- 主模型判分（deepseek-v4-flash，thinking=none）：每题约 1~4 秒，json_schema 强制结构化。
+- 图片理解（deepseek-flash，`input_image`）：线代题图 prompt 267 / completion 815 tokens（旧 Qwen3-VL-32B 实测，链路已切单模型，待复验）。
+- 判分（deepseek-flash，thinking=none）：每题约 1~4 秒，json_schema 强制结构化。
 
 ## 5. 安全测试
 

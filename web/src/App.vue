@@ -135,7 +135,7 @@ onMounted(async () => {
     status.value = "就绪";
     try {
       const s = await kernel.call("get_settings", {}, 8000);
-      if (!s.main_model?.key_set || !s.vision_model?.key_set) {
+      if (!s.main_model?.key_set) {
         oobeOpen.value = true;
       }
     } catch {

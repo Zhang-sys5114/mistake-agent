@@ -195,6 +195,7 @@ async fn removed_switch_tool_is_unknown() {
             id: 1,
             method: WireMethod::Generic(Method::SendUserMessage {
                 text: "换个话题".into(),
+                display_text: None,
                 force_tool: Some(ForcedToolRequest {
                     entry: "session::switch".into(),
                     hint: None,

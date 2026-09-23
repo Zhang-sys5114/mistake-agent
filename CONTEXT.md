@@ -42,7 +42,7 @@ _Avoid_: 全局单例、直接依赖
 storage 引出的数据根目录域内文件 trait（read/write/remove/remove_tree/list，域 = `Domain` 枚举：mistakes/sessions/memory/data/uploads）；实现内部做域根拼接 + canonicalize 兜底（防符号链接逃逸）+ 原子写 + 审计（FileIo）。只注入内核插件（如 memory），用户插件永不持有。_Avoid_: 通用文件系统 API（插件直读 std::fs）
 
 **TmpIo（暂存文件能力）**:
-storage 引出的系统 temp 暂存文件 trait（read_staged/remove_staged），硬编码 `std::env::temp_dir()` + `mistake-agent-` 前缀白名单，与 DomainIo 解耦；读删记审计（StagedFileIo）。附件暂存（vision 读、grading 删）的唯一通道。_Avoid_: 让插件直读暂存路径
+storage 引出的系统 temp 暂存文件 trait（read_staged/remove_staged），硬编码 `std::env::temp_dir()` + `mistake-agent-` 前缀白名单，与 DomainIo 解耦；读删记审计（StagedFileIo）。ADR-0046 后图片改为 uploads/ 路径引用直入模型上下文，附件不再经此通道（代码保留）。_Avoid_: 让插件直读暂存路径
 
 **RelPath（相对路径）**:
 类型安全的域内相对路径：`parse` 构造即校验（段白名单 `[a-zA-Z0-9._-]`、首尾必须字母数字、拒绝 `.`/`..`/`\`/`:`/非 ASCII），不做任何路径规范化（规范化即攻击面），fail-closed——类型上不可能表示目录遍历。_Avoid_: 裸字符串路径拼接
@@ -163,13 +163,16 @@ _Avoid_: 日志（过泛，包含调试日志）
 分级诊断记录（DEBUG/INFO/WARN/ERROR/CRITICAL/PANIC），与审计分离，写入数据根目录 logs/；敏感值脱敏。
 _Avoid_: 日志（与 Audit 混用）、审计日志
 
-**Main model（主模型）**:
-负责 agent loop 调度与对话的模型（v2 为 deepseek-v4-flash，经 DeepSeek Responses API 接入），在 settings 中配置 API_URL 与 API_KEY。
-_Avoid_: 聊天模型（口语）
+**Model（模型）**:
+承担 agent loop 调度与对话、判分、摘要与图片理解的模型（v2 为 DeepSeek `deepseek-flash`，经 Responses API 接入，图片走 `input_image`），在 settings 中以单份配置提供 API_URL 与 API_KEY。
+_Avoid_: 聊天模型（口语）、主模型（旧双模型叫法）
 
 **Vision model（视觉模型）**:
-负责图片理解与 OCR 的模型（v2 为硅基流动 SiliconFlow 的 qwen3-VL，经 Chat Completions 接入；Responses API 不支持图片输入），与主模型分开配置，经 ModelHandle 按用途调用。
-_Avoid_: OCR 模型（只覆盖一部分用途）
+（已退役，ADR-0045）旧方案中负责图片理解与 OCR 的独立模型（硅基流动 SiliconFlow 的 qwen3-VL，经 Chat Completions 接入）。`deepseek-flash` 的 Responses API 已原生支持图片输入，该端点与 `ModelKind` 选路一并删除；图片理解内化为模型能力，不再是独立术语。
+_Avoid_: 用「视觉模型」指代现在的图片理解（已无独立模型）
+
+**Attachment ref（附件引用）**:
+用户消息上对 uploads/ 持久附件的路径式引用（`AttachmentRef`：相对文件名 + mime + 原名，ADR-0046）；消息树只存引用、不存图片字节，模型请求构建时由 `AttachmentResolvingModelService` 读盘还原为运行时附件并展开成 `input_image`（进程内缓存）。_Avoid_: 把图片 base64 落进会话 JSONL、让插件直接读 uploads 路径
 
 **CallerPolicy（调用方策略）**:
 EntryPoint 的调用方边界：UserAndModel（模型可调，用户必可调）或 UserOnly（仅用户可调，模型工具列表不可见且调度拒绝）。

@@ -11,7 +11,7 @@ use crate::kernel::agent::dispatch::ToolCallContext;
 use crate::kernel::context::PluginContext;
 use crate::kernel::contract::{CallerPolicy, Info, PluginError, ToolDef, ToolError};
 use crate::kernel::plugin::services::{
-    AbortSignal, ComputeHandle, MemoryHandle, ModelHandle, ServiceId, StorageHandle,
+    AbortSignal, ComputeHandle, MemoryHandle, ModelError, ModelHandle, ServiceId, StorageHandle,
 };
 use crate::kernel::registry::{PluginDescriptor, UserPlugin};
 
@@ -154,6 +154,16 @@ impl UserPlugin for PracticePlugin {
 
 pub fn descriptor() -> PluginDescriptor {
     PluginDescriptor::from_plugin::<PracticePlugin>()
+}
+
+/// 模型错误 → 工具错误（练习判分/出题共用，原 vision 插件的共享辅助迁入）。
+pub(crate) fn map_model_error(e: ModelError) -> ToolError {
+    match e {
+        ModelError::Timeout => ToolError::timeout(),
+        ModelError::Cancelled => ToolError::aborted(),
+        other if other.is_systemic() => ToolError::model_unavailable(other.to_string()),
+        other => ToolError::handler(other.to_string()),
+    }
 }
 
 async fn generate_handler(

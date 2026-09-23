@@ -73,7 +73,7 @@ src/kernel/
 3. 初始化诊断日志；
 4. 打开 `FileStorage`，失败时回退 `MemoryStorage`；
 5. 创建 `FileMemoryService`，执行旧记忆布局迁移，失败不阻塞启动；
-6. 创建 compute bridge、主模型服务、视觉模型服务和模型路由；
+6. 创建 compute bridge 与单份 DeepSeek 模型服务（`LiveSettingsModelService`，ADR-0045）；
 7. 用 `ServiceHandles` 装配四个服务句柄；
 8. 创建 `Registry`，先注册内核插件，再注册用户插件；
 9. 创建 `Dispatch`、共享 `InterruptBus`、`SessionScheduler` 和 `AgentLoop`；

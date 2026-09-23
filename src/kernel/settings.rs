@@ -20,10 +20,10 @@ pub enum Transport {
 pub struct ModelConfig {
     pub api_url: String,
     pub api_key: String,
-    /// 模型 ID（主模型默认 deepseek-v4-flash；视觉默认 Qwen/Qwen3-VL-32B-Instruct）。
+    /// 模型 ID（默认 deepseek-flash）。
     #[serde(default)]
     pub model: Option<String>,
-    /// 主模型默认 responses（ADR-0020）；Ollama 等不兼容端点配 chat_completions。
+    /// 默认 responses（ADR-0020）；Ollama 等不兼容端点配 chat_completions。
     #[serde(default)]
     pub transport: Option<Transport>,
 }
@@ -53,7 +53,18 @@ pub struct Settings {
     #[serde(default)]
     pub english_mode: bool,
     pub main_model: ModelConfig,
+    /// 已退役（ADR-0045）：仅为兼容旧 settings.json 保留，运行时不再读取。
+    #[serde(default = "default_vision_config")]
     pub vision_model: ModelConfig,
+}
+
+fn default_vision_config() -> ModelConfig {
+    ModelConfig {
+        api_url: String::new(),
+        api_key: String::new(),
+        model: None,
+        transport: None,
+    }
 }
 
 fn default_log_level() -> Level {
@@ -84,22 +95,14 @@ impl Settings {
                 main_model: ModelConfig {
                     api_url: "https://api.deepseek.com".into(),
                     api_key: String::new(),
-                    model: Some("deepseek-v4-flash".into()),
+                    model: Some("deepseek-flash".into()),
                     transport: Some(Transport::Responses),
                 },
-                vision_model: ModelConfig {
-                    api_url: "https://api.siliconflow.cn/v1".into(),
-                    api_key: String::new(),
-                    model: Some("Qwen/Qwen3-VL-32B-Instruct".into()),
-                    transport: None,
-                },
+                vision_model: default_vision_config(),
             });
         };
         let main_url =
             env::var("DEEPSEEK_API_URL").unwrap_or_else(|_| "https://api.deepseek.com".into());
-        let vision_key = env::var("SILICONFLOW_API_KEY").ok();
-        let vision_url = env::var("SILICONFLOW_API_URL")
-            .unwrap_or_else(|_| "https://api.siliconflow.cn/v1".into());
         let log_level = match env::var("MISTAKE_AGENT_LOG_LEVEL").as_deref() {
             Ok("debug") => Level::Debug,
             Ok("warn") => Level::Warn,
@@ -116,14 +119,7 @@ impl Settings {
                 model: None,
                 transport: Some(Transport::Responses),
             },
-            vision_model: ModelConfig {
-                api_url: vision_url,
-                api_key: vision_key.unwrap_or_default(),
-                model: env::var("SILICONFLOW_MODEL")
-                    .ok()
-                    .or_else(|| Some("Qwen/Qwen3-VL-32B-Instruct".into())),
-                transport: None,
-            },
+            vision_model: default_vision_config(),
         })
     }
 
