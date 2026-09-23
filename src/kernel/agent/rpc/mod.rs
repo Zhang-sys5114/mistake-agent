@@ -19,8 +19,8 @@ use crate::kernel::agent::cache::CacheTracker;
 use crate::kernel::agent::dispatch::Dispatch;
 use crate::kernel::agent::loop_mod::{AgentLoop, SystemPromptProvider, TurnInput, TurnOutcome};
 use crate::kernel::agent::session::{
-    Interrupt, InterruptBus, LlmSummarizer, SessionKey, SessionScheduler, SessionStatus,
-    SystemClock,
+    Interrupt, InterruptBus, LlmSummarizer, LlmTitler, SessionKey, SessionScheduler, SessionStatus,
+    SystemClock, Titler,
 };
 use crate::kernel::audit::{AuditRecord, Auditor};
 use crate::kernel::contract::{CallerPolicy, full_to_wire};
@@ -213,11 +213,17 @@ impl KernelBuilder {
         }
         // 摘要器无状态：调度层（按需交接摘要）与 loop（上下文压缩）共用一个实例。
         let summarizer: Arc<dyn crate::kernel::agent::session::Summarizer> = Arc::new(summarizer);
+        let mut titler = LlmTitler::new(main_model.clone());
+        if let Some(settings) = self.settings.clone() {
+            titler = titler.with_settings(settings);
+        }
+        let titler: Arc<dyn Titler> = Arc::new(titler);
         // 中断总线必须由 scheduler 与 loop 共享：scheduler 发环境变更，loop 回合边界消费。
         let scheduler = Arc::new(SessionScheduler::new(
             store.clone(),
             Arc::new(SystemClock),
             summarizer.clone(),
+            titler,
             self.interrupt_bus.clone(),
             self.events.clone(),
         ));
@@ -612,6 +618,27 @@ impl Kernel {
                     // 消息已落盘、活跃路径已推进：此刻通知前端刷新，链式渲染不会丢新消息。
                     events.emit(Event::TurnEnd {
                         stop_reason: outcome.stop_reason.clone(),
+                    });
+                    // 标题生成走独立任务：辅助模型调用最长 ~20s，不能拖住回合句柄的释放。
+                    // 只在首回合（尚无标题）触发一次，失败降级为截断标题（见 maybe_generate_title）。
+                    let title_scheduler = scheduler.clone();
+                    let title_events = events.clone();
+                    let title_auditor = auditor.clone();
+                    tokio::spawn(async move {
+                        match title_scheduler.maybe_generate_title(&persist_key).await {
+                            Ok(Some(title)) => {
+                                title_auditor.record(AuditRecord::SessionTitleGenerated {
+                                    session: persist_key.to_string(),
+                                    title: title.clone(),
+                                });
+                                title_events.emit(Event::SessionTitleUpdated {
+                                    session: persist_key,
+                                    title,
+                                });
+                            }
+                            Ok(None) => {}
+                            Err(e) => log::warn!("会话标题生成失败：{e}"),
+                        }
                     });
                     if let Some(usage) = &outcome.usage {
                         cache.record_main(&persist_key, usage);

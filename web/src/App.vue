@@ -4,8 +4,8 @@ import { Icon } from "@iconify/vue";
 import { useKernel } from "./composables/useKernel";
 import ChatPage from "./components/ChatPage.vue";
 import MistakesPage from "./components/MistakesPage.vue";
-import SessionsPage from "./components/SessionsPage.vue";
 import SettingsPage from "./components/SettingsPage.vue";
+import SessionListPanel from "./components/SessionListPanel.vue";
 import OobePage from "./components/OobePage.vue";
 
 const kernel = useKernel();
@@ -27,18 +27,21 @@ const status = ref("准备中");
 const view = ref("chat");
 const oobeOpen = ref(false);
 const sidebarLocked = ref(false);
+// 会话列表是应用级侧栏（开关图标在「设置」下方，列表展开在同一列的下方），
+// 所以「当前会话」也归 App 持有：ChatPage 只读它、不再自己推导。
+const sessionPanelOpen = ref(true);
+const activeSessionKey = ref(null);
+const sessionList = ref(null);
 
 const navItems = [
   { id: "chat", label: "聊天", icon: "mdi:chat-processing-outline" },
   { id: "mistakes", label: "错题本", icon: "mdi:format-list-bulleted" },
-  { id: "sessions", label: "会话", icon: "mdi:history" },
   { id: "settings", label: "设置", icon: "mdi:cog-outline" },
 ];
 
 const viewMeta = {
   chat: { sub: "和 Agent 对话，上传作业自动批改" },
   mistakes: { sub: "错题自动归档，随时回顾错因" },
-  sessions: { sub: "历史会话与消息树分支回放" },
   settings: { sub: "模型接入与本地数据配置" },
 };
 
@@ -53,6 +56,45 @@ function navigate(viewId) {
 
 function toggleSidebarLock() {
   sidebarLocked.value = !sidebarLocked.value;
+}
+
+/** 会话列表开关（图标在「设置」正下方）：列表就展开在侧栏这一列里。 */
+function toggleSessionPanel() {
+  sessionPanelOpen.value = !sessionPanelOpen.value;
+}
+
+/** 用户点列表里的会话：服务端归档旧 Active 并激活目标（ADR-0044）。 */
+async function onSelectSession(key) {
+  if (!key || busy.value) return;
+  if (key !== activeSessionKey.value) {
+    try {
+      await kernel.call("open_session", { key }, 15000);
+    } catch (e) {
+      status.value = `切换会话失败：${e.message}`;
+      return;
+    }
+  }
+  activeSessionKey.value = key;
+  view.value = "chat"; // 面板常驻侧栏：在别的页面点会话也回到聊天
+}
+
+/** 会话列表被改动（新建/重命名/删除）或回合结束后：让面板自己重列。 */
+function refreshSessionList() {
+  sessionList.value?.refreshList();
+}
+
+/** 服务端唯一 Active 会话即当前会话（单 Active 不变量），用它兜底同步选中项。 */
+async function syncActiveSession() {
+  if (!ready.value) return;
+  try {
+    const r = await kernel.call("list_sessions", {}, 8000);
+    const arr = r.sessions || [];
+    const active = arr.find((s) => s.status === "active");
+    if (active?.key) activeSessionKey.value = active.key;
+    else if (!arr.some((s) => s.key === activeSessionKey.value)) activeSessionKey.value = null;
+  } catch {
+    // 列表读不到不阻塞界面（会话为空时聊天区显示空状态）。
+  }
 }
 
 /* ---- Ripple effect ---- */
@@ -133,6 +175,7 @@ onMounted(async () => {
     await kernel.start();
     ready.value = true;
     status.value = "就绪";
+    await syncActiveSession();
     try {
       const s = await kernel.call("get_settings", {}, 8000);
       if (!s.main_model?.key_set) {
@@ -156,7 +199,10 @@ onBeforeUnmount(() => {
   <div class="app">
     <OobePage v-if="oobeOpen" :kernel="kernel" @done="oobeOpen = false" />
 
-    <aside class="sidebar" :class="{ expanded: sidebarLocked }">
+    <aside
+      class="sidebar"
+      :class="{ expanded: sidebarLocked || sessionPanelOpen, 'session-open': sessionPanelOpen }"
+    >
       <div class="brand">
         <span class="brand-mark">
           <Icon icon="mdi:book-education-outline" width="22" />
@@ -188,7 +234,29 @@ onBeforeUnmount(() => {
           <Icon :icon="item.icon" width="20" />
           <span>{{ item.label }}</span>
         </button>
+        <button
+          class="nav-item"
+          :class="{ 'panel-toggle-on': sessionPanelOpen }"
+          :title="sessionPanelOpen ? '收起会话列表' : '展开会话列表'"
+          :aria-pressed="sessionPanelOpen"
+          aria-label="会话列表"
+          @click="toggleSessionPanel"
+        >
+          <Icon icon="mdi:history" width="20" />
+          <span>会话列表</span>
+        </button>
       </nav>
+      <div v-if="sessionPanelOpen" class="sidebar-sessions">
+        <SessionListPanel
+          ref="sessionList"
+          :kernel="kernel"
+          :active-key="activeSessionKey"
+          :busy="busy"
+          @select="onSelectSession"
+          @changed="refreshSessionList"
+          @collapse="sessionPanelOpen = false"
+        />
+      </div>
       <div class="sidebar-foot">
         <div class="status-pill" :class="{ busy, ready: ready && !busy }">
           <span class="dot"></span><span class="status-text">{{ status }}</span>
@@ -211,11 +279,12 @@ onBeforeUnmount(() => {
             :key="'chat'"
             :kernel="kernel"
             :ready="ready"
+            v-model:active-key="activeSessionKey"
             @status="onStatus"
             @navigate="navigate"
+            @sessions-dirty="refreshSessionList"
           />
           <MistakesPage v-else-if="view === 'mistakes'" :key="'mistakes'" :kernel="kernel" />
-          <SessionsPage v-else-if="view === 'sessions'" :key="'sessions'" :kernel="kernel" />
           <SettingsPage v-else :key="'settings'" :kernel="kernel" />
         </Transition>
       </div>
