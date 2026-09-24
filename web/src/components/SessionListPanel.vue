@@ -7,7 +7,7 @@ const props = defineProps({
   activeKey: { type: String, default: null },
   busy: { type: Boolean, default: false },
 });
-const emit = defineEmits(["select", "changed", "collapse"]);
+const emit = defineEmits(["select", "changed"]);
 
 const sessions = ref([]);
 const loading = ref(false);
@@ -126,27 +126,12 @@ async function doDelete() {
   }
 }
 
-defineExpose({ refreshList });
+defineExpose({ refreshList, newSession });
 onMounted(refreshList);
 </script>
 
 <template>
   <aside class="session-panel">
-    <div class="session-panel-head">
-      <button class="btn primary new-chat" :disabled="busy || working" @click="newSession">
-        <Icon icon="mdi:plus" width="18" />
-        <span>新对话</span>
-      </button>
-      <button
-        class="icon-btn"
-        aria-label="折叠会话列表"
-        title="折叠会话列表"
-        @click="emit('collapse')"
-      >
-        <Icon icon="mdi:chevron-left" width="18" />
-      </button>
-    </div>
-
     <p v-if="error" class="session-panel-error" role="alert">{{ error }}</p>
 
     <div class="session-panel-list">

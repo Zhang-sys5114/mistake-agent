@@ -23,7 +23,7 @@
 | memory | 文件 CRUD、目录浏览、子树删除、路径校验（绝对/../空段）、中文路径编码与旧布局迁移 |
 | storage IO | `RelPath` 遍历向量、域隔离、TmpIo temp 白名单、运行时真题池文件优先/种子兜底 |
 | model | SSE 解析、usage 解析（response.usage 顶层）、ToolCall 展开 |
-| settings | patch 校验、public_view 不含 key、english_mode 补丁生效 |
+| settings | patch 校验、public_view 不含 key、english_mode 补丁生效、昵称裁剪/空串清空/按字符限长 |
 | prompt | english_mode 开启时各提示词追加 English Immersion Mode 规则（含会话标题提示） |
 | compute | BridgeCompute 回执/取消 |
 | 插件 | 12 插件入口参数 schema、practice 模板生成、report/exam/tracking 聚合断言 |

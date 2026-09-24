@@ -168,6 +168,7 @@ Caller
 - `TurnControl`：请求内部中断；
 - `LoggerHandle`；
 - `english_mode`：英语练习模式开关，插件据此选择提示词语言；
+- `nickname`：用户在设置页写的称呼，只影响 GUI 侧栏显示，不进提示词；
 - `EventSink`：工具进度和 GUI 事件。
 
 工具执行默认串行。新增并发执行前必须先解决工具依赖拓扑、结果回填顺序和审计顺序问题。

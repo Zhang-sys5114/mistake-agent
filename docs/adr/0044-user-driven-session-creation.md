@@ -4,7 +4,7 @@
 状态：已采纳
 取代：ADR-0030 / ADR-0032 / ADR-0034（及 ADR-0006「不新建 SessionKey、不归档」的结论、ADR-0025 守卫模型的最后一处残留）
 
-**修订（2026-09-23）**：本次决策的**收尾**已落地——原文「不在本次范围」的两项（前端会话列表 UI、存量数据迁移）与「待定」项（会话内版本切换）均已闭环。新增 RPC `open_session` / `rename_session` / `delete_session`；`SessionMeta` 新增 `title`（用户可见标题，首回合末由模型异步生成，`LlmTitler`）；新增事件 `Event::SessionTitleUpdated` 与审计 `SessionOpened` / `SessionRenamed` / `SessionDeleted` / `SessionTitleGenerated`；存量数据在 `FileStorage::open` 时按「上一会话梗概：」边界拆分为独立会话（幂等 + `.bak`，见 [file/migrate.rs](../../src/kernel/plugin/storage/file/migrate.rs)）；前端删除「会话」页，改为应用侧栏内、`会话列表` 开关图标下方的展开列表。第 4 条决策（空闲超时仅提示）与本文其余结论不变。
+**修订（2026-09-23）**：本次决策的**收尾**已落地——原文「不在本次范围」的两项（前端会话列表 UI、存量数据迁移）与「待定」项（会话内版本切换）均已闭环。新增 RPC `open_session` / `rename_session` / `delete_session`；`SessionMeta` 新增 `title`（用户可见标题，首回合末由模型异步生成，`LlmTitler`）；新增事件 `Event::SessionTitleUpdated` 与审计 `SessionOpened` / `SessionRenamed` / `SessionDeleted` / `SessionTitleGenerated`；存量数据在 `FileStorage::open` 时按「上一会话梗概：」边界拆分为独立会话（幂等 + `.bak`，见 [file/migrate.rs](../../src/kernel/plugin/storage/file/migrate.rs)）；前端删除「会话」页，改为应用侧栏内常驻的会话列表。第 4 条决策（空闲超时仅提示）与本文其余结论不变。
 
 ## 背景
 

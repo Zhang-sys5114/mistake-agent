@@ -43,6 +43,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   rename survives. A new `session_title_updated` event refreshes the
   sidebar. New audit records: `SessionOpened`, `SessionRenamed`,
   `SessionDeleted`, `SessionTitleGenerated`.
+- **`nickname` setting**: a free-text name (≤24 characters, empty string
+  clears it — unlike `api_key`, where an empty string means "keep") stored
+  in `settings.json` and returned by `get_settings`. It is display-only:
+  the sidebar's account row shows it, falling back to 「同学」, and it
+  never enters any prompt. The settings page's 通用 card gained the input.
 - **Legacy session migration**: on startup, before sessions are loaded,
   `FileStorage` scans `sessions/*.jsonl` and splits files that hold
   several topics into independent sessions
@@ -81,17 +86,29 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   "Sessions" page and its navigation entry are gone, replaced by a
   list (`web/src/components/SessionListPanel.vue`) with a "New
   chat" button, inline rename, a confirmation-guarded delete, and rows
-  sorted by `last_activity_at` descending. The list expands inside the
-  app sidebar, directly **below** its `会话列表` toggle icon (which sits
-  below "Settings"), rather than as a second column next to the chat;
-  `App.vue` owns the panel state and the active session key, and
-  `ChatPage` only reads the key. The chat page
+  sorted by `last_activity_at` descending. The list lives permanently in the
+  app sidebar, between the nav and the status line, rather than as a
+  second column next to the chat; the sidebar is a 260px column that the
+  user can collapse to a 72px icon rail with a button in the brand row
+  (the choice is remembered in `localStorage`) — there is no
+  hover-expand and no session-list toggle icon — and `App.vue` owns the
+  list and the
+  active session key, with `ChatPage` only reading the key. The chat page
   now renders
   only the active session instead of merging every session's messages
   into one stream, and switching sessions resets the streaming state.
   In-session message-version browsing (`edit_message` + `switch_branch`)
   is kept, but is now explicitly scoped to the current session and no
   longer carries any session-boundary meaning.
+- **Sidebar reorganized into app chrome**: the 聊天 nav entry is gone.
+  The top of the sidebar is now 「新对话」 (create a session and land on
+  the chat page — still the only way to start one), 错题本 / 设置 moved
+  down to a secondary nav at the bottom, and the status pill became an
+  account row (avatar + nickname + status, the avatar's ring carrying
+  the kernel state). Its card offers 下载手机端 / 帮助与反馈 / 退出登录 —
+  all three are placeholders, since this is a local-only app with no
+  account system, no server and no mobile build; clicking one says so
+  in the card rather than doing nothing.
 - **Single DeepSeek model** ([ADR-0045](docs/adr/0045-single-deepseek-model.md)):
   one `main_model` config (`deepseek-flash`, Responses API) now covers
   chat, scheduling, summarization and image understanding. The Responses

@@ -36,8 +36,8 @@
 | `get_state` | — | ✅ M1 | 返回 `{status: idle\|busy, session_key}` |
 | `edit_message` | `message_id`, `text` | ✅ M5 | 消息树编辑：仅 user 消息可编辑，从被编辑消息的父节点派生新分支，返回 `{session_key, messages}`（新活跃路径）；编辑 = 改完重发，保存后自动开启新一轮回答 |
 | `switch_branch` | `message_id` | ✅ M5 | 消息树切分支：设置 active_path，返回 `{session_key, messages}` |
-| `get_settings` | — | ✅ M2/M5 | 返回设置公开视图（**不含 api_key**，只含 `key_set` 标记；含 `english_mode`） |
-| `set_settings` | `patch` | ✅ M2/M5 | 应用设置补丁并持久化（含 `english_mode`）；模型配置变化时热替换模型服务；成功后发 `settings_changed` 事件 |
+| `get_settings` | — | ✅ M2/M5 | 返回设置公开视图（**不含 api_key**，只含 `key_set` 标记；含 `english_mode` / `nickname`） |
+| `set_settings` | `patch` | ✅ M2/M5 | 应用设置补丁并持久化（含 `english_mode` / `nickname`，后者空串=清空）；模型配置变化时热替换模型服务；成功后发 `settings_changed` 事件 |
 | `list_sessions` | — | ✅ M5 | 返回 `{sessions: [SessionMeta]}`（`key` / `goal` / `title?` / `status` / `created_at` / `last_activity_at` / `active_path`；`title` 缺失时省略，见 §7） |
 | `read_session` | `key` | ✅ M5 | 返回 `{meta,messages}`（会话历史/消息树完整记录） |
 | `create_session` | `carry_summary?: bool`, `goal?: string` | ✅ | 用户手动新建会话（ADR-0044）：归档当前活动会话并开启全新独立 `SessionKey`，返回 `{session_key, archived_session_key, summary_attached}`；`carry_summary` 显式控制是否把旧会话摘要作为新会话首条 system 消息；回合在飞时拒绝（`turn_in_progress`） |
@@ -170,11 +170,12 @@ pub trait UserPlugin {
 {
   "log_level": "info",
   "english_mode": false,
+  "nickname": "",
   "main_model": { "api_url": "https://api.deepseek.com", "api_key": "...", "model": "deepseek-flash", "transport": "responses" }
 }
 ```
 
-`vision_model` 字段仅为兼容旧配置保留、运行时不再读取（ADR-0045）。环境变量回退：`DEEPSEEK_API_KEY` / `DEEPSEEK_API_URL` / `MISTAKE_AGENT_LOG_LEVEL`。
+`nickname` 是侧栏左下角的称呼（≤24 字符，空串=用前端默认「同学」）。`vision_model` 字段仅为兼容旧配置保留、运行时不再读取（ADR-0045）。环境变量回退：`DEEPSEEK_API_KEY` / `DEEPSEEK_API_URL` / `MISTAKE_AGENT_LOG_LEVEL`。
 
 ## 6. 超时与取消模型（ADR-0022）
 

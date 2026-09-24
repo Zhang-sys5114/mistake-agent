@@ -345,11 +345,10 @@ impl RpcExtension for AppRpc {
                     let snapshot = self.settings.read().expect("settings poisoned").clone();
                     let mut model_cfg = snapshot.main_model.clone();
                     model_cfg.api_key = key.trim().to_string();
+                    // 只换 key，其余字段照抄当前设置（`..snapshot` 免得加字段时再漏一处）。
                     let temp_settings = crate::kernel::settings::Settings {
-                        log_level: snapshot.log_level,
-                        english_mode: snapshot.english_mode,
                         main_model: model_cfg,
-                        vision_model: snapshot.vision_model.clone(),
+                        ..snapshot
                     };
                     crate::kernel::plugin::model::build_main_service(&temp_settings)
                         .complete(&model_req, &AbortSignal::new())
