@@ -191,3 +191,72 @@
         assert!(store.remove_session(&key).await.is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // ---------- 错题标题（TODO 4.1）：落盘可回读，清空不存空串 ----------
+
+    #[tokio::test]
+    async fn mistake_title_survives_reopen_and_clears_on_blank() {
+        use crate::kernel::plugin::services::{Mistake, MistakeId, MistakePatch, MistakeStore};
+
+        let dir = temp_root("mistake-title");
+        // 错题目录由 bootstrap::init_data_root 建，FileStorage 自己不懒创建——测试里补上。
+        std::fs::create_dir_all(dir.join("mistakes")).unwrap();
+        let store = real_store(&dir);
+        let id = store
+            .save(&Mistake {
+                id: MistakeId(uuid::Uuid::new_v4()),
+                subject: "数学".into(),
+                knowledge_point: "二次函数".into(),
+                title: Some("顶点坐标求法".into()),
+                question: "求顶点坐标".into(),
+                student_answer: "(1,2)".into(),
+                reference_answer: Some("(1,2)".into()),
+                is_correct: false,
+                analysis: "符号错误".into(),
+                created_at: chrono::Utc::now(),
+                pinned: false,
+                deleted_at: None,
+            })
+            .await
+            .unwrap();
+
+        // 重新 open：标题来自 JSON 而非内存，顺带验证存量数据缺字段时能解析。
+        let reopened = real_store(&dir);
+        assert_eq!(
+            reopened.get(&id).await.unwrap().unwrap().title.as_deref(),
+            Some("顶点坐标求法")
+        );
+
+        reopened
+            .update(
+                &id,
+                &MistakePatch {
+                    title: Some("  顶点  ".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened.get(&id).await.unwrap().unwrap().title.as_deref(),
+            Some("顶点")
+        );
+
+        // 纯空白 = 清空：存成 None，再回读仍是 None（不是 Some("")）。
+        reopened
+            .update(
+                &id,
+                &MistakePatch {
+                    title: Some("   ".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(reopened.get(&id).await.unwrap().unwrap().title.is_none());
+        assert!(
+            real_store(&dir).get(&id).await.unwrap().unwrap().title.is_none(),
+            "清空后的 None 不应在盘上复活成空串"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }

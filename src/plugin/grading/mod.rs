@@ -35,7 +35,7 @@ impl UserPlugin for GradingPlugin {
                     title: Some("上传作业批改".into()),
                     group: Some("批改".into()),
                     description:
-                        "把逐题判分结果（items）归档进错题本：直接阅读本次消息里的作业图片/PDF 正文后，为每道题填写 number/question/student_answer/subject/reference_answer/correct/score/total/knowledge_point/analysis，错题会自动落库。题干必须逐字保留原文，不要概括或漏小问。"
+                        "把逐题判分结果（items）归档进错题本：直接阅读本次消息里的作业图片/PDF 正文后，为每道题填写 title/number/question/student_answer/subject/reference_answer/correct/score/total/knowledge_point/analysis，错题会自动落库。题干必须逐字保留原文，不要概括或漏小问。title 是错题卡上的一句话标题：概括考点或错因，不超过 16 字，不带题号、句号或引号。"
                             .into(),
                     params: schemars::schema_for!(UploadParams),
                     policy: CallerPolicy::UserAndModel,

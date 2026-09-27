@@ -66,6 +66,9 @@ impl MistakeStore for FileStorage {
             if let Some(k) = &patch.knowledge_point {
                 m.knowledge_point = k.clone();
             }
+            if let Some(t) = &patch.title {
+                m.title = normalize_title(Some(t));
+            }
             if let Some(q) = &patch.question {
                 m.question = q.clone();
             }

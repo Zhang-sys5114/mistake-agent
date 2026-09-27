@@ -199,7 +199,10 @@ _Avoid_: 直接把 chemfig 当 KaTeX 宏包引入（会静默渲染失败）、�
 错题本记录的轻量管理字段：`is_correct` 表示已掌握（复用原有字段），`pinned` 表示置顶，`deleted_at` 非空表示软删除；`grading::list` 默认隐藏已删除记录，`grading::remove` / `grading::remove_many` 只写 `deleted_at`，不物理删除。_Avoid_: 硬删除错题、为已掌握另建 `mastered` 字段
 
 **Mistake edit boundary（错题编辑边界）**:
-错题修改的权限语义：模型可经 `grading::update` 改**内容字段**（subject/knowledge_point/question/student_answer/reference_answer/analysis），不可改**管理字段**（is_correct/pinned/deleted_at）；删除（remove/remove_many）与已掌握标记仅用户可做（UserOnly）。模型是错题本主要写入者（判分归档、练习回写），编辑能力保证幻觉内容可自愈；管理字段只由用户维护，避免模型污染掌握度统计。_Avoid_: 模型可删题、模型标已掌握
+错题修改的权限语义：模型可经 `grading::update` 改**内容字段**（subject/knowledge_point/title/question/student_answer/reference_answer/analysis），不可改**管理字段**（is_correct/pinned/deleted_at）；删除（remove/remove_many）与已掌握标记仅用户可做（UserOnly）。模型是错题本主要写入者（判分归档、练习回写），编辑能力保证幻觉内容可自愈；管理字段只由用户维护，避免模型污染掌握度统计。_Avoid_: 模型可删题、模型标已掌握
+
+**Mistake card title（错题卡标题）**:
+错题卡与详情抽屉顶部那句话，存在 `Mistake.title`：判分归档时由模型一并生成（≤16 字，概括考点或错因），用户可在编辑弹窗里改写，传纯空白即清空。**可缺省**——存量错题没有该字段，练习模块回写的错题也不生成，此时前端回退显示「学科 · 知识点」，因此标题永远不构成数据完整性要求，无需回填。_Avoid_: 把标题当必填、用标题代替题干（题干始终是逐字原文）
 
 **Mistake event log（错题事件流）**:
 追加式 JSONL（错题条目内 `events.jsonl`），逐条记录每道错题的判分与掌握度变更，是「正确率变化 / 反复丢分 / 掌握度」等时间线统计的唯一业务真相；与审计（Audit，操作事实记录、10MB 轮转）不同，事件流不轮转、只追加，`mistake.json` 快照中的 `is_correct` 只是其最新状态。_Avoid_: 审计、日志、Attempt 数组内嵌错题记录（快照与时间线分离，事件不进 mistake.json）
