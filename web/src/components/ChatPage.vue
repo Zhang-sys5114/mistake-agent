@@ -29,6 +29,8 @@ const editingId = ref(null);
 const currentStreamId = ref(null);
 const sessionView = ref(null); // buildSessionView（含逐节点版本指针）
 const historyRefreshGen = ref(0); // 防重入：每次刷新递增，仅最新世代生效
+// 会话切换中：见 activeKey 的 watch——期间不播气泡入场动画，也不清空旧内容。
+const swapping = ref(false);
 const tools = ref([]); // 用户可见工具（list_tools，供输入候选）
 const suggestions = ref([]);
 const activeSuggestion = ref(-1);
@@ -376,15 +378,19 @@ function finalize() {
   currentStreamId.value = null;
 }
 
-/** 用当前会话视图重建气泡流：只渲染当前会话的活跃链，副本按 id 去重。
- *  与本地已渲染气泡合并（按 messageId，用户消息再按文本兜底），避免 turn_end
- *  后全量替换时因后端数据缺失导致刚发出的消息消失。 */
-function renderSessionBubbles() {
+/**
+ * 用当前会话视图重建气泡流（只渲染当前会话的活跃链，副本按 id 去重），落到 `bubbles` 上。
+ * 同一个会话内是**合并**：按 messageId 认领（用户气泡再按文本兜底），认领不到的本地气泡
+ * 保留——`turn_end` 后全量替换时后端数据可能暂时缺失，刚发出的消息不能就这么消失。
+ * 换了会话则是**替换**（`merge: false`）：上一屏的气泡在语义上没有一条属于新会话，
+ * 合并进来就等于「新对话点开了，屏上还是上一个对话」。
+ */
+function renderSessionBubbles({ merge = true } = {}) {
   if (!sessionView.value) return;
   const backend = renderPath(sessionView.value, { sessionKey: props.activeKey });
   const pending = new Map(backend.map((b) => [String(b.messageId), b]));
   const out = [];
-  for (const b of bubbles.value) {
+  for (const b of merge ? bubbles.value : []) {
     const id = b.messageId ? String(b.messageId) : null;
     if (id && pending.has(id)) {
       out.push(pending.get(id));
@@ -421,7 +427,10 @@ function resetSessionState() {
   toolStatus.value = null;
 }
 
-/** 读取当前会话（会话列表由应用侧栏自己维护，这里只管消息）。 */
+/** 读取当前会话（会话列表由应用侧栏自己维护，这里只管消息）。
+ *  返回值只回答一件事：**这次调用有没有把内容渲染出来**。`false` 仅表示读失败、屏上
+ *  内容仍属于上一个会话（调用方据此决定要不要清空）；被更新的刷新取代时返回 `true`——
+ *  那份内容由新一代负责，这里不该插手。 */
 async function refreshSession() {
   const gen = ++historyRefreshGen.value;
   try {
@@ -433,35 +442,51 @@ async function refreshSession() {
       key = arr.find((s) => s.status === "active")?.key || null;
       if (key !== props.activeKey) emit("update:activeKey", key);
     }
+    const prevKey = renderedKey; // 换没换会话由它说了算，先存下来
     renderedKey = key;
     if (!key) {
       sessionView.value = null;
       bubbles.value = [];
-      return;
+      return true;
     }
     const detail = await props.kernel.call("read_session", { key }, 8000);
-    if (gen !== historyRefreshGen.value) return;
+    if (gen !== historyRefreshGen.value) return true; // 已被更新的刷新取代，交给它
     sessionView.value = buildSessionView(
       detail.messages,
       detail.meta?.active_path || null,
     );
-    renderSessionBubbles();
+    // 同一个会话只是重读（回合结束、编辑重发）→ 合并；换了会话 → 整屏替换。
+    renderSessionBubbles({ merge: prevKey === key });
+    return true;
   } catch (e) {
     // list_sessions/read_session 尚未接通时，聊天仍可用，只是没有版本/编辑入口。
     if (e.code !== "not_implemented") console.warn("会话回读失败：", e);
+    return false;
   }
 }
 
 /** 用户在侧栏列表切换会话：清掉旧会话的流式/编辑/工具状态再重读。
- *  `renderedKey` 挡住自己发的兜底回退——否则会把刚渲染好的气泡清掉重来一次。 */
+ *  `renderedKey` 挡住自己发的兜底回退——否则会把刚渲染好的气泡清掉重来一次。
+ *
+ *  这里**不清空** `bubbles`/`sessionView`：清空会让消息区先塌成空状态那一屏
+ *  （图标 + 标题 + 快捷卡片）再长回来，滚动条跟着消失又出现，整片文字抖一下。
+ *  留着旧内容，等新会话读回来一次性换上——切换因此是「稳定」的，不是重渲染。 */
 watch(
   () => props.activeKey,
   async (key) => {
     if (key === renderedKey) return;
     resetSessionState();
-    bubbles.value = [];
-    sessionView.value = null;
-    await refreshSession();
+    swapping.value = true;
+    try {
+      // 读失败时屏上留着的是上一个会话的消息，不能把它挂在新会话的高亮下。
+      if (!(await refreshSession())) {
+        sessionView.value = null;
+        bubbles.value = [];
+      }
+      await nextTick(); // 等新气泡真的落进 DOM，再解除「切换中」
+    } finally {
+      swapping.value = false;
+    }
   },
 );
 
@@ -733,26 +758,33 @@ async function copyText(text) {
   }
 }
 
+/** 错题本「追问」带过来的消息：取走即清空，所以重复调用是安全的。
+ *  不能只挂在 onMounted 上——聊天页被 KeepAlive 缓存后只会挂载一次，
+ *  之后从错题本追问过来时不会再触发挂载钩子。 */
+async function consumeNavigatePayload() {
+  const payload = navigateToChatMessage.value;
+  if (!payload) return;
+  navigateToChatMessage.value = "";
+  if (typeof payload === "object" && payload.action) {
+    // 结构化导航：直接调用工具（如变式练习）
+    await handleNavigatePayload(payload);
+  } else {
+    // 纯文本：作为聊天消息发送
+    inputText.value = String(payload);
+    await nextTick();
+    sendMessage();
+  }
+}
+
 onMounted(async () => {
   unsubscribe = props.kernel.onFrame(handleFrame);
   loadTools();
   if (props.ready) await refreshSession();
   loadCacheStats();
-
-  // 跨页面跳转：错题本"追问"带过来的消息
-  if (navigateToChatMessage.value) {
-    const payload = navigateToChatMessage.value;
-    navigateToChatMessage.value = "";
-    if (typeof payload === "object" && payload.action) {
-      // 结构化导航：直接调用工具（如变式练习）
-      await handleNavigatePayload(payload);
-    } else {
-      // 纯文本：作为聊天消息发送
-      inputText.value = String(payload);
-      await nextTick();
-      sendMessage();
-    }
-  }
+  await consumeNavigatePayload();
+});
+watch(navigateToChatMessage, (v) => {
+  if (v) consumeNavigatePayload();
 });
 watch(
   () => props.ready,
@@ -812,7 +844,9 @@ onUnmounted(() => unsubscribe?.());
         </div>
       </div>
 
-      <TransitionGroup name="msg" tag="div" class="bubbles">
+      <!-- 切会话时整屏换内容，不是「新消息到达」：换一个没有 CSS 的过渡名（.none-*），
+           让新旧气泡瞬时替换，不播那 10px 上滑 + 淡出——整片文字一起动就是「抖一下」。 -->
+      <TransitionGroup :name="swapping ? 'none' : 'msg'" tag="div" class="bubbles">
         <MessageBubble
           v-for="(b, i) in bubbles"
           :key="b.messageId || i"

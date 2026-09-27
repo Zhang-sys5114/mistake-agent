@@ -2979,6 +2979,16 @@ textarea {
   font-size: 12px;
 }
 
+/* 一次性说明（中性色，不是报错）：删掉当前会话后解释那条「新会话」从哪来。 */
+.session-panel-notice {
+  margin: 0 0 var(--space-sm);
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--color-muted);
+  color: var(--color-text);
+  font-size: 12px;
+}
+
 .session-panel-list {
   flex: 1;
   overflow-y: auto;
