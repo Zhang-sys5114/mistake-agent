@@ -163,13 +163,28 @@ function isLongText(text) {
   return wordCount(text) > 60;
 }
 
+/**
+ * 卡片/抽屉标题：判分归档时模型生成的一句话概括。
+ * 存量错题（title 字段是后加的）与练习模块归档的错题都没有标题，
+ * 回退到「学科 · 知识点」——总比空一行强，且与归档前的观感一致。
+ */
+function mistakeTitle(m) {
+  if (m?.title) return m.title;
+  return `${m?.subject || "未分类"} · ${m?.knowledge_point || "未标注知识点"}`;
+}
+
+/** 搜索时也认标题：标题是题干/考点的浓缩，学生常按它找题。 */
+function searchableText(m) {
+  return [m.title, m.question, m.knowledge_point, m.analysis, m.student_answer, m.reference_answer];
+}
+
 /* -------- 搜索 / 排序 -------- */
 const filtered = computed(() => {
   const q = search.value.trim().toLowerCase();
   let list = mistakes.value;
   if (q) {
     list = list.filter((m) =>
-      [m.question, m.knowledge_point, m.analysis, m.student_answer, m.reference_answer]
+      searchableText(m)
         .filter(Boolean)
         .some((t) => String(t).toLowerCase().includes(q)),
     );
@@ -394,6 +409,7 @@ async function menuDelete() {
 function openEditDialog(mistake) {
   editForm.value = {
     id:               String(mistake.id),
+    title:            mistake.title || "",
     subject:          mistake.subject || "",
     knowledge_point:  mistake.knowledge_point || "",
     question:         mistake.question || "",
@@ -410,6 +426,9 @@ async function saveEditDialog() {
   try {
     const r = await props.kernel.triggerCommand("grading::update", {
       id:               editForm.value.id,
+      // 传空串而不是 undefined：清空标题要真的清掉（后端把纯空白归一成「无标题」，
+      // 卡片回退显示「学科 · 知识点」），undefined 是「不改」，会把旧标题留着。
+      title:            editForm.value.title || "",
       subject:          editForm.value.subject || undefined,
       knowledge_point:  editForm.value.knowledge_point || undefined,
       question:         editForm.value.question || undefined,
@@ -583,7 +602,7 @@ onMounted(load);
         :class="{ 'edit-mode': editMode }"
         tabindex="0"
         role="button"
-        :aria-label="'打开错题详情：' + stripHtml(m.question).slice(0, 40)"
+        :aria-label="'打开错题详情：' + mistakeTitle(m)"
         @click="longPressed ? (longPressed = false) : (editMode ? toggleSelect(String(m.id)) : openDrawer(m))"
         @keydown.enter="longPressed ? (longPressed = false) : (editMode ? toggleSelect(String(m.id)) : openDrawer(m))"
         @keydown.space.prevent="longPressed ? (longPressed = false) : (editMode ? toggleSelect(String(m.id)) : openDrawer(m))"
@@ -600,6 +619,9 @@ onMounted(load);
             @change="toggleSelect(String(m.id))"
           />
         </div>
+
+        <!-- 标题：模型判分时生成的一句话概括；无标题的存量错题回退「学科 · 知识点」 -->
+        <h3 class="mistake-card-title">{{ mistakeTitle(m) }}</h3>
 
         <div class="card-head">
           <span v-if="m.pinned" class="badge pinned-badge">
@@ -619,13 +641,14 @@ onMounted(load);
         <!-- 题干 2 行截断 -->
         <div class="mistake-question-clamp md-body" v-html-smiles="m.question"></div>
 
-        <!-- 作答对比压缩为一行 -->
+        <!-- 作答对比压缩为一行：走 v-html-smiles 让 $...$ 公式渲染出来，
+             但不要 md-body——它的 white-space:normal 会撑破这一行的省略号。 -->
         <div class="answer-strip">
           <span v-if="m.student_answer" class="answer-strip-label student-label">你的作答</span>
-          <span v-if="m.student_answer" class="answer-strip-text">{{ m.student_answer }}</span>
+          <span v-if="m.student_answer" class="answer-strip-text" v-html-smiles="m.student_answer"></span>
           <span v-if="m.student_answer && m.reference_answer" class="answer-strip-sep">|</span>
           <span v-if="m.reference_answer" class="answer-strip-label ref-label">参考答案</span>
-          <span v-if="m.reference_answer" class="answer-strip-text">{{ m.reference_answer }}</span>
+          <span v-if="m.reference_answer" class="answer-strip-text" v-html-smiles="m.reference_answer"></span>
         </div>
       </article>
     </div>
@@ -705,6 +728,10 @@ onMounted(load);
           </div>
           <div class="edit-dialog-body">
             <div class="field">
+              <span>标题</span>
+              <input v-model="editForm.title" class="input" placeholder="一句话概括考点或错因，留空则显示「学科 · 知识点」" />
+            </div>
+            <div class="field">
               <span>学科</span>
               <input v-model="editForm.subject" class="input" placeholder="如：数学" />
             </div>
@@ -761,6 +788,7 @@ onMounted(load);
                 <Icon icon="mdi:file-document-outline" width="12" />长文 · 约 {{ wordCount(drawerItem.question) }} 词
               </span>
             </div>
+            <h3 class="drawer-title">{{ mistakeTitle(drawerItem) }}</h3>
             <div class="drawer-header-right">
               <time class="muted">{{ formatTime(drawerItem.created_at) }}</time>
               <span class="drawer-counter muted">{{ drawerIndex + 1 }} / {{ filtered.length }}</span>

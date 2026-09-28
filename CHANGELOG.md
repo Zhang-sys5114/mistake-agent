@@ -63,6 +63,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   by an earlier run is left alone. The original file is renamed to
   `<key>.jsonl.bak` with its bytes intact; since `.bak` is not `.jsonl`,
   a second startup is a no-op. Failures only log a warning and leave the original in place.
+- **Mistake card titles**: `Mistake.title` is a model-generated
+  one-liner (≤16 characters) summarising the knowledge point or the
+  mistake, shown as the headline of each card and of the detail drawer.
+  `grading::upload` gained a `title` field on every item, and
+  `grading::update` accepts `title` — an empty or whitespace-only value
+  clears it. Existing mistakes have no title and fall back to
+  「学科 · 知识点」, so nothing needs backfilling. Titles are matched by
+  the mistake-book search alongside the question and analysis.
 
 ### Changed
 
@@ -133,6 +141,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `display_text` on `send_user_message`, and the prompt set drops
   `vision_prompt` / `grading_system_prompt` in favour of the always-on
   `GRADING_GUIDANCE`.
+- **Mistake cards render formulas in the answer strip**: the 「你的作答 /
+  参考答案」 one-liners now go through `v-html-smiles` (KaTeX + mhchem +
+  DOMPurify) instead of plain interpolation, so `$x^2$` shows as a
+  formula. The single-line ellipsis and 13px size are kept: the generated
+  `<p>` wrappers are flattened to `display: inline` and formulas are
+  scaled back to the strip's font size (a `.md-body` class is
+  deliberately *not* used — its `white-space: normal` would defeat the
+  ellipsis).
 
 ### Removed
 

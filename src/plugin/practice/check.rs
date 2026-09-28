@@ -115,6 +115,8 @@ pub async fn check_handler(
                 .clone()
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| "未标注".into()),
+            // 练习模块不调模型出标题：卡片回退显示「学科 · 知识点」。
+            title: None,
             question: p.question.clone(),
             student_answer: p.student_answer.clone(),
             reference_answer: reference.map(str::to_string),

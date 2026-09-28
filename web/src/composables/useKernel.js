@@ -67,7 +67,9 @@ export function useKernel() {
       }).catch((e) => {
         if (pending.delete(id)) {
           clearTimeout(timer);
-          reject(e);
+          // Tauri 命令失败时 reject 的是**裸字符串**（Rust 侧 Result<_, String>），
+          // 不是 Error——不包一层的话调用方 `e.message` 全是 undefined。
+          reject(e instanceof Error ? e : new Error(String(e)));
         }
       });
     });

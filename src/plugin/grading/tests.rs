@@ -4,8 +4,9 @@ use super::*;
 
 use crate::kernel::plugin::services::{
     Mistake, MistakeFilter, MistakeId, MistakePatch, MistakeStore, StorageError, StorageHandle,
+    normalize_title,
 };
-use crate::plugin::grading::params::GradedItem;
+use crate::plugin::grading::params::{GradedItem, UploadParams};
 use std::sync::Arc;
 
 /// 内存假错题本：插件单测不落盘、不调真实 API。
@@ -61,6 +62,9 @@ impl MistakeStore for FakeStore {
         }
         if let Some(k) = &p.knowledge_point {
             m.knowledge_point = k.clone();
+        }
+        if let Some(t) = &p.title {
+            m.title = normalize_title(Some(t));
         }
         if let Some(q) = &p.question {
             m.question = q.clone();
@@ -122,6 +126,14 @@ fn graded_item_schema_contains_new_fields() {
     assert!(props.contains_key("subject"));
     assert!(props.contains_key("reference_answer"));
     assert!(props.contains_key("student_answer"));
+    assert!(props.contains_key("title"));
+
+    // 模型真正读到的是 upload 工具的内联 schema（不是上面这份）：标题的写法要求
+    // 只在这里能传给模型，缺了它模型不会生成标题。
+    let upload = serde_json::to_value(schemars::schema_for!(UploadParams)).unwrap();
+    let item = &upload["properties"]["items"]["items"]["properties"]["title"];
+    assert_eq!(item["type"], json!(["string", "null"]));
+    assert!(item["description"].as_str().unwrap().contains("16 字"));
 }
 
 #[tokio::test]
@@ -151,6 +163,7 @@ async fn list_handler_filters_by_subject() {
         id: MistakeId(uuid::Uuid::new_v4()),
         subject: "数学".into(),
         knowledge_point: "绝对值".into(),
+        title: None,
         question: "|-3| = ?".into(),
         student_answer: "-3".into(),
         reference_answer: Some("3".into()),
@@ -181,6 +194,7 @@ async fn upload_archives_subject_and_reference_answer() {
     let item = GradedItem {
         number: Some("1".into()),
         question: "1+1=?".into(),
+        title: Some("加法运算".into()),
         student_answer: Some("3".into()),
         subject: Some("数学".into()),
         reference_answer: Some("2".into()),
@@ -195,6 +209,7 @@ async fn upload_archives_subject_and_reference_answer() {
             id: MistakeId(uuid::Uuid::new_v4()),
             subject: item.subject.clone().unwrap_or_else(|| "未分类".into()),
             knowledge_point: item.knowledge_point.clone().unwrap_or_default(),
+            title: normalize_title(item.title.as_deref()),
             question: item.question.clone(),
             student_answer: item.student_answer.clone().unwrap_or_default(),
             reference_answer: item.reference_answer.clone(),
@@ -209,6 +224,45 @@ async fn upload_archives_subject_and_reference_answer() {
     let got = handle.get(&saved).await.unwrap().unwrap();
     assert_eq!(got.subject, "数学");
     assert_eq!(got.reference_answer.as_deref(), Some("2"));
+    assert_eq!(got.title.as_deref(), Some("加法运算"));
+}
+
+/// 编辑标题：传空串等价于清空（回到前端「学科 · 知识点」回退展示），
+/// 而不是在库里存一条空标题——两条写入路径共用 `normalize_title`。
+#[tokio::test]
+async fn update_handler_sets_and_clears_title() {
+    let store = Arc::new(FakeStore::default());
+    let handle = StorageHandle::new(store.clone());
+    let id = handle
+        .save(&Mistake {
+            id: MistakeId(uuid::Uuid::new_v4()),
+            subject: "数学".into(),
+            knowledge_point: "绝对值".into(),
+            title: None,
+            question: "|-3| = ?".into(),
+            student_answer: "-3".into(),
+            reference_answer: Some("3".into()),
+            is_correct: false,
+            analysis: "符号错误".into(),
+            created_at: chrono::Utc::now(),
+            pinned: false,
+            deleted_at: None,
+        })
+        .await
+        .unwrap();
+
+    let out = update_handler(
+        handle.clone(),
+        json!({ "id": id.to_string(), "title": "  绝对值符号  " }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out["mistake"]["title"], "绝对值符号"); // 两端空白被 trim
+
+    let out = update_handler(handle.clone(), json!({ "id": id.to_string(), "title": "   " }))
+        .await
+        .unwrap();
+    assert!(out["mistake"]["title"].is_null()); // 纯空白 = 清空
 }
 
 #[tokio::test]
@@ -219,6 +273,7 @@ async fn get_handler_returns_single_mistake() {
         id: MistakeId(uuid::Uuid::new_v4()),
         subject: "数学".into(),
         knowledge_point: "绝对值".into(),
+        title: None,
         question: "|-3| = ?".into(),
         student_answer: "-3".into(),
         reference_answer: Some("3".into()),
@@ -244,6 +299,7 @@ async fn update_handler_pins_and_marks_mastered() {
         id: MistakeId(uuid::Uuid::new_v4()),
         subject: "数学".into(),
         knowledge_point: "绝对值".into(),
+        title: None,
         question: "|-3| = ?".into(),
         student_answer: "-3".into(),
         reference_answer: Some("3".into()),
@@ -284,6 +340,7 @@ async fn remove_many_handler_soft_deletes_selected() {
         id: MistakeId(uuid::Uuid::new_v4()),
         subject: "数学".into(),
         knowledge_point: "绝对值".into(),
+        title: None,
         question: "|-3| = ?".into(),
         student_answer: "-3".into(),
         reference_answer: Some("3".into()),

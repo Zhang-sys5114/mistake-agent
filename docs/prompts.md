@@ -44,8 +44,13 @@
 
 ### 3. 批改规则（GRADING_GUIDANCE，常驻系统提示）
 
-模型直接读图判分后，`grading::upload` 的 `items` 入参由工具 schema 描述字段（number/question/student_answer/subject/reference_answer/correct/score/total/knowledge_point/analysis）；常驻规则补充：
+模型直接读图判分后，`grading::upload` 的 `items` 入参由工具 schema 描述字段（title/number/question/student_answer/subject/reference_answer/correct/score/total/knowledge_point/analysis）；常驻规则补充：
 LaTeX/SMILES 保留、语法/时态/词性填空判分标准、解答题按步骤给分、数学等价判断。原 `grading_system_prompt`（模型判分 JSON 调用）已退役。
+
+其中 `question` 与 `title` 有额外的措辞约束（系统提示与内联 schema 两处都写了，模型两处都能读到）：
+
+- `question` 必须**逐字保留题干原文**，不概括、不重写、不漏小问——错题卡的题干就是原题，改写过的"题目"会让学生对不上作业本。公式按 LaTeX 标记保留。
+- `title` 是错题卡顶部那句话（≤16 字，概括考点或错因，不带题号/句号/引号）；没有标题的存量错题由前端回退显示「学科 · 知识点」。
 
 ### 4. ~~会话切换决策提示（turn_decider_prompt）~~ — 已退役，ADR-0044
 
@@ -92,6 +97,7 @@ compute::verify（Pyodide）做可解性对拍，失败带原因重出、连续 
 
 | 日期 | 变更 | 原因/结果 |
 |---|---|---|
+| 2026-09-27 | `grading::upload` 新增 `title` 字段（错题卡一句话标题，≤16 字）；`ENGLISH_GRADING_RULE` 的英文字段清单同步加上 `title` | TODO 4「错题本优化」：错题卡顶部由模型生成标题，存量错题前端回退「学科 · 知识点」。题干「逐字保留原文」约束 2026-09-23 已随 ADR-0046 落在系统提示与内联 schema 两处，本次未改 |
 | 2026-09-23 | 新增会话标题提示（`session_title_prompt` + `ENGLISH_TITLE_RULE`） | ADR-0044 收尾：侧栏会话名由模型按首条消息生成（≤12 字、无引号/句号/前缀），失败降级为首条用户消息的可见文本前 40 字；已有标题（含用户改名）不再调模型 |
 | 2026-09-23 | `vision_prompt` / `grading_system_prompt` 退役；新增常驻 `GRADING_GUIDANCE`；系统提示作业流程改为「直读图片/PDF 正文 → grading__upload(items)」 | ADR-0046：图片直入上下文，grading 只归档 |
 | 2026-09-23 | 图片理解改由 `deepseek-flash` 承担（Responses `input_image`） | 视觉端点退役（ADR-0045）：单份 DeepSeek 配置同时负责对话、判分与图片理解 |

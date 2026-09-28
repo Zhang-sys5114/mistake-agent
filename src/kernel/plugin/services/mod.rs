@@ -65,7 +65,9 @@ impl Default for AbortSignal {
     }
 }
 
-pub use crate::mistake::{Mistake, MistakeFilter, MistakeId, MistakePatch, MistakeStore};
+pub use crate::mistake::{
+    Mistake, MistakeFilter, MistakeId, MistakePatch, MistakeStore, normalize_title,
+};
 pub use compute::{ComputeError, ComputeHandle, ComputeRequest, ComputeResult, ComputeService};
 pub use memory::{MemoryError, MemoryHandle, MemoryPath, MemoryService, MemoryView};
 pub use model::{

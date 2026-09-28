@@ -43,6 +43,10 @@ const navItems = [
   { id: "settings", label: "设置", icon: "mdi:cog-outline" },
 ];
 
+// 只缓存聊天页（见模板里的 KeepAlive 注释）。写成常量而不是模板里的数组字面量：
+// 字面量每次渲染都是新引用，会让 KeepAlive 内部的 include/exclude watcher 白跑一趟。
+const KEEP_ALIVE_VIEWS = ["ChatPage"];
+
 /* ──── 左下角用户区：昵称（设置里可改）+ 一个占位菜单 ──── */
 const nickname = ref("");
 const displayName = computed(() => nickname.value.trim() || "同学");
@@ -113,18 +117,25 @@ function newSession() {
   sessionList.value?.newSession();
 }
 
-/** 用户点列表里的会话：服务端归档旧 Active 并激活目标（ADR-0044）。 */
+/** 用户点列表里的会话：服务端归档旧 Active 并激活目标（ADR-0044）。
+ *  `busy` 只挡「换会话」这一个动作（后端本来就会以 turn_in_progress 拒掉），
+ *  不挡「回聊天页」——否则回合在飞时切去设置页就再也回不来了。 */
 async function onSelectSession(key) {
-  if (!key || busy.value) return;
+  if (!key) return;
   if (key !== activeSessionKey.value) {
+    if (busy.value) {
+      status.value = "回合进行中，结束后再切换会话";
+      view.value = "chat"; // 回得去，只是还停在正在回答的那条会话上
+      return;
+    }
     try {
       await kernel.call("open_session", { key }, 15000);
     } catch (e) {
       status.value = `切换会话失败：${e.message}`;
       return;
     }
+    activeSessionKey.value = key;
   }
-  activeSessionKey.value = key;
   view.value = "chat"; // 面板常驻侧栏：在别的页面点会话也回到聊天
 }
 
@@ -273,7 +284,7 @@ onBeforeUnmount(() => {
           type="button"
           title="新对话"
           aria-label="新对话"
-          :disabled="busy"
+          :disabled="busy || !ready"
           @click="newSession"
         >
           <Icon icon="mdi:plus" width="18" />
@@ -287,6 +298,7 @@ onBeforeUnmount(() => {
           :kernel="kernel"
           :active-key="activeSessionKey"
           :busy="busy"
+          :ready="ready"
           @select="onSelectSession"
           @changed="refreshSessionList"
         />
@@ -353,18 +365,25 @@ onBeforeUnmount(() => {
     <section class="main">
       <div class="view-host">
         <Transition name="view" mode="out-in">
-          <ChatPage
-            v-if="view === 'chat'"
-            :key="'chat'"
-            :kernel="kernel"
-            :ready="ready"
-            v-model:active-key="activeSessionKey"
-            @status="onStatus"
-            @navigate="navigate"
-            @sessions-dirty="refreshSessionList"
-          />
-          <MistakesPage v-else-if="view === 'mistakes'" :key="'mistakes'" :kernel="kernel" />
-          <SettingsPage v-else :key="'settings'" :kernel="kernel" @saved="loadProfile" />
+          <!-- 只缓存聊天页：它订阅着 kernel 帧，卸载即退订——回合在飞时切去设置/错题本，
+               半截回答连同 busy 一起丢，而 busy 卡在 true 会让侧栏的会话再也点不动。
+               缓存后切走只是 deactivate，流式回答照常往下写，切回来接着看。
+               `include` 按组件名匹配（`<script setup>` 由文件名推断出 "ChatPage"）；
+               错题本/设置不缓存，回读时要拿到最新数据。 -->
+          <KeepAlive :include="KEEP_ALIVE_VIEWS">
+            <ChatPage
+              v-if="view === 'chat'"
+              :key="'chat'"
+              :kernel="kernel"
+              :ready="ready"
+              v-model:active-key="activeSessionKey"
+              @status="onStatus"
+              @navigate="navigate"
+              @sessions-dirty="refreshSessionList"
+            />
+            <MistakesPage v-else-if="view === 'mistakes'" :key="'mistakes'" :kernel="kernel" />
+            <SettingsPage v-else :key="'settings'" :kernel="kernel" @saved="loadProfile" />
+          </KeepAlive>
         </Transition>
       </div>
     </section>

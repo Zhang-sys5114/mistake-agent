@@ -6,7 +6,9 @@ use serde_json::{Value, json};
 use crate::kernel::agent::dispatch::ToolCallContext;
 use crate::kernel::contract::ToolError;
 use crate::kernel::events::Event;
-use crate::kernel::plugin::services::{Mistake, MistakeId, MistakePatch, StorageHandle};
+use crate::kernel::plugin::services::{
+    Mistake, MistakeId, MistakePatch, StorageHandle, normalize_title,
+};
 
 use super::params::{GetParams, RemoveManyParams, RemoveParams, UpdateParams, UploadParams};
 
@@ -41,6 +43,7 @@ pub(crate) async fn update_handler(
     let patch = MistakePatch {
         subject: p.subject,
         knowledge_point: p.knowledge_point,
+        title: p.title,
         question: p.question,
         student_answer: p.student_answer,
         reference_answer: p.reference_answer,
@@ -122,6 +125,7 @@ pub(crate) async fn upload_handler(
                     .clone()
                     .unwrap_or_else(|| "未标注".into()),
                 question: item.question.clone(),
+                title: normalize_title(item.title.as_deref()),
                 student_answer: item
                     .student_answer
                     .clone()

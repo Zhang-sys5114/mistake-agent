@@ -1,21 +1,37 @@
 <script setup>
-import { onMounted, ref } from "vue";
+import { onBeforeUnmount, ref, watch } from "vue";
 import { Icon } from "@iconify/vue";
 
 const props = defineProps({
   kernel: { type: Object, required: true },
   activeKey: { type: String, default: null },
   busy: { type: Boolean, default: false },
+  // 面板是常驻的，首屏渲染早于 kernel.start() 完成；准备好之前不能发 RPC。
+  ready: { type: Boolean, default: false },
 });
 const emit = defineEmits(["select", "changed"]);
 
 const sessions = ref([]);
 const loading = ref(false);
 const error = ref("");
+const notice = ref("");
 const renamingKey = ref(null);
 const renameText = ref("");
 const confirmKey = ref(null);
 const working = ref(false);
+
+let noticeTimer = null;
+
+/** 一次性提示（几秒后自散）：用来解释「删掉的会话为什么看起来还在」。 */
+function flash(text) {
+  notice.value = text;
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => {
+    notice.value = "";
+  }, 8000);
+}
+
+onBeforeUnmount(() => clearTimeout(noticeTimer));
 
 /** 标题回退链：模型标题 → 学习目标 → 「新会话」（后端已保证旧数据 title 缺省）。 */
 function sessionTitle(s) {
@@ -78,8 +94,11 @@ async function newSession() {
   }
 }
 
+/**
+ * 一律上报，哪怕点的是当前会话：切会话的 RPC 由 App 按 key 是否变化决定发不发，
+ * 但「回到聊天页」必须在每次点击时都发生——否则在设置页点当前会话会毫无反应。
+ */
 function select(key) {
-  if (key === props.activeKey) return;
   emit("select", key);
 }
 
@@ -116,9 +135,12 @@ async function doDelete() {
     const r = await props.kernel.call("delete_session", { key }, 20000);
     await refreshList();
     emit("changed");
-    // 删掉的是当前会话：后端补建了空会话，切过去（否则聊天区停在已删除会话上）。
-    if (r.replacement_session_key) emit("select", r.replacement_session_key);
-    else if (key === props.activeKey && sessions.value.length) {
+    // 删掉的是当前会话：后端补建了空会话（单 Active 不变量），切过去并把这件事说清楚——
+    // 新空会话同样显示「新会话 / 刚刚」，不解释的话看起来就像删除没生效。
+    if (r.replacement_session_key) {
+      flash("已删除当前会话，并从一条新的空会话继续。");
+      emit("select", r.replacement_session_key);
+    } else if (key === props.activeKey && sessions.value.length) {
       emit("select", sessions.value[0].key);
     }
   } catch (e) {
@@ -127,15 +149,25 @@ async function doDelete() {
 }
 
 defineExpose({ refreshList, newSession });
-onMounted(refreshList);
+// 内核就绪后再列（常驻面板不能等 onMounted：那时 start_kernel 还没跑完，
+// kernel_send 会以「state not managed」被拒），此后每次 ready 变真都重列。
+watch(
+  () => props.ready,
+  (ready) => {
+    if (ready) refreshList();
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
   <aside class="session-panel">
     <p v-if="error" class="session-panel-error" role="alert">{{ error }}</p>
+    <p v-if="notice" class="session-panel-notice" role="status">{{ notice }}</p>
 
     <div class="session-panel-list">
-      <p v-if="loading && !sessions.length" class="muted session-panel-empty">正在读取…</p>
+      <p v-if="!ready" class="muted session-panel-empty">正在启动内核…</p>
+      <p v-else-if="loading && !sessions.length" class="muted session-panel-empty">正在读取…</p>
       <p v-else-if="!sessions.length" class="muted session-panel-empty">还没有会话。</p>
 
       <div

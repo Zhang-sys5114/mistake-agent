@@ -108,10 +108,10 @@ pub trait UserPlugin {
 | 全名 | 类型 | 策略 | 说明 |
 |---|---|---|---|
 | `demo::hello` | tool | user_and_model | 链路自检 |
-| `grading::upload` | tool | user_and_model | 场景一：`{items:[GradedItem]}` 归档模型读图判分结果（ADR-0046；题干逐字保留） |
+| `grading::upload` | tool | user_and_model | 场景一：`{items:[GradedItem]}` 归档模型读图判分结果（ADR-0046；题干逐字保留，`title` 为错题卡标题） |
 | `grading::list` | tool | user_and_model | `{subject?, knowledge_point?}` 列出错题本 |
 | `grading::get` | command | user_only | `{id}` 获取单条错题详情，软删除后返回不存在 |
-| `grading::update` | command | user_only | `{id, subject?, knowledge_point?, question?, student_answer?, reference_answer?, analysis?, is_correct?, pinned?}` 单题编辑、置顶/取消置顶、标记已掌握 |
+| `grading::update` | command | user_only | `{id, title?, subject?, knowledge_point?, question?, student_answer?, reference_answer?, analysis?, is_correct?, pinned?}` 单题编辑、置顶/取消置顶、标记已掌握；`title` 传空串=清空（回退显示「学科 · 知识点」） |
 | `grading::remove` | command | user_only | `{id}` 软删除单条错题 |
 | `grading::remove_many` | command | user_only | `{ids: [uuid]}` 按 id 列表批量/全选软删除 |
 | `memory::save` | tool | user_and_model | `{filename?, content?}` 保存记忆条目（可选参数；content 缺省时模型应总结当前会话要点填入） |

@@ -19,7 +19,7 @@ use crate::kernel::audit::{AuditRecord, AuditSink};
 use crate::kernel::message::{Message, MessageId, MessageKind};
 use crate::kernel::plugin::services::{
     Mistake, MistakeFilter, MistakeId, MistakePatch, MistakeStore, SessionStore, StorageError,
-    StorageService,
+    StorageService, normalize_title,
 };
 use std::path::{Path, PathBuf};
 

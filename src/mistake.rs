@@ -26,6 +26,10 @@ pub struct Mistake {
     pub id: MistakeId,
     pub subject: String,
     pub knowledge_point: String,
+    /// 卡片标题：判分归档时由模型一并生成的一句话概括（≤16 字）。
+    /// 存量错题没有这个字段（`None`），前端回退显示「学科 · 知识点」。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub question: String,
     pub student_answer: String,
     pub reference_answer: Option<String>,
@@ -49,12 +53,22 @@ pub struct MistakeFilter {
 pub struct MistakePatch {
     pub subject: Option<String>,
     pub knowledge_point: Option<String>,
+    /// `None` = 不改；`Some("")`/纯空白 = 清空标题（回到前端回退展示）。
+    pub title: Option<String>,
     pub question: Option<String>,
     pub student_answer: Option<String>,
     pub reference_answer: Option<Option<String>>,
     pub analysis: Option<String>,
     pub is_correct: Option<bool>,
     pub pinned: Option<bool>,
+}
+
+/// 标题归一化：trim 后为空一律视作「没有标题」（前端回退显示「学科 · 知识点」）。
+/// 归档与编辑两条写入路径共用，免得空串在库里存出两种形态。
+pub fn normalize_title(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
 }
 
 /// 错题本：用户插件唯一可见的 storage 面。

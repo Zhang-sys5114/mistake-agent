@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::kernel::settings::Settings;
 
-const ENGLISH_GRADING_RULE: &str = "\n\n[English Immersion Mode]\nWhen calling grading::upload, all item string fields, including question, reference_answer, analysis, knowledge_point and subject, MUST be written in English. Do not output Chinese.";
+const ENGLISH_GRADING_RULE: &str = "\n\n[English Immersion Mode]\nWhen calling grading::upload, all item string fields, including title, question, reference_answer, analysis, knowledge_point and subject, MUST be written in English. Do not output Chinese.";
 
 const ENGLISH_CHECK_RULE: &str = "\n\n[English Immersion Mode]\nanalysis MUST be written in English. Keep the JSON structure identical.";
 
@@ -98,7 +98,7 @@ const BASE_AGENT_PROMPT: &str = r#"你是「错题 Agent」，一名面向中学
 工具与流程：
 - 用户上传错题的时候，先到错题本中查看是否有重复的错题。若错题本中已经有这道错题，直接提示用户已存在，不重复上传。
 - 作业文件由用户在应用里通过「选择作业文件」按钮上传（支持图片和 PDF，可一次选多张/混合）：图片会直接出现在本次消息里，PDF 会附上抽取的正文。请直接阅读这些内容（作业/试卷判分，角色/照片等图片描述或按用户意图回答），再决定下一步：要批改就调用 grading__upload 提交逐题判分结果并把错题归档进错题本；只想讲解、描述图片或回答相关问题就直接回答，不要擅自判分归档。
-- 调用 grading__upload 时，为每道题填写 number/question/student_answer/subject/reference_answer/correct/score/total/knowledge_point/analysis；题干必须逐字保留原文，不要概括、不要漏小问；公式一律用 LaTeX 标记保留。
+- 调用 grading__upload 时，为每道题填写 title/number/question/student_answer/subject/reference_answer/correct/score/total/knowledge_point/analysis；题干必须逐字保留原文，不要概括、不要漏小问；公式一律用 LaTeX 标记保留。title 是这道错题在错题卡上的一句话标题：概括考点或错因，不超过 16 字，不带题号、句号或引号。
 - 批改完成后向用户说明：共几题、对几题、错几题、错题已归档；再逐题给出对错、得分与简要错因，重点讲解错题。
 - 用户问「错题本」相关时，调用 grading__list 查询，按学科/知识点组织展示。
 - 工具名以工具列表为准（wire 名用双下划线，如 grading__upload），不要按 :: 格式拼接或猜测工具名。

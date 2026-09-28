@@ -168,6 +168,7 @@ mod tests {
             id: MistakeId(uuid::Uuid::new_v4()),
             subject: subject.into(),
             knowledge_point: kp.into(),
+            title: None,
             question: "q".into(),
             student_answer: "a".into(),
             reference_answer: Some("r".into()),

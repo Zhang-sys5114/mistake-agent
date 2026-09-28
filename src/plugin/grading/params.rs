@@ -40,6 +40,7 @@ fn graded_item_object_schema() -> serde_json::Value {
         "properties": {
             "number": {"type": ["string", "null"], "description": "题号"},
             "question": {"type": "string", "description": "题目原文（逐字保留，不要概括或漏小问）"},
+            "title": {"type": ["string", "null"], "description": "这道错题的一句话标题：概括考点或错因，不超过 16 字，不带题号/句号/引号"},
             "student_answer": {"type": ["string", "null"], "description": "学生作答原文"},
             "subject": {"type": ["string", "null"], "description": "学科，如数学/英语/物理/化学/生物/语文，无法判断填 未分类"},
             "reference_answer": {"type": ["string", "null"], "description": "参考答案，可为 null"},
@@ -70,6 +71,7 @@ pub struct UpdateParams {
     pub id: String,
     pub subject: Option<String>,
     pub knowledge_point: Option<String>,
+    pub title: Option<String>,
     pub question: Option<String>,
     pub student_answer: Option<String>,
     pub reference_answer: Option<Option<String>>,
@@ -92,6 +94,7 @@ pub struct RemoveManyParams {
 pub(crate) struct GradedItem {
     pub(crate) number: Option<String>,
     pub(crate) question: String,
+    pub(crate) title: Option<String>,
     pub(crate) student_answer: Option<String>,
     pub(crate) subject: Option<String>,
     pub(crate) reference_answer: Option<String>,
@@ -114,6 +117,7 @@ impl schemars::JsonSchema for GradedItem {
             "properties": {
                 "number": {"type": ["string", "null"]},
                 "question": {"type": "string"},
+                "title": {"type": ["string", "null"]},
                 "student_answer": {"type": ["string", "null"]},
                 "subject": {"type": ["string", "null"]},
                 "reference_answer": {"type": ["string", "null"]},

@@ -2179,6 +2179,18 @@ textarea {
   border-color: var(--color-accent);
 }
 
+/* 卡片标题：模型生成的一句话概括（存量错题回退「学科 · 知识点」）。
+   单行省略——标题只是索引，完整题干在下面的 2 行截断里。 */
+.mistake-card-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--color-text-strong);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .card-head {
   display: flex;
   flex-wrap: wrap;
@@ -2234,8 +2246,52 @@ textarea {
 .answer-strip-text {
   overflow: hidden;
   text-overflow: ellipsis;
+  /* 条带是 flex 行：不给 min-width:0 的话 flex 项不会收缩到内容宽度以下，
+     省略号永远不出现（文本一旦带公式，min-content 就是整段文字）。 */
+  min-width: 0;
   font-size: 13px;
   color: var(--color-text);
+}
+
+/* 作答走 v-html-smiles 渲染（让 $...$ 公式出来），但内容会被包进 <p> 这类块级元素，
+   块级会顶掉外面的 white-space:nowrap，整行变成多行——这里摊平成行内。
+   注意别给条带加 .md-body：它是 white-space:normal，同样会破坏单行省略。 */
+.answer-strip-text p,
+.answer-strip-text pre,
+.answer-strip-text ul,
+.answer-strip-text ol {
+  display: inline;
+  margin: 0;
+  white-space: inherit;
+}
+
+.answer-strip-text code {
+  font-size: 12px;
+}
+
+/* 公式按条带字号缩，别比正文还大；独立公式也摊平，否则会换行。 */
+.answer-strip-text .katex {
+  font-size: 1em;
+}
+
+.answer-strip-text .katex-display {
+  display: inline;
+  margin: 0;
+}
+
+/* 结构式画布默认 360×260 的块，塞进单行条带会把行高撑到 260px：这里只留个小图。 */
+.answer-strip-text .smiles-canvas {
+  display: inline-block;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+.answer-strip-text .smiles-canvas svg {
+  width: auto;
+  height: 1.4em;
+  vertical-align: middle;
 }
 
 .answer-strip-sep {
@@ -2281,6 +2337,20 @@ textarea {
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-sm);
+}
+
+/* 抽屉标题占满一行、排在标签之前（order:-1）：头部本来就是 wrap 的两段式，
+   这样不必改模板结构就得到「标题在上、标签/操作在下」。 */
+.drawer-title {
+  order: -1;
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--color-text-strong);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .drawer-header-right {
@@ -2976,6 +3046,16 @@ textarea {
   border-radius: var(--radius-sm);
   background: var(--color-danger-soft);
   color: var(--color-danger-ink);
+  font-size: 12px;
+}
+
+/* 一次性说明（中性色，不是报错）：删掉当前会话后解释那条「新会话」从哪来。 */
+.session-panel-notice {
+  margin: 0 0 var(--space-sm);
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--color-muted);
+  color: var(--color-text);
   font-size: 12px;
 }
 

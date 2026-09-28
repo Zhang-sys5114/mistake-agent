@@ -7,9 +7,9 @@
 - **样例端到端**：`samples/` 三套作业图片逐一走 上传→OCR→判分→归档 全链路。
 - **前端自检**：`cd web && npm run check:pyodide`（真实加载 Pyodide WASM 并执行 Python：算术、符号计算（sympy 解方程/求导/积分）、物理（单位换算/运动学）、numpy 数值、异常路径）；`node scripts/katex-check.mjs`（KaTeX 行内/块级/化学式/矩阵/非法公式容错）。
 
-## 2. 用例与结果（单元测试 2026-09-23 实测；真实 API 部分为 2026-08-10 实测，本次未复验）
+## 2. 用例与结果（单元测试 2026-09-27 实测；真实 API 部分为 2026-08-10 实测，本次未复验）
 
-### 单元测试：160 项全过
+### 单元测试：163 项全过
 
 | 模块 | 覆盖点 |
 |---|---|
@@ -18,6 +18,7 @@
 | session | 首消息建会话、无自动切换（新消息一律继续当前会话）、空闲超时只发 `SessionIdle` 事件不分叉、用户新建会话（归档旧会话/新独立 SessionKey/携带或不携带交接摘要/空会话不携带）、用户切换会话（`open_existing` 只归档旧 Active、不改 `last_activity_at`、不存在的 key 报错）、会话标题（模型生成一次即止、模型失败降级截断首条用户消息、无标题文案兜底、已有标题不再调模型、forced_tool 消息取 `display_text` 而非给模型的指令）、摘要节点下挂新消息、LLM 摘要重试与降级、消息级分支派生/切分支、压缩摘要、InterruptBus |
 | rpc | 三个会话方法的 wire 解析（`open_session`/`rename_session`/`delete_session`）、`open_session` 归档旧 Active、删活动会话后仍只有一条 Active（补建空会话）、删归档会话不补建、`rename_session` 落盘与空串清空 |
 | storage | 错题 CRUD、会话追加/归档、`set_title`（裁剪 + 空串清空）/`activate`/`remove_session`（连 jsonl 一起删、重复删报错）、active_path/derive_branch/splice_compaction |
+| storage 错题标题 | 标题随 JSON 落盘并在**重新 open** 后回读（同时验证存量缺字段的解析）、`update` 传空白=清空（存成 `None` 而非空串，且不落盘成空串） |
 | storage 迁移 | 线性会话按边界拆两条 + 原文件 `.bak` 字节一致、兄弟分支按最近边界归属、`交接摘要：`/`上下文压缩摘要：` 不算边界故不拆、单一话题（唯一边界即段首）不拆、**首条即边界但后续还有边界仍拆**（真实数据形态）、段落标题取 `display_text`、二次运行文件集合不变 |
 | prompt | AGENTS.md 加载（正常/缺失/超限/非 UTF-8）、系统提示拼接规则与回退、reason 标签 |
 | memory | 文件 CRUD、目录浏览、子树删除、路径校验（绝对/../空段）、中文路径编码与旧布局迁移 |
@@ -27,6 +28,7 @@
 | prompt | english_mode 开启时各提示词追加 English Immersion Mode 规则（含会话标题提示） |
 | compute | BridgeCompute 回执/取消 |
 | 插件 | 12 插件入口参数 schema、practice 模板生成、report/exam/tracking 聚合断言 |
+| grading 标题 | `upload` 内联 schema 含 `title`（带「≤16 字」描述，模型只读得到这一份）、GradedItem 解析与归档映射带上 `title`、`update` 设标题时裁剪两端空白 / 传纯空白即清空 |
 
 ### 真实 API 链路
 
@@ -49,7 +51,7 @@
 
 ### 门禁
 
-`cargo fmt --check` ✅ ｜ `cargo clippy --all-targets -- -D warnings` ✅ ｜ `cargo test` ✅（160 项）｜ `cd web && npm run build` ✅ ｜ GUI 冒烟（Wayland 下启动 8s 无崩溃）✅
+`cargo fmt --check` ✅ ｜ `cargo clippy --all-targets -- -D warnings` ✅ ｜ `cargo test` ✅（163 项）｜ `cd web && npm run build` ✅ ｜ GUI 冒烟（Wayland 下启动 8s 无崩溃）✅
 
 > 存量会话迁移（ADR-0044 收尾）：单测覆盖拆分/幂等/`.bak`/单 Active 不变量，且在**真实数据副本**上做过一次走查（`sessions/` 复制到临时目录后调 `migrate_legacy_sessions`，2026-09-23）：`0ad77bb4….jsonl` 的 152 条消息拆成 **22 条**会话（1 条 Active + 21 条 Archived，消息数合计仍为 155）、原文件生成 1 个 `.bak`、`c3cd91d9….jsonl` 无边界不拆、二次运行文件集合不变。**应用内首次启动的真实迁移尚未走查**：先 `cp -r ~/Documents/.mistake-agent/sessions ~/Documents/.mistake-agent/sessions.pre-migration` 备份，再启动应用确认同一结果。前端会话列表（新建/重命名/删除/切换）无自动化测试基建，靠构建 + 真机走查。
 
@@ -72,6 +74,7 @@
 | 13 | DeepSeek 503 导致摘要/回合失败 | 无重试 | 已修：摘要器对瞬时错误重试 2 次（线性退避），主回合流重试 1 次；系统性错误（无余额/模型下架）不重试直接降级；单测模拟 503→成功通过。守卫模型已退役（ADR-0044），重试实现移至 `session/summarize.rs::complete_with_retry` |
 | 14 | 工具调用回合报"reasoning_text must be passed back"（批改失败） | **真实根因是 call_id 不匹配**：loop 丢弃首轮 function_call 的真实 call_id，第二轮回填用随机 uuid；DeepSeek 对错误 call_id 的报错信息误导为 reasoning | 已修：ToolCall 消息保存真实 call_id（tool_call_with_id），回传时优先使用；保留 reasoning 回传（无害）；真实批改多轮验证通过 |
 | 15 | 会话切换后上下文/历史断裂 | 切换只注入摘要，模型记不住之前对话 | 已被 ADR-0044 取代：模型不再自动切换会话。用户新建会话时按需携带交接摘要（`carry_summary`），新会话为独立 SessionKey，旧会话完整归档可查 |
+| 16 | 错题标题与「题干逐字保留」是否真的按 prompt 生成 | 属模型行为，非链路故障——单测只保证字段进了模型读得到的 schema 与提示词、落库不加工 | 待真实 API 复验（TODO 4）：上传一份作业，核对归档错题的 `title` 是否 ≤16 字且无题号/句号，`question` 是否与原题逐字一致（尤其小问、公式） |
 
 ## 4. 成本观察（真实调用）
 

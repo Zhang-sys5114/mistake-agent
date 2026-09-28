@@ -1,5 +1,18 @@
 # TODO
 
+## 新增待办（2026-09-27）：错题本学科分类没有归一化
+
+**现象**：`Mistake.subject` 是自由字符串，全仓**唯一**一份「学科清单」是 [grading/params.rs](../src/plugin/grading/params.rs) 里给模型看的 schema 描述举例——「学科，如数学/英语/物理/化学/生物/语文，无法判断填 未分类」。注意是「**如**」：没有枚举、没有落库校验、没有同义词收敛。模型多打一个空格、写同义词或写学段（`数学 ` / `初中数学` / `math`），就会被下游当成**另一个学科**。
+
+**影响面**：下游全是字符串精确匹配，不做归一化——[exam/mod.rs](../src/plugin/exam/mod.rs) 的组卷过滤是 `subjects.contains(&m.subject.as_str())`；`grading::list` 按学科过滤、[practice/gaps.rs](../src/plugin/practice/gaps.rs) 按学科聚合薄弱点、[tracking/mod.rs](../src/plugin/tracking/mod.rs) 的记忆快照按 `tracking/<学科>` 分文件、[report](../src/plugin/report/mod.rs) 的学科维度统计，全部各算各的。前端错题本的学科 chips 也不是固定列表，而是从已归档数据现算（`[...new Set(mistakes.map(m => m.subject))]`），所以数据里出现几种写法，侧边就长出几个 chip。
+
+**可选做法**（二选一，待定）：
+
+- [ ] **落库前归一化（改动小）**：在 `grading::upload` / `practice::check` 的归档路径加一层 `normalize_subject()`，把同义词与学段前缀收敛到六科 + `未分类`（未命中则原样保留，不硬塞）。存量数据不迁，靠一次按需回填脚本收敛。
+- [ ] **改成枚举（改动大）**：`subject` 用 enum（六科 + `未分类` + `其他(String)` 逃生舱），类型层面杜绝写法漂移；需要一次性迁移存量 `mistakes.json`。
+
+**判断依据**：先看真实数据里到底飘了几种写法（本地 `mistakes.json` 统计一遍 `subject` 取值），只有少数几种的话归一化足够，不必上枚举。
+
 ## 新增待办（2026-09-19）：会话改用户手动切换 + 模型收敛 DeepSeek + 教师服务端 + 错题本优化
 
 ### 1. 会话系统改成只有用户能切换（参考 Chatbox）
@@ -37,9 +50,9 @@
 
 ### 4. 错题本优化（前端错题卡）
 
-- [ ] **错题卡加入标题（标题由模型生成）**：卡片顶部加一行标题（现状：[MistakesPage.vue](../web/src/components/MistakesPage.vue) 卡片只有 学科/知识点 badge + 题干截断，无标题）。做法：判分归档时由模型一并生成短标题 → [src/mistake.rs](../src/mistake.rs) 新增 `title` 字段 + 判分提示词（[prompt.rs](../src/kernel/prompt.rs)）补标题字段与「一句话概括、不超过 N 字」要求 + `grading::update` 支持编辑；卡片/抽屉顶部展示。存量错题无 `title`：前端回退显示 学科 + 知识点（或按需补一次回填）。
-- [ ] **小字加入 LaTeX 渲染支持**：卡片「你的作答 / 参考答案」两处小字（`.answer-strip-text`）目前是纯插值，`$x^2$` / `$\frac{1}{2}$` 原样显示；改为走 `v-html-smiles` / `renderMarkdown`（KaTeX + mhchem + DOMPurify，[markdown.js](../web/src/lib/markdown.js)），同时保留单行省略与字号样式。
-- [ ] **错题正文完全拷贝到错题卡题目内容中**：归档时把原题正文**逐字完整**写入 `question`，不概括、不重写、不漏小问（现状：判分提示词只写「question（题目）」，模型可能缩写重写——[prompt.rs](../src/kernel/prompt.rs) 判分系统提示需补「题干必须逐字保留原文」约束，并核对 `grading__upload` 落库路径与卡片 2 行截断展示）。
+- [x] **错题卡加入标题（标题由模型生成）**：卡片顶部加一行标题（现状：[MistakesPage.vue](../web/src/components/MistakesPage.vue) 卡片只有 学科/知识点 badge + 题干截断，无标题）。做法：判分归档时由模型一并生成短标题 → [src/mistake.rs](../src/mistake.rs) 新增 `title` 字段 + 判分提示词（[prompt.rs](../src/kernel/prompt.rs)）补标题字段与「一句话概括、不超过 N 字」要求 + `grading::update` 支持编辑；卡片/抽屉顶部展示。存量错题无 `title`：前端回退显示 学科 + 知识点（或按需补一次回填）。✅ **已完成（2026-09-27）**：`Mistake.title: Option<String>`（`normalize_title` 归一，空串一律存 `None`）+ `grading::upload` 的 `title` 字段（内联 schema 给模型写清「≤16 字、不带题号/句号/引号」）+ `grading::update` 可改（传纯空白=清空）+ 英文模式字段清单同步；卡片 `/ 抽屉` 顶部展示，存量错题回退「学科 · 知识点」，搜索也认标题。**未回填存量**：回退形态本就是设计内的一档，不写迁移。
+- [x] **小字加入 LaTeX 渲染支持**：卡片「你的作答 / 参考答案」两处小字（`.answer-strip-text`）目前是纯插值，`$x^2$` / `$\frac{1}{2}$` 原样显示；改为走 `v-html-smiles` / `renderMarkdown`（KaTeX + mhchem + DOMPurify，[markdown.js](../web/src/lib/markdown.js)），同时保留单行省略与字号样式。✅ **已完成（2026-09-27）**：两处改 `v-html-smiles`；CSS 上把生成器包出的 `<p>`/`<pre>` 摊平成行内（`display: inline`）、公式缩回 13px、`min-width: 0` 让省略号在带公式时仍生效——条带**不能加 `.md-body`**（它的 `white-space: normal` 会顶掉 `nowrap`）；`smiles-canvas` 默认 360×260，在条带里压到 1.4em 行高。
+- [x] **错题正文完全拷贝到错题卡题目内容中**：归档时把原题正文**逐字完整**写入 `question`，不概括、不重写、不漏小问（现状：判分提示词只写「question（题目）」，模型可能缩写重写——[prompt.rs](../src/kernel/prompt.rs) 判分系统提示需补「题干必须逐字保留原文」约束，并核对 `grading__upload` 落库路径与卡片 2 行截断展示）。✅ **已完成（2026-09-27 核对）**：约束已在两个模型读得到的位置就位——系统提示「题干必须逐字保留原文，不要概括、不要漏小问；公式一律用 LaTeX 标记保留」+ 内联 schema 的 `question` 描述「题目原文（逐字保留，不要概括或漏小问）」（2026-09-23 随 ADR-0046 落地，早于本条）；落库路径核对 `grading/core.rs` 的 `question: item.question.clone()`——原样落盘，无截断无二次加工；卡片 2 行截断只是展示层（完整题干在抽屉里）。本次为该约束补了测试（内联 schema 描述断言），模型实际是否逐字遵守仍属模型行为，见 [testing.md](testing.md) 观察列表。
 
 ## 任务书（2026 项目实战·任务 3）落地任务（2026-08-09 设计方案已定，决策见 ADR-0039/0040/0041）
 
