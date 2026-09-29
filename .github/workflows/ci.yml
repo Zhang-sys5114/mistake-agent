@@ -171,13 +171,31 @@ jobs:
           if-no-files-found: warn
 
   # 服务端（ADR-0047）：独立 Cargo 项目 + 独立 job——服务端改动不该拖慢/阻塞客户端构建，
-  # 反之亦然。S1 的测试不依赖数据库；S3（中转用量记账）起需要在此加 postgres service。
+  # 反之亦然。S2 起的账号/令牌测试跑在真实 PostgreSQL 上（服务容器），不靠 mock。
   server:
     name: server (ubuntu-latest)
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: server
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: mistake
+          POSTGRES_PASSWORD: mistake
+          POSTGRES_DB: mistake_agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mistake -d mistake_agent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://mistake:mistake@127.0.0.1:5432/mistake_agent
 
     steps:
       - name: Checkout

@@ -4,8 +4,9 @@
 //! 失败原因同时走 stderr —— 配置/日志阶段就失败时，日志子系统可能还没就绪。
 
 use std::process::ExitCode;
+use std::sync::Arc;
 
-use mistake_agent_server::{config, db, http, logging};
+use mistake_agent_server::{auth, config, db, http, logging};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -48,12 +49,16 @@ async fn run() -> Result<(), String> {
         "数据库就绪，迁移已应用"
     );
 
+    // 管理员种子（ADR-0047 决策 3）：仅在配置了 ADMIN_EMAIL/ADMIN_PASSWORD 时才可能创建
+    auth::bootstrap_admin(&pool, &cfg).await?;
+
     let listener = tokio::net::TcpListener::bind(cfg.bind_addr)
         .await
         .map_err(|e| format!("监听 {} 失败：{e}", cfg.bind_addr))?;
     tracing::info!("HTTP 已启动");
 
-    axum::serve(listener, http::router(http::AppState::new(pool)))
+    let state = http::AppState::new(pool, Arc::new(cfg));
+    axum::serve(listener, http::router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|e| format!("HTTP 服务异常退出：{e}"))?;

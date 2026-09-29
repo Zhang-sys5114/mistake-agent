@@ -12,6 +12,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **Platform service — accounts and authentication (S2)**
+  ([ADR-0047](docs/adr/0047-server-account-package-relay.md)): self-service
+  registration, login, and logout on `/api/v1/auth/*`, plus `GET/PATCH
+  /api/v1/me` (account state and the `sync_enabled` toggle) and an
+  admin-only `GET /api/v1/admin/users` — the first real user of the role
+  guard. Passwords use Argon2id with a per-password random salt; access
+  tokens are opaque (`mka_` + 32 random bytes, exactly the hex form the
+  server issues), returned in plaintext once and stored only as SHA-256.
+  Failed logins are indistinguishable between "wrong password" and
+  "unknown account" (with an equal-cost dummy verification) so the
+  endpoint cannot be used to enumerate registered emails. The first admin
+  is seeded from `ADMIN_EMAIL`/`ADMIN_PASSWORD` idempotently per email,
+  and an existing account with that email is never escalated.
 - **Platform service — server skeleton (S1)**
   ([ADR-0047](docs/adr/0047-server-account-package-relay.md),
   [ADR-0048](docs/adr/0048-client-platform-account-integration.md),

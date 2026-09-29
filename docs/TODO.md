@@ -55,7 +55,8 @@
 **服务端里程碑（S1–S8，S5 完成即可开卖）**：
 
 - [x] **S1 骨架（已完成 2026-09-29）**：axum + sqlx（PostgreSQL）+ 配置 fail-fast + **编译期嵌入**迁移 + `/healthz`·`/readyz` + 分级日志与连接串脱敏；`server/` 为独立 Cargo 项目，CI 加独立 job（客户端 job 不受影响）。验收证据：`cargo test`（10 项）/ `clippy --all-targets -- -D warnings` / `fmt --check` 全绿；容器 PostgreSQL 上真实应用迁移（`_sqlx_migrations` v1、`users`/`tokens` 建表），`/readyz` 返回 `db: ok`；根 crate 165 项测试不受影响。首张迁移即 `0001_init.sql`（账号与令牌表），S2 只剩鉴权逻辑。
-- [ ] S2 账号：注册 / 登录 / 令牌（不透明串 + SHA-256）/ 三角色 / `sync_enabled`
+- [x] **S2 账号与鉴权（已完成 2026-09-29）**：`POST /api/v1/auth/register`（自助注册，固定 `user` 角色）、`login`（返回 `mka_` + 32 字节令牌，明文只回一次，库里只存 SHA-256）、`logout`（只撤销当前令牌）、`GET/PATCH /api/v1/me`（账号状态与 `sync_enabled`）、`GET /api/v1/admin/users`（首个**角色守卫**落点，仅 admin）。口令 Argon2id + 每口令独立随机盐；登录失败对"口令错/账号不存在"返回**完全一致**的响应（并做等价耗时校验）以防邮箱枚举；`last_used_at` 写入按 5 分钟节流。管理员种子由 `ADMIN_EMAIL`/`ADMIN_PASSWORD` 幂等创建（**不提权**同邮箱普通账号）。验收证据：40 项测试全绿（24 单测 + 13 账号集成 + 3 端点），覆盖越权 / 令牌撤销 / 令牌过期 / 停用账号 / 角色边界；clippy `-D warnings` 与 `fmt --check` 干净；真实链路手工验收（201/200/204/401/403/404 逐项核对）。
+      **遗留（后续里程碑）**：登录失败限流（S4 或 S8）、邮箱验证（无邮件服务，二期）、同账号设备数上限（S4 与套餐绑定）、令牌自助管理列表（S4）。
 - [ ] S3 中转：鉴权 + 三窗口限额 + 转发 + SSE tee + usage 记账 + 402（真实 DeepSeek 链路验证）
 - [ ] S4 套餐与兑换码：plans / entitlements / redemption_codes + 阶梯扣次 + admin CLI（含 CSV 导出）
 - [ ] S5 客户端接入：登录 + OOBE 可选登录 + 兑换码 + 「账户与套餐」卡片 + 401/402 引导 → **端到端可卖**
