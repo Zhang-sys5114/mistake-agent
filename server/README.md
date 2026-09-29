@@ -5,6 +5,9 @@ Mistake Agent 服务端（ADR-0047/0048/0049）：账号体系、兑换码售卖
 
 > 当前进度：**S1–S3**。已落地骨架、账号与鉴权、**三类协议的中转网关（带配额与计费）**与安全护栏；
 > `billing` 的兑换码与 admin CLI（S4）、`sync`（S6）、部署（S8）待做，见 [docs/TODO.md](../docs/TODO.md)。
+>
+> 📄 **给客户端同学的接口契约在 [docs/server-api.md](../docs/server-api.md)**（端点、字段、错误码、
+> 接入要点与错误分流）。本文件是服务端的运行/开发说明。
 
 ## 快速开始（开发）
 
@@ -76,6 +79,41 @@ usage 字段归一化、用户隔离字段名。
    同时输出固定格式日志行供外部 fail2ban 长期封禁。配置与安装见 [deploy/fail2ban](deploy/fail2ban/)。
 3. **全局并发上限**：令牌桶管速率，管不住"同时挂着一堆长流式请求"，因此另有全局计数器保护
    上游账号与进程容量。
+
+## 造测试账号与发套餐（S4 之前的手工办法）
+
+兑换码与 admin CLI 属 S4，在那之前用 SQL 直接造。先注册（HTTP），再挂套餐：
+
+```bash
+# 1) 注册一个测试账号（口令自定）
+curl -s -X POST http://127.0.0.1:8080/api/v1/auth/register \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"demo@example.test","password":"demo-password-123","display_name":"示例同学"}'
+
+# 2) 发一张套餐（plan code 见 migrations/0002_billing.sql 的种子）
+docker exec mistake-agent-db psql -U mistake -d mistake_agent -c "
+INSERT INTO entitlements (user_id, plan_id, source, expires_at, total_uses)
+SELECT u.id, p.id, 'grant', now() + make_interval(days => p.duration_days), p.total_uses
+FROM users u, plans p
+WHERE u.email = 'demo@example.test' AND p.code = 'monthly_pro';"
+
+# 3) 登录拿令牌，然后就能调中转面了
+curl -s -X POST http://127.0.0.1:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"demo@example.test","password":"demo-password-123"}'
+```
+
+查看某个账号的用量与权益：
+
+```bash
+docker exec mistake-agent-db psql -U mistake -d mistake_agent -c "
+SELECT protocol, status, billed_uses, input_tokens, output_tokens, created_at
+FROM usage_events WHERE user_id = (SELECT id FROM users WHERE email = 'demo@example.test')
+ORDER BY id DESC LIMIT 10;"
+```
+
+> 套餐种子（`plans`）里的窗口阈值是**占位数值**，S3 上线后按真实用量按成本反推再收紧；
+> 改库即生效（不做缓存），不用发版。
 
 ## 配置
 

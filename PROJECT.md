@@ -344,4 +344,5 @@ mistake-agent/
 - **同步（sync）**：本地是真相源，同步是后台增量副本（断网零退化、失败不阻塞本地写）。服务端 `changes` 表的光标做增量拉取，客户端 storage 写 outbox 做增量推送（会话消息用 JSONL 字节偏移作水位）。**消息与事件取并集永不冲突**；元数据 / 错题快照 / 记忆按 `updated_at` **LWW**，被覆盖版本落本地 `conflicts/` 不静默丢弃。`schedule.json` 由事件折叠重算故**不参与同步**；附件原图首期不同步（协议预留内容寻址 `blobs`，作独立计费增值项）。
 - **隐私边界**：中转正文不落库；同步数据仅在 `sync_enabled`（**默认关闭**、OOBE 登录后询问）时由客户端**主动上传**入库，支持一键删除云端数据与全量导出；服务端查询强制 `user_id` 隔离。「同步」是用户显式选择的功能，不是服务端对中转流量的记录——这条区别是隐私表述的基石。
 - **工程**：`server/` 为同仓库顶层独立 Cargo 项目（自带 `[workspace]`），验收命令独立：`cd server && cargo test && cargo clippy -- -D warnings`。里程碑 S1–S8 见 §10。
+- **接口契约**：客户端接入看 [docs/server-api.md](docs/server-api.md)（端点、字段、错误码总表、错误分流建议、尚未实现项预告）；客户端侧设计见 [ADR-0048](docs/adr/0048-client-platform-account-integration.md)。
 - **进度**：**S1–S3 已完成**（2026-09-29）。运行方式、端点、配置表与安全护栏见 [server/README.md](server/README.md)；中转面 `/responses`·`/chat/completions`·`/v1/messages`（带 `/v1` 别名）已挂载，三协议**全部透传**（无翻译层），计费口径为「对外按次数、内账按 token 四元组」；账号面 `/api/v1/auth/*`、`/api/v1/me`、`/api/v1/admin/users` 已挂载；套餐/兑换码（S4）与同步（S6）面待挂载。
