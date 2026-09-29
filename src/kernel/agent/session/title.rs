@@ -5,14 +5,18 @@
 
 use super::*;
 
-use super::summarize::{complete_with_retry, message_text};
-use crate::kernel::message::MessageKind;
+use super::summarize::complete_with_retry;
+use crate::kernel::message::{MessageKind, visible_text};
 use crate::kernel::prompt::session_title_prompt;
 use crate::kernel::settings::Settings;
 use std::sync::RwLock;
 
 /// 模型侧标题输出上限（提示词要求 ≤12 字，此处防跑偏）。
 const MAX_TITLE_CHARS: usize = 40;
+
+/// 转录里最多放几条「人说的话」（用户可见文本 / 助手正文）。
+/// 标题只取决于开场在讲什么，多喂无益，反而稀释掉题目的信息。
+const MAX_TITLE_MESSAGES: usize = 6;
 
 /// 标题兜底：首条 user 消息（去空白）前 40 字；没有用户消息时用固定文案。
 pub(crate) fn fallback_title(messages: &[Message]) -> String {
@@ -21,7 +25,7 @@ pub(crate) fn fallback_title(messages: &[Message]) -> String {
         .find_map(|m| match &m.kind {
             // 用可见文本：forced_tool 的 `text` 是给模型的指令，做标题只会得到一串工具名。
             MessageKind::User { .. } => {
-                let t: String = crate::kernel::message::visible_text(m)
+                let t: String = visible_text(m)
                     .unwrap_or_default()
                     .trim()
                     .chars()
@@ -112,22 +116,35 @@ impl LlmTitler {
 #[async_trait]
 impl Titler for LlmTitler {
     async fn title(&self, messages: &[Message]) -> String {
-        // 只喂开头几条（标题取决于"这次要做什么"，尾部长文无益）。
+        // 转录**只取「人说的话」**：用户可见文本 + 助手正文。
+        // 工具调用的参数/结果是 JSON 管道（`工具：x 参数 {...} 结果 Some("{...}")`），
+        // 推理与系统消息同理——喂进去模型只会抄出工具名和字段名，这正是侧栏标题变成
+        // 「上传作业批改」的来源。题目的实质内容在助手讲解里，那里才是该归纳的东西。
         let mut transcript = String::new();
-        for msg in messages.iter().take(6) {
-            // 用户消息改用可见文本：forced_tool 的 `text` 是系统指令，模型据此起不出好标题。
+        let mut used = 0usize;
+        for msg in messages {
             let line = match &msg.kind {
-                MessageKind::User { .. } => format!(
-                    "用户：{}",
-                    crate::kernel::message::visible_text(msg).unwrap_or_default()
-                ),
-                _ => message_text(msg),
+                MessageKind::User { .. } => {
+                    let text = visible_text(msg).unwrap_or_default().trim();
+                    (!text.is_empty()).then(|| format!("用户：{text}"))
+                }
+                MessageKind::Assistant { text } => {
+                    let text = text.trim();
+                    (!text.is_empty()).then(|| format!("助手：{text}"))
+                }
+                _ => None,
             };
-            if transcript.len() + line.len() > self.max_input_chars {
+            let Some(line) = line else { continue };
+            if used >= MAX_TITLE_MESSAGES || transcript.len() + line.len() > self.max_input_chars {
                 break;
             }
             transcript.push_str(&line);
             transcript.push('\n');
+            used += 1;
+        }
+        // 一条人话都没有（纯工具回合）：没有可归纳的内容，交兜底标题，别拿空转录去问模型。
+        if transcript.trim().is_empty() {
+            return String::new();
         }
         let request = ModelRequest {
             messages: vec![
