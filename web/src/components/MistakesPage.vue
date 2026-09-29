@@ -1,6 +1,7 @@
 <script setup>
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Icon } from "@iconify/vue";
+import SubQuestionText from "./SubQuestionText.vue";
 
 const props = defineProps({ kernel: { type: Object, required: true } });
 const navigateToChatWithMessage = inject("navigateToChatWithMessage", () => {});
@@ -818,13 +819,13 @@ onMounted(load);
                   <div class="answer-block-label">
                     <Icon icon="mdi:pencil-outline" width="16" />你的作答
                   </div>
-                  <div class="answer-block-text md-body" v-html-smiles="drawerItem.student_answer"></div>
+                  <SubQuestionText class="answer-block-text" :text="drawerItem.student_answer" />
                 </div>
                 <div v-if="drawerItem.reference_answer" class="answer-block reference">
                   <div class="answer-block-label">
                     <Icon icon="mdi:check-decagram-outline" width="16" />参考答案
                   </div>
-                  <div class="answer-block-text md-body" v-html-smiles="drawerItem.reference_answer"></div>
+                  <SubQuestionText class="answer-block-text" :text="drawerItem.reference_answer" />
                 </div>
               </div>
             </section>
@@ -834,7 +835,7 @@ onMounted(load);
               <h3 class="drawer-section-title">
                 <Icon icon="mdi:lightbulb-on-outline" width="18" />错因分析
               </h3>
-              <div class="drawer-analysis md-body" v-html-smiles="drawerItem.analysis"></div>
+              <SubQuestionText class="drawer-analysis" :text="drawerItem.analysis" />
             </section>
 
             <!-- 我的备注 -->
