@@ -27,6 +27,12 @@ pub enum AuthError {
     Forbidden,
     #[error("{0}")]
     Validation(&'static str),
+    /// 令牌桶限流（账号面按 IP）
+    #[error("请求过于频繁，请稍后再试")]
+    RateLimited { retry_after_secs: u64 },
+    /// 失败封禁（fail2ban 语义）：反复登录失败后临时禁用
+    #[error("登录失败次数过多，已临时禁用，请稍后再试")]
+    LoginBlocked { retry_after_secs: u64 },
     #[error("服务内部错误")]
     Internal(#[from] sqlx::Error),
     #[error("服务内部错误")]
@@ -43,9 +49,20 @@ impl AuthError {
             AuthError::AccountDisabled => (StatusCode::FORBIDDEN, "account_disabled"),
             AuthError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
             AuthError::Validation(_) => (StatusCode::BAD_REQUEST, "validation_failed"),
+            AuthError::RateLimited { .. } => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
+            AuthError::LoginBlocked { .. } => (StatusCode::TOO_MANY_REQUESTS, "login_blocked"),
             AuthError::Internal(_) | AuthError::InternalMsg(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
             }
+        }
+    }
+
+    /// 需要在响应里回 `Retry-After` 的错误（客户端据此退避，比盲目重试友好）。
+    fn retry_after_secs(&self) -> Option<u64> {
+        match self {
+            AuthError::RateLimited { retry_after_secs }
+            | AuthError::LoginBlocked { retry_after_secs } => Some(*retry_after_secs),
+            _ => None,
         }
     }
 }
@@ -57,11 +74,22 @@ impl IntoResponse for AuthError {
             // Debug 而非 Display：thiserror 的 Display 是泛化文案，源错误只在 Debug 里
             tracing::error!(error = ?self, "鉴权路径内部错误");
         }
-        (
+        let retry_after = self.retry_after_secs();
+        let mut response = (
             status,
             Json(json!({"error": {"code": code, "message": self.to_string()}})),
         )
-            .into_response()
+            .into_response();
+        if let Some(secs) = retry_after {
+            // 秒数取整到至少 1：Retry-After: 0 会鼓励客户端立刻重试
+            let value = secs.max(1).to_string();
+            if let Ok(value) = axum::http::HeaderValue::from_str(&value) {
+                response
+                    .headers_mut()
+                    .insert(axum::http::header::RETRY_AFTER, value);
+            }
+        }
+        response
     }
 }
 

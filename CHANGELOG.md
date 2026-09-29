@@ -12,6 +12,25 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **Platform service — DeepSeek relay, quota billing, and security guardrails (S3)**
+  ([ADR-0047](docs/adr/0047-server-account-package-relay.md)): an
+  authenticated, quota-metered **pass-through gateway** for three
+  protocol faces — OpenAI Responses, OpenAI Chat Completions, and
+  Anthropic Messages (the latter two added after research showed DeepSeek
+  serves all three natively, so no translation layer is needed). Both
+  `/v1/...` and bare paths are accepted, and both `Authorization: Bearer`
+  and `x-api-key` authenticate, so third-party Anthropic-style clients can
+  connect with the same platform token. Each request runs
+  authenticate → token-bucket rate limit → per-user and global
+  concurrency gates → **reserve** → forward → streaming tee → **settle**;
+  the reservation is serialized per user with a transaction-scoped
+  advisory lock, so concurrent requests cannot slip past a quota window.
+  Metering is "uses" outward and normalised token counts inward.
+  Security guardrails: token-bucket limits per IP, per user, and per IP
+  for relay; fail2ban-style lockout on repeated login failures (IP *and*
+  account, with a fixed log line for an external fail2ban jail, shipped
+  under `server/deploy/fail2ban/`); and a global concurrency cap.
+  Throttled responses carry `Retry-After`.
 - **Platform service — accounts and authentication (S2)**
   ([ADR-0047](docs/adr/0047-server-account-package-relay.md)): self-service
   registration, login, and logout on `/api/v1/auth/*`, plus `GET/PATCH

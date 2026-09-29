@@ -213,6 +213,13 @@ jobs:
           workspaces: server
           cache-on-failure: true
 
+      - name: Install system TLS deps
+        # 服务端用 native-tls（Linux 上是 OpenSSL），刻意避开带 C 代码的 ring/aws-lc：
+        # 见 server/Cargo.toml 的说明（这类 crate 在含中文的构建路径下编不过）
+        run: |
+          sudo apt-get update -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10
+          sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+
       - name: cargo fmt --check
         run: cargo fmt --check
 

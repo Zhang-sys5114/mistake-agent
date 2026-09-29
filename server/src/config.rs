@@ -8,6 +8,12 @@ use std::net::SocketAddr;
 
 use thiserror::Error;
 
+use crate::security::{
+    DEFAULT_AUTH_BURST, DEFAULT_AUTH_RATE_PER_MINUTE, DEFAULT_LOGIN_BLOCK_SECS,
+    DEFAULT_LOGIN_FAILURE_WINDOW_SECS, DEFAULT_LOGIN_MAX_FAILURES, DEFAULT_MAX_CONCURRENT_GLOBAL,
+    DEFAULT_RELAY_BURST, DEFAULT_RELAY_RATE_PER_MINUTE, DEFAULT_TRUST_PROXY, SecuritySettings,
+};
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("缺少必需的环境变量 {0}")]
@@ -30,11 +36,17 @@ pub struct Config {
     /// 阶梯扣次的 token 阈值（升序）：≤ 第一个阈值扣 1 次，每跨过一个阈值多扣 1 次。
     /// 用途是防止单次超长上下文击穿"按次数售卖"（ADR-0047 决策 6）。
     pub billing_ladder_tokens: Vec<u64>,
+    /// 中转请求体上限（字节）：图片以 base64 内联，可达数 MB。
+    pub relay_max_body_bytes: usize,
+    /// 同一用户同时在飞的中转请求上限（ADR-0047 决策 9）。
+    pub relay_max_concurrent_per_user: i32,
     /// 登录令牌有效期（天）：桌面端长期在线，默认 90 天。
     pub token_ttl_days: i64,
     /// 首个管理员种子（ADR-0047 决策 3）：两者都配齐且库中尚无管理员时创建，幂等。
     pub admin_email: Option<String>,
     pub admin_password: Option<String>,
+    /// 安全护栏（限流/失败封禁/全局并发）：一组配置，避免 `Config` 顶层字段继续膨胀。
+    pub security: SecuritySettings,
 }
 
 /// 默认监听回环：TLS 由前置反向代理终结，服务端不直接对外（ADR-0047 决策 2）。
@@ -46,6 +58,9 @@ const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-flash";
 const DEFAULT_TOKEN_TTL_DAYS: i64 = 90;
 /// 32k / 64k：与 ADR-0047 决策 6 的初始档位一致，数值随真实用量数据校准。
 const DEFAULT_BILLING_LADDER_TOKENS: [u64; 2] = [32 * 1024, 64 * 1024];
+/// 32 MiB：够放下几张手机原图（base64 后膨胀 ~33%），又不至于让单请求吃爆内存。
+const DEFAULT_RELAY_MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
+const DEFAULT_RELAY_MAX_CONCURRENT_PER_USER: i32 = 2;
 
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
@@ -138,6 +153,43 @@ impl Config {
             }
         };
 
+        let relay_max_body_bytes = match lookup("RELAY_MAX_BODY_BYTES") {
+            None => DEFAULT_RELAY_MAX_BODY_BYTES,
+            Some(raw) => raw
+                .trim()
+                .parse::<usize>()
+                .map_err(|e| ConfigError::Invalid {
+                    name: "RELAY_MAX_BODY_BYTES",
+                    reason: e.to_string(),
+                })?,
+        };
+        // 上限为 0 会让所有中转请求都被拒（含图片的请求必然超限），属于配错，直接拒绝启动
+        if relay_max_body_bytes == 0 {
+            return Err(ConfigError::Invalid {
+                name: "RELAY_MAX_BODY_BYTES",
+                reason: "必须大于 0".into(),
+            });
+        }
+
+        let relay_max_concurrent_per_user = match lookup("RELAY_MAX_CONCURRENT_PER_USER") {
+            None => DEFAULT_RELAY_MAX_CONCURRENT_PER_USER,
+            Some(raw) => raw
+                .trim()
+                .parse::<i32>()
+                .map_err(|e| ConfigError::Invalid {
+                    name: "RELAY_MAX_CONCURRENT_PER_USER",
+                    reason: e.to_string(),
+                })?,
+        };
+        if relay_max_concurrent_per_user < 1 {
+            return Err(ConfigError::Invalid {
+                name: "RELAY_MAX_CONCURRENT_PER_USER",
+                reason: "必须大于等于 1".into(),
+            });
+        }
+
+        let security = Self::parse_security(&lookup)?;
+
         Ok(Self {
             bind_addr,
             database_url,
@@ -153,11 +205,146 @@ impl Config {
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| DEFAULT_DEEPSEEK_MODEL.to_string()),
             billing_ladder_tokens,
+            relay_max_body_bytes,
+            relay_max_concurrent_per_user,
             token_ttl_days,
             admin_email,
             admin_password,
+            security,
         })
     }
+
+    /// 安全护栏配置（一组）。
+    ///
+    /// 默认取向：**保护上游账号与整体容量，但不误伤正常学生**——所以速率给得宽、
+    /// 突发容量等于一分钟的持续速率（学生一轮工具调用会连发数个请求），
+    /// 真正偏紧的是"反复登录失败"这条。
+    fn parse_security(
+        lookup: &impl Fn(&str) -> Option<String>,
+    ) -> Result<SecuritySettings, ConfigError> {
+        let trust_proxy = match lookup("SECURITY_TRUST_PROXY") {
+            None => DEFAULT_TRUST_PROXY,
+            Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => true,
+                "0" | "false" | "no" | "off" => false,
+                other => {
+                    return Err(ConfigError::Invalid {
+                        name: "SECURITY_TRUST_PROXY",
+                        reason: format!("{other:?} 不是布尔值"),
+                    });
+                }
+            },
+        };
+
+        Ok(SecuritySettings {
+            trust_proxy,
+            auth_rate_per_minute: positive_u32(
+                lookup,
+                "SECURITY_AUTH_RATE_PER_MINUTE",
+                DEFAULT_AUTH_RATE_PER_MINUTE,
+            )?,
+            auth_burst: positive_u32(lookup, "SECURITY_AUTH_BURST", DEFAULT_AUTH_BURST)?,
+            relay_rate_per_minute: positive_u32(
+                lookup,
+                "SECURITY_RELAY_RATE_PER_MINUTE",
+                DEFAULT_RELAY_RATE_PER_MINUTE,
+            )?,
+            relay_burst: positive_u32(lookup, "SECURITY_RELAY_BURST", DEFAULT_RELAY_BURST)?,
+            login_max_failures: positive_u32(
+                lookup,
+                "SECURITY_LOGIN_MAX_FAILURES",
+                DEFAULT_LOGIN_MAX_FAILURES,
+            )?,
+            login_failure_window_secs: positive_u64(
+                lookup,
+                "SECURITY_LOGIN_FAILURE_WINDOW_SECS",
+                DEFAULT_LOGIN_FAILURE_WINDOW_SECS,
+            )?,
+            login_block_secs: positive_u64(
+                lookup,
+                "SECURITY_LOGIN_BLOCK_SECS",
+                DEFAULT_LOGIN_BLOCK_SECS,
+            )?,
+            max_concurrent_global: positive_i32(
+                lookup,
+                "SECURITY_MAX_CONCURRENT_GLOBAL",
+                DEFAULT_MAX_CONCURRENT_GLOBAL,
+            )?,
+        })
+    }
+}
+
+/// 读一个必须为正整数的环境变量（配成 0 通常是漏配，直接拒绝启动而不是静默放宽）。
+fn positive_u32(
+    lookup: &impl Fn(&str) -> Option<String>,
+    name: &'static str,
+    default: u32,
+) -> Result<u32, ConfigError> {
+    let Some(raw) = lookup(name) else {
+        return Ok(default);
+    };
+    let value = raw
+        .trim()
+        .parse::<u32>()
+        .map_err(|e| ConfigError::Invalid {
+            name,
+            reason: e.to_string(),
+        })?;
+    if value == 0 {
+        return Err(ConfigError::Invalid {
+            name,
+            reason: "必须大于 0".into(),
+        });
+    }
+    Ok(value)
+}
+
+fn positive_u64(
+    lookup: &impl Fn(&str) -> Option<String>,
+    name: &'static str,
+    default: u64,
+) -> Result<u64, ConfigError> {
+    let Some(raw) = lookup(name) else {
+        return Ok(default);
+    };
+    let value = raw
+        .trim()
+        .parse::<u64>()
+        .map_err(|e| ConfigError::Invalid {
+            name,
+            reason: e.to_string(),
+        })?;
+    if value == 0 {
+        return Err(ConfigError::Invalid {
+            name,
+            reason: "必须大于 0".into(),
+        });
+    }
+    Ok(value)
+}
+
+fn positive_i32(
+    lookup: &impl Fn(&str) -> Option<String>,
+    name: &'static str,
+    default: i32,
+) -> Result<i32, ConfigError> {
+    let Some(raw) = lookup(name) else {
+        return Ok(default);
+    };
+    let value = raw
+        .trim()
+        .parse::<i32>()
+        .map_err(|e| ConfigError::Invalid {
+            name,
+            reason: e.to_string(),
+        })?;
+    if value <= 0 {
+        return Err(ConfigError::Invalid {
+            name,
+            reason: "必须大于 0".into(),
+        });
+    }
+    Ok(value)
 }
 
 /// 加载 `server/.env`（开发期便利）。文件不存在不算错误——生产由 systemd 注入环境变量。
@@ -208,6 +395,63 @@ mod tests {
         assert_eq!(cfg.token_ttl_days, DEFAULT_TOKEN_TTL_DAYS);
         assert!(cfg.admin_email.is_none());
         assert!(cfg.admin_password.is_none());
+        // 安全护栏：默认**不信任**转发头（防伪造 IP 绕过限流）
+        assert!(!cfg.security.trust_proxy);
+        assert_eq!(
+            cfg.security.relay_rate_per_minute,
+            DEFAULT_RELAY_RATE_PER_MINUTE
+        );
+        assert_eq!(cfg.security.relay_burst, DEFAULT_RELAY_BURST);
+        assert_eq!(
+            cfg.security.auth_rate_per_minute,
+            DEFAULT_AUTH_RATE_PER_MINUTE
+        );
+        assert_eq!(cfg.security.auth_burst, DEFAULT_AUTH_BURST);
+        assert_eq!(cfg.security.login_max_failures, DEFAULT_LOGIN_MAX_FAILURES);
+        assert_eq!(cfg.security.login_block_secs, DEFAULT_LOGIN_BLOCK_SECS);
+        assert_eq!(
+            cfg.security.login_failure_window_secs,
+            DEFAULT_LOGIN_FAILURE_WINDOW_SECS
+        );
+        assert_eq!(
+            cfg.security.max_concurrent_global,
+            DEFAULT_MAX_CONCURRENT_GLOBAL
+        );
+        assert_eq!(cfg.relay_max_body_bytes, DEFAULT_RELAY_MAX_BODY_BYTES);
+        assert_eq!(
+            cfg.relay_max_concurrent_per_user,
+            DEFAULT_RELAY_MAX_CONCURRENT_PER_USER
+        );
+    }
+
+    #[test]
+    fn security_settings_are_parsed_and_validated() {
+        let cfg = Config::from_lookup(lookup(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("SECURITY_TRUST_PROXY", "TRUE"),
+            ("SECURITY_RELAY_RATE_PER_MINUTE", "120"),
+            ("SECURITY_LOGIN_MAX_FAILURES", "10"),
+        ]))
+        .unwrap();
+        assert!(cfg.security.trust_proxy);
+        assert_eq!(cfg.security.relay_rate_per_minute, 120);
+        assert_eq!(cfg.security.login_max_failures, 10);
+
+        // 非法布尔值、0 速率都要拒绝启动（静默放宽比启动失败更危险）
+        for (name, value) in [
+            ("SECURITY_TRUST_PROXY", "maybe"),
+            ("SECURITY_RELAY_RATE_PER_MINUTE", "0"),
+            ("SECURITY_LOGIN_MAX_FAILURES", "abc"),
+            ("SECURITY_MAX_CONCURRENT_GLOBAL", "0"),
+        ] {
+            let err =
+                Config::from_lookup(lookup(&[("DATABASE_URL", "postgres://x"), (name, value)]))
+                    .unwrap_err();
+            assert!(
+                matches!(err, ConfigError::Invalid { name: rejected, .. } if rejected == name),
+                "{name}={value} 应被拒绝"
+            );
+        }
     }
 
     #[test]

@@ -14,6 +14,7 @@ use super::error::AuthError;
 use super::model::{self, AuthUser, Role, User};
 use super::{password, store};
 use crate::http::AppState;
+use crate::security::ClientIp;
 
 // ---------- 注册 ----------
 
@@ -34,8 +35,16 @@ pub struct UserResponse {
 /// 自助注册（ADR-0047 决策 3）。注册即 `user` 角色——`teacher` / `admin` 只能由管理端授予。
 pub async fn register(
     State(state): State<AppState>,
+    client: ClientIp,
     Json(req): Json<RegisterRequest>,
 ) -> Result<(StatusCode, Json<UserResponse>), AuthError> {
+    // 注册也要限流：否则自动化脚本能批量灌账号
+    state
+        .security
+        .check_auth_rate(&client.0)
+        .map_err(|retry_after| AuthError::RateLimited {
+            retry_after_secs: retry_after.as_secs().max(1),
+        })?;
     let email = model::validate_email(&req.email).map_err(AuthError::Validation)?;
     model::validate_password(&req.password).map_err(AuthError::Validation)?;
     let display_name = model::validate_display_name(req.display_name.as_deref().unwrap_or(""))
@@ -73,21 +82,40 @@ pub struct LoginResponse {
 
 pub async fn login(
     State(state): State<AppState>,
+    client: ClientIp,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, AuthError> {
+    // 令牌桶（按 IP）：挡住单机暴力尝试；与下面的失败封禁互补，一层管速率、一层管反复失败
+    state
+        .security
+        .check_auth_rate(&client.0)
+        .map_err(|retry_after| AuthError::RateLimited {
+            retry_after_secs: retry_after.as_secs().max(1),
+        })?;
+    if let Err(retry_after) = state.security.login_allowed(&client.0, &req.email) {
+        tracing::warn!(target: "security", "AUTH_BLOCKED ip={} email={}", client.0, req.email);
+        return Err(AuthError::LoginBlocked {
+            retry_after_secs: retry_after.as_secs().max(1),
+        });
+    }
+
     let email = model::normalize_email(&req.email);
     let Some((user, password_hash)) = store::find_user_for_login(&state.pool, &email).await? else {
         // 账号不存在也走一次等价耗时校验：不让响应时间成为"邮箱是否注册"的探测面
         password::verify_dummy(&req.password);
+        record_login_failure(&state, &client.0, &email, "unknown_account");
         return Err(AuthError::InvalidCredentials);
     };
     if !password::verify(&req.password, &password_hash) {
+        record_login_failure(&state, &client.0, &email, "bad_password");
         return Err(AuthError::InvalidCredentials);
     }
     if user.disabled {
+        record_login_failure(&state, &client.0, &email, "account_disabled");
         return Err(AuthError::AccountDisabled);
     }
 
+    state.security.record_login_success(&client.0, &email);
     let (token, expires_at) =
         store::issue_token(&state.pool, user.id, state.config.token_ttl_days).await?;
     tracing::info!(user_id = %user.id, "账号登录");
@@ -96,6 +124,23 @@ pub async fn login(
         expires_at,
         user,
     }))
+}
+
+/// 记一次登录失败，并输出 **fail2ban 可匹配的固定格式日志行**。
+///
+/// 格式约定：`AUTH_FAIL ip=<IP> email=<EMAIL> reason=<REASON>`（filter 正则见
+/// `server/deploy/fail2ban/filter.d/mistake-agent.conf`）。应用层封禁是立刻生效的
+/// 短期止血，外部 fail2ban 负责更长时间窗的 IP 级封禁——两者互补。
+fn record_login_failure(state: &AppState, ip: &str, email: &str, reason: &str) {
+    let just_blocked = state.security.record_login_failure(ip, email);
+    tracing::warn!(target: "security", "AUTH_FAIL ip={ip} email={email} reason={reason}");
+    if just_blocked {
+        tracing::warn!(
+            target: "security",
+            "AUTH_BLOCK ip={ip} email={email} block_secs={}",
+            state.security.settings().login_block_secs
+        );
+    }
 }
 
 /// 登出：只撤销**当前这一个**令牌（其它设备不受影响）。

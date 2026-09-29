@@ -58,10 +58,15 @@ async fn run() -> Result<(), String> {
     tracing::info!("HTTP 已启动");
 
     let state = http::AppState::new(pool, Arc::new(cfg));
-    axum::serve(listener, http::router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(|e| format!("HTTP 服务异常退出：{e}"))?;
+    // 带上连接信息：反代未启用转发头时（SECURITY_TRUST_PROXY=false），
+    // 按 IP 限流与失败封禁要靠 TCP 对端地址
+    axum::serve(
+        listener,
+        http::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .map_err(|e| format!("HTTP 服务异常退出：{e}"))?;
 
     tracing::info!("已优雅停止");
     Ok(())

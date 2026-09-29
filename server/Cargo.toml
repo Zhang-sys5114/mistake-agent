@@ -21,7 +21,18 @@ argon2 = "0.5"
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
+futures-util = "0.3"
 getrandom = "0.3"
+# TLS 走系统原生实现（Windows = schannel，Linux = OpenSSL），刻意避开 rustls 系：
+# rustls 必须有一个加密提供者，而 ring 与 aws-lc-sys 都**带 C 代码**，在本机这种
+# 含中文的工作区路径下 cc/cl.exe 编译失败（已用 ASCII 路径对照验证：同一 crate 放在
+# C:\...\ringtest 下可正常编译）。native-tls 在 Windows 走 schannel，不触发 C 编译，
+# 因此本机与 Linux 都能构建。详见 docs/research 与 S3 报告。
+reqwest = { version = "=0.13.4", default-features = false, features = [
+    "json",
+    "native-tls",
+    "stream",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -35,6 +46,7 @@ sqlx = { version = "0.9", default-features = false, features = [
 ] }
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "serde"] }

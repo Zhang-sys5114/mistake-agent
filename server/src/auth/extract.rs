@@ -19,7 +19,7 @@ impl FromRequestParts<AppState> for AuthUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let plain = bearer_token(parts).ok_or(AuthError::MissingToken)?;
+        let plain = platform_token(parts).ok_or(AuthError::MissingToken)?;
         // 形状预检：明显不是我们签发的令牌不查库
         if !token::looks_valid(plain) {
             return Err(AuthError::InvalidToken);
@@ -50,9 +50,21 @@ impl FromRequestParts<AppState> for RequireAdmin {
     }
 }
 
-fn bearer_token(parts: &Parts) -> Option<&str> {
-    let raw = parts.headers.get(AUTHORIZATION)?.to_str().ok()?;
-    parse_bearer(raw)
+/// 取平台令牌，两种头都认：
+/// - `Authorization: Bearer <token>`——OpenAI 系客户端与本项目客户端；
+/// - `x-api-key: <token>`——Anthropic 系客户端（Claude Code 等）。中转面必须认它，
+///   否则这类客户端根本接不进来（ADR-0047 修订 R1）。
+///
+/// 两者是同一个 bearer 秘密，账号面顺带也认后者，不构成额外攻击面。
+fn platform_token(parts: &Parts) -> Option<&str> {
+    if let Some(raw) = parts.headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok())
+        && let Some(token) = parse_bearer(raw)
+    {
+        return Some(token);
+    }
+    let raw = parts.headers.get("x-api-key")?.to_str().ok()?;
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 /// 解析 `Authorization: Bearer <token>`。方案名大小写不敏感（RFC 7235）。
@@ -67,13 +79,49 @@ fn parse_bearer(raw: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_bearer;
+    use super::*;
+    use axum::http::HeaderMap;
 
     #[test]
     fn parses_bearer_header_case_insensitively() {
         assert_eq!(parse_bearer("Bearer mka_abc"), Some("mka_abc"));
         assert_eq!(parse_bearer("bearer mka_abc"), Some("mka_abc"));
         assert_eq!(parse_bearer("BEARER   mka_abc  "), Some("mka_abc"));
+    }
+
+    #[test]
+    fn accepts_anthropic_style_x_api_key() {
+        // Claude Code 这类客户端只发 x-api-key（ADR-0047 修订 R1）
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", "mka_from_anthropic_client".parse().unwrap());
+        let mut parts = request_parts(headers);
+        assert_eq!(platform_token(&parts), Some("mka_from_anthropic_client"));
+
+        // Authorization 优先于 x-api-key（两者都在时以标准头为准）
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer mka_standard".parse().unwrap());
+        headers.insert("x-api-key", "mka_other".parse().unwrap());
+        let mut parts = request_parts(headers);
+        assert_eq!(platform_token(&parts), Some("mka_standard"));
+    }
+
+    #[test]
+    fn empty_or_missing_credentials_yield_none() {
+        let mut parts = request_parts(HeaderMap::new());
+        assert_eq!(platform_token(&parts), None);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", "   ".parse().unwrap());
+        let mut parts = request_parts(headers);
+        assert_eq!(platform_token(&parts), None);
+    }
+
+    /// 构造只含请求头的 `Parts`（提取器只读头，不需要真的请求体）。
+    fn request_parts(headers: HeaderMap) -> Parts {
+        let mut request = axum::http::Request::new(());
+        *request.headers_mut() = headers;
+        let (parts, ()) = request.into_parts();
+        parts
     }
 
     #[test]
