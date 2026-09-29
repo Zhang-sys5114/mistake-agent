@@ -43,12 +43,12 @@ fn graded_item_object_schema() -> serde_json::Value {
             "title": {"type": ["string", "null"], "description": "这道错题的一句话标题：概括考点或错因，不超过 16 字，不带题号/句号/引号"},
             "student_answer": {"type": ["string", "null"], "description": "学生作答原文"},
             "subject": {"type": ["string", "null"], "description": "学科，如数学/英语/物理/化学/生物/语文，无法判断填 未分类"},
-            "reference_answer": {"type": ["string", "null"], "description": "参考答案，可为 null"},
+            "reference_answer": {"type": ["string", "null"], "description": "参考答案，可为 null；按小问分段，每个小问另起一段并在段首写（1）（2）（i）等标记，不要写成一大段"},
             "correct": {"type": "boolean", "description": "是否答对"},
             "score": {"type": ["number", "null"], "description": "得分"},
             "total": {"type": ["number", "null"], "description": "满分"},
             "knowledge_point": {"type": ["string", "null"], "description": "知识点"},
-            "analysis": {"type": ["string", "null"], "description": "错因分析"}
+            "analysis": {"type": ["string", "null"], "description": "错因分析；先总述再按 ①②③ 逐条分段，不要写成一大段"}
         },
         "required": ["question", "correct"],
         "additionalProperties": false

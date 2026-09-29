@@ -2445,6 +2445,32 @@ textarea {
   color: var(--color-text);
 }
 
+/* 小问分段块：SubQuestionText 把没有换行的参考答案/错因分析按小问切开，
+   每段一条左竖线 + 缩进，段间留白。 */
+.sq-list {
+  display: flex;
+  flex-direction: column;
+  /* 段间距必须大于行高（14px × 1.8 ≈ 25px），否则段与段的间隔比普通换行还紧，
+     读起来不像段落。18px 加半行距后约 29px，与换行拉开可辨的差。 */
+  gap: 18px;
+}
+
+.sq-item {
+  padding-left: 12px;
+  /* 用 text-weak 而非 border：后者是 #e2e8f0，压在参考答案的浅绿底(#f0fdf4)上
+     对比度只有约 1.1:1，肉眼几乎看不见，等于没有竖线。 */
+  border-left: 3px solid var(--color-text-weak);
+}
+
+/* 段内首尾段落去掉多余外边距，否则竖线上下会空出一截 */
+.sq-item > :first-child {
+  margin-top: 0;
+}
+
+.sq-item > :last-child {
+  margin-bottom: 0;
+}
+
 .drawer-foot {
   display: flex;
   align-items: center;

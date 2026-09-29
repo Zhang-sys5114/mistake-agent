@@ -121,7 +121,7 @@ C1=CC=CC=C1
 /// 批改指导（常驻系统提示）：模型直接读图判分后，`grading::upload` 的 items 仍须遵守的规则。
 const GRADING_GUIDANCE: &str = "\n\n批改规则：\
      - 题目与作答中的公式一律用 LaTeX 标记保留：行内 $...$（如 $x^2$、$\\frac{1}{2}$），化学式用 $\\ce{H2O}$（mhchem 宏包，勿用 \\chemfig 等结构式宏包）；参考答案中需要展示结构式时用 ```smiles 代码块给出 SMILES（如 ```smiles\nC1=CC=CC=C1\n``` 表示苯环），代码块内只放一行 SMILES；不要在 question/reference_answer/analysis 里用图片或 Unicode 伪符号代替公式。\
-     - 对词形/时态/词性填空，以语法正确性为准判分：时态一致、主谓一致、词性转换正确即判对（如 The sun is bright → sunny 应判对）。\
+     - reference_answer 与 analysis 要分段排版、不要写成一大段：参考答案按小问分段，每个小问另起一段，段首写小问标记（如「（1）」「（2）（i）」）；analysis 先用一两句话总述，再按「① ② ③」逐条给出易错点，每条另起一段。\
      - 解答题按解题思路与关键步骤给分：思路正确、步骤完整即判对，小错在 analysis 中指出。\
      - 有参考答案时，学生答案数学等价（如 1/2 与 0.5、$x^2-1$ 与 $(x-1)(x+1)$）应判对（约分未约尽、没化简到最简形式不视作等价，除非题目特别要求）。";
 
