@@ -1,0 +1,37 @@
+[package]
+name = "mistake-agent-server"
+version = "0.1.0"
+edition = "2024"
+description = "Mistake Agent 服务端：账号、兑换码售卖、DeepSeek 中转、多设备同步（ADR-0047/0048/0049）"
+publish = false
+
+# 独立 workspace：与仓库根 crate（mistake-agent）没有任何 Cargo 关系（ADR-0047 决策 1）
+[workspace]
+
+[lib]
+name = "mistake_agent_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mistake-agent-server"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8"
+dotenvy = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "postgres",
+    "migrate",
+    "macros",
+] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }

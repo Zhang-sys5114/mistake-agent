@@ -54,7 +54,7 @@
 
 **服务端里程碑（S1–S8，S5 完成即可开卖）**：
 
-- [ ] S1 骨架：axum + sqlx + PostgreSQL 迁移 + 配置 + `/healthz` + 分级日志（本机无 `psql`，开发期用容器起库）
+- [x] **S1 骨架（已完成 2026-09-29）**：axum + sqlx（PostgreSQL）+ 配置 fail-fast + **编译期嵌入**迁移 + `/healthz`·`/readyz` + 分级日志与连接串脱敏；`server/` 为独立 Cargo 项目，CI 加独立 job（客户端 job 不受影响）。验收证据：`cargo test`（10 项）/ `clippy --all-targets -- -D warnings` / `fmt --check` 全绿；容器 PostgreSQL 上真实应用迁移（`_sqlx_migrations` v1、`users`/`tokens` 建表），`/readyz` 返回 `db: ok`；根 crate 165 项测试不受影响。首张迁移即 `0001_init.sql`（账号与令牌表），S2 只剩鉴权逻辑。
 - [ ] S2 账号：注册 / 登录 / 令牌（不透明串 + SHA-256）/ 三角色 / `sync_enabled`
 - [ ] S3 中转：鉴权 + 三窗口限额 + 转发 + SSE tee + usage 记账 + 402（真实 DeepSeek 链路验证）
 - [ ] S4 套餐与兑换码：plans / entitlements / redemption_codes + 阶梯扣次 + admin CLI（含 CSV 导出）

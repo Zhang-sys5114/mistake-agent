@@ -12,6 +12,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **Platform service — server skeleton (S1)**
+  ([ADR-0047](docs/adr/0047-server-account-package-relay.md),
+  [ADR-0048](docs/adr/0048-client-platform-account-integration.md),
+  [ADR-0049](docs/adr/0049-multi-device-sync-protocol.md)): an optional
+  server under `server/` (independent Cargo project, not part of the
+  client crate) for accounts, redemption-code package sales, a DeepSeek
+  Responses relay, and multi-device sync. S1 delivers the skeleton:
+  axum + sqlx + PostgreSQL, environment-variable config with fail-fast
+  validation, compile-time embedded migrations, `/healthz` (liveness,
+  does not touch the database) and `/readyz` (readiness), leveled
+  logging with connection-string redaction, and a dedicated CI job.
+  Not logging in leaves the client exactly as before.
 - **User-driven session creation**
   ([ADR-0044](docs/adr/0044-user-driven-session-creation.md)): a new
   `create_session` RPC archives the current active session and opens a

@@ -206,7 +206,7 @@ mistake-agent/
 ## 9. 当前状态
 
 - **M1–M6 全部完成**（含 Windows 打包实测：`错题 Agent_0.1.0_x64-setup.exe` 在 Windows 环境安装运行通过），设计文档 49 条 ADR（0001–0049）+ 术语表（CONTEXT.md）。
-- **平台服务：设计已定，代码未开工**（2026-09-29，ADR-0047/0048/0049）。要点：账号（user/teacher/admin，teacher 首期占位）+ 兑换码售卖（无在线支付）+ DeepSeek 中转（`POST /responses` drop-in 兼容，客户端模型适配器零改动）+ 对外按次数/内账按 token + 5h/周/月三滑动窗口 + 多设备同步（默认关闭）。里程碑 S1–S8 见 §10，服务端概览见 §15。
+- **平台服务：设计已定，S1 骨架已落地**（2026-09-29，ADR-0047/0048/0049）。要点：账号（user/teacher/admin，teacher 首期占位）+ 兑换码售卖（无在线支付）+ DeepSeek 中转（`POST /responses` drop-in 兼容，客户端模型适配器零改动）+ 对外按次数/内账按 token + 5h/周/月三滑动窗口 + 多设备同步（默认关闭）。**S1 已交付**：`server/` 独立 Cargo 项目（axum + sqlx + PostgreSQL）、配置 fail-fast、编译期嵌入迁移、`/healthz`·`/readyz`、分级日志与连接串脱敏、CI 独立 job。里程碑 S1–S8 见 §10，服务端概览见 §15。
 - **磁盘 IO 铁律 + 数据运行时化落地**（2026-08-10，ADR-0042）：`DomainIo`（数据根目录域内文件：域枚举 + canonicalize 兜底 + 原子写 + 审计）+ `TmpIo`（系统 temp 暂存：`mistake-agent-` 前缀白名单）+ `RelPath`（类型层无目录遍历，fail-closed）；memory 收编（中文路径 base64url 段编码经 DomainIo 落盘）；vision/grading 附件读写、practice 真题池全经 StorageHandle 语义方法（插件零文件句柄）；`data/` 子目录 + 真题池运行时化（`gaokao_pool.json` 文件优先、内置种子兜底，`read_pool_json` 真实链路测试）；verify_geometry.py 维持 include_str!（执行代码非数据）。
 - **指令加载落地**（2026-08-10）：数据根 `AGENTS.md`（教学规则，家长/老师可编辑）全文进主模型系统提示（静态基底之后、debug 段之前，`load_agents_md`，缺失/损坏/超限 64KB 回退静态文本，路径仅由数据根拼接固定文件名）；文件保存即生效（无缓存）；设置页「教学规则」卡片经 `get_rules_status` 展示加载状态 + `open_rules_file` 一键打开编辑。
 - kernel：注册表/两段式契约（用户插件 UserPlugin + 内核插件 KernelPlugin，ADR-0035）/dispatch/loop/RPC/session 调度全链路；四服务全部生产实现——storage（文件持久化：会话 JSONL/错题 JSON/审计 JSONL 轮转）、memory（文件持久化 + MemoryHandle 事件/审计）、model（Responses API + Chat Completions，LiveSettingsModelService 热更新）、compute（BridgeCompute → GUI Pyodide）。
@@ -341,3 +341,4 @@ mistake-agent/
 - **同步（sync）**：本地是真相源，同步是后台增量副本（断网零退化、失败不阻塞本地写）。服务端 `changes` 表的光标做增量拉取，客户端 storage 写 outbox 做增量推送（会话消息用 JSONL 字节偏移作水位）。**消息与事件取并集永不冲突**；元数据 / 错题快照 / 记忆按 `updated_at` **LWW**，被覆盖版本落本地 `conflicts/` 不静默丢弃。`schedule.json` 由事件折叠重算故**不参与同步**；附件原图首期不同步（协议预留内容寻址 `blobs`，作独立计费增值项）。
 - **隐私边界**：中转正文不落库；同步数据仅在 `sync_enabled`（**默认关闭**、OOBE 登录后询问）时由客户端**主动上传**入库，支持一键删除云端数据与全量导出；服务端查询强制 `user_id` 隔离。「同步」是用户显式选择的功能，不是服务端对中转流量的记录——这条区别是隐私表述的基石。
 - **工程**：`server/` 为同仓库顶层独立 Cargo 项目（自带 `[workspace]`），验收命令独立：`cd server && cargo test && cargo clippy -- -D warnings`。里程碑 S1–S8 见 §10。
+- **进度**：**S1（骨架）已完成**（2026-09-29）。运行方式与配置表见 [server/README.md](server/README.md)；端点仅 `/healthz`（存活，不碰数据库）、`/readyz`（就绪，探数据库）与统一 JSON 404；`/responses`（S3）与 `/api/v1/*`（S2/S4/S6）待挂载。

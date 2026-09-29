@@ -169,4 +169,38 @@ jobs:
             target/release/bundle/
             target/release/mistake-agent*
           if-no-files-found: warn
+
+  # 服务端（ADR-0047）：独立 Cargo 项目 + 独立 job——服务端改动不该拖慢/阻塞客户端构建，
+  # 反之亦然。S1 的测试不依赖数据库；S3（中转用量记账）起需要在此加 postgres service。
+  server:
+    name: server (ubuntu-latest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry & target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          cache-on-failure: true
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo test
+        run: cargo test --all-targets --locked
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
           retention-days: 14
