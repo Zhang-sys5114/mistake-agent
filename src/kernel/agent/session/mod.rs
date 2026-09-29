@@ -112,6 +112,8 @@ mod tests {
     struct ScriptedModel {
         queue: std::sync::Mutex<VecDeque<Result<String, String>>>,
         calls: std::sync::atomic::AtomicUsize,
+        /// 最后一次 complete 收到的 user 消息原文（断言「喂给模型的转录长什么样」）。
+        last_user_text: std::sync::Mutex<String>,
     }
 
     impl ScriptedModel {
@@ -119,11 +121,16 @@ mod tests {
             Self {
                 queue: std::sync::Mutex::new(responses.into()),
                 calls: std::sync::atomic::AtomicUsize::new(0),
+                last_user_text: std::sync::Mutex::new(String::new()),
             }
         }
 
         fn call_count(&self) -> usize {
             self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn last_user_text(&self) -> String {
+            self.last_user_text.lock().expect("poisoned").clone()
         }
     }
 
@@ -141,10 +148,18 @@ mod tests {
 
         async fn complete(
             &self,
-            _request: &ModelRequest,
+            request: &ModelRequest,
             _signal: &AbortSignal,
         ) -> Result<ModelResponse, ModelError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(last) = request.messages.last() {
+                let text = match &last.kind {
+                    crate::kernel::message::MessageKind::User { text, .. }
+                    | crate::kernel::message::MessageKind::System { text, .. } => text.clone(),
+                    _ => String::new(),
+                };
+                *self.last_user_text.lock().expect("poisoned") = text;
+            }
             let next = self
                 .queue
                 .lock()
@@ -404,6 +419,21 @@ mod tests {
         reply
     }
 
+    /// 造一条工具调用：批改类会话的实质内容一半在工具结果里，但喂给标题模型的是 JSON 管道。
+    async fn append_tool_call(
+        store: &MemoryStorage,
+        key: &SessionKey,
+        entry: &str,
+        result: serde_json::Value,
+    ) -> Message {
+        let path = store.read_path(key).await.unwrap();
+        let mut call =
+            Message::tool_call(entry, serde_json::json!({ "raw": "参数占位" }), Ok(result));
+        call.parent_id = path.last().map(|m| m.id);
+        store.append_message(key, &call).await.unwrap();
+        call
+    }
+
     #[tokio::test]
     async fn title_generated_once_after_first_turn() {
         let model = Arc::new(ScriptedModel::new(vec![Ok("线性代数错题整理".into())]));
@@ -482,6 +512,79 @@ mod tests {
             Some("帮我整理线性代数的错题")
         );
         assert_eq!(model.call_count(), 2, "1 次 + 1 次重试");
+    }
+
+    #[tokio::test]
+    async fn title_transcript_carries_subject_not_tool_plumbing() {
+        // 批改类会话由一次工具操作开场：首条 user 只是工具标题（「上传作业批改」），
+        // 题目的实质内容在助手讲解里。转录必须跳过工具调用的 JSON 管道——喂进去模型
+        // 只会照着「上传作业批改」「grading::upload」起名，侧栏就看不出这道题讲什么。
+        let model = Arc::new(ScriptedModel::new(vec![Ok("一元二次方程判别式".into())]));
+        let titler: Arc<dyn Titler> =
+            Arc::new(LlmTitler::new(model.clone()).with_retry(0, Duration::ZERO));
+        let (scheduler, _, store, _, _) = setup_with_titler(titler);
+        let ctx = scheduler
+            .on_new_message_with_display(
+                "请调用工具 grading::upload 处理当前请求。",
+                Some("上传作业批改"),
+            )
+            .await
+            .unwrap();
+        append_tool_call(
+            &store,
+            &ctx.session_key,
+            "grading::upload",
+            serde_json::json!({ "question": "x^2-2x+1=0 求根" }),
+        )
+        .await;
+        append_assistant(&store, &ctx.session_key, "这道题考查一元二次方程的判别式。").await;
+
+        assert_eq!(
+            scheduler
+                .maybe_generate_title(&ctx.session_key)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("一元二次方程判别式")
+        );
+        let transcript = model.last_user_text();
+        assert!(
+            transcript.contains("助手：这道题考查一元二次方程的判别式。"),
+            "助手讲解是唯一有题目信息的一行，必须在转录里：{transcript}"
+        );
+        assert!(
+            !transcript.contains("grading::upload") && !transcript.contains("参数"),
+            "工具名与参数 JSON 不得进转录：{transcript}"
+        );
+    }
+
+    #[tokio::test]
+    async fn title_skips_model_when_transcript_has_no_prose() {
+        // 纯工具回合（没有助手正文）：没有可归纳的内容，不拿空转录去问模型。
+        let model = Arc::new(ScriptedModel::new(vec![Ok("不该被用上".into())]));
+        let titler: Arc<dyn Titler> =
+            Arc::new(LlmTitler::new(model.clone()).with_retry(0, Duration::ZERO));
+        let (scheduler, _, store, _, _) = setup_with_titler(titler);
+        let ctx = scheduler.on_new_message("   ").await.unwrap();
+        append_tool_call(
+            &store,
+            &ctx.session_key,
+            "grading::list",
+            serde_json::json!({}),
+        )
+        .await;
+        append_assistant(&store, &ctx.session_key, "   ").await;
+
+        // 无人话可归纳 → 空串 → 交兜底标题「新会话」，模型一次都不该被调用。
+        assert_eq!(
+            scheduler
+                .maybe_generate_title(&ctx.session_key)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("新会话")
+        );
+        assert_eq!(model.call_count(), 0);
     }
 
     #[tokio::test]

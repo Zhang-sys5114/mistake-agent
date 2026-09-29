@@ -12,7 +12,7 @@ const ENGLISH_GENERATE_RULE: &str = "\n\n[English Immersion Mode]\nknowledge_poi
 
 const ENGLISH_SUMMARY_RULE: &str = "\n\n[English Immersion Mode]\nWrite the summary in English. Keep key facts, mistake ids, knowledge points and unfinished items.";
 
-const ENGLISH_TITLE_RULE: &str = "\n\n[English Immersion Mode]\nWrite the title in English (at most 6 words). Output the title text only, no quotes.";
+const ENGLISH_TITLE_RULE: &str = "\n\n[English Immersion Mode]\nWrite the title in English (at most 6 words). Name the subject matter (subject + knowledge point), never the action or tool performed — \"uploaded homework\", \"grading\", \"viewed mistakes\" are not titles. Output the title text only, no quotes.";
 
 /// 英文沉浸人设（B+C 演法，锁静态层）：
 /// - 全听懂中文（含下方中文教学规则），但永远只回英文；
@@ -164,10 +164,20 @@ pub fn practice_generate_system_prompt(english_mode: bool) -> String {
 }
 
 /// 会话标题提示（`SessionScheduler::maybe_generate_title`）：按首条对话生成侧栏标题。
+///
+/// 标题要落在**这道题是什么**上，而不是**这次做了什么**：会话往往由一次工具操作开场
+/// （上传作业批改、拍照提问、查看错题本），照着操作起名只会得到「上传作业批改」这类
+/// 侧栏里认不出题目的标题。所以这里显式禁止用操作/功能名充当标题。
 pub fn session_title_prompt(english_mode: bool) -> String {
     let mut prompt = "给下面这段对话起一个标题，用作聊天侧栏的会话名。\
      要求：一句话概括这次对话要解决的事，不超过 12 个字；保留学科/知识点等关键信息；\
-     不要引号、不要句号、不要「会话」「标题」之类的前缀，直接输出标题本身。"
+     不要引号、不要句号、不要「会话」「标题」之类的前缀，直接输出标题本身。\
+     标题必须落到**具体的题目或知识点**上（学科 + 知识点 + 题型/错因），\
+     例如「一元二次方程判别式」「分式化简错因」「英语时态辨析」；\
+     绝对不要用操作、动作或功能名充当标题——「上传作业批改」「拍照上传」「我上传了图片/PDF」\
+     「查看错题本」「批改作业」「上传文件」「提问」这类只说做了什么、没说学什么的说法一律不要，\
+     哪怕对话里学生只说了这些、没写别的，也要从题目内容或助手的讲解里归纳出知识点来命名；\
+     只有整段对话确实没有任何题目或学科内容时，才用「新会话」。"
         .to_string();
     if english_mode {
         prompt.push_str(ENGLISH_TITLE_RULE);

@@ -43,6 +43,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   rename survives. A new `session_title_updated` event refreshes the
   sidebar. New audit records: `SessionOpened`, `SessionRenamed`,
   `SessionDeleted`, `SessionTitleGenerated`.
+  **Titles name the subject, not the operation**: sessions often open
+  with a tool call, whose `display_text` is the tool's own title
+  (`grading::upload` → 「上传作业批改」, `grading::list` → 「查看错题本」).
+  The prompt now explicitly forbids operation/function names as titles,
+  and the transcript handed to the model carries only *human* lines
+  (user visible text plus assistant prose) — tool-call params/results
+  are JSON plumbing that made the model echo tool and field names. A
+  transcript with no human line (a pure tool turn) skips the model
+  instead of asking it with an empty input.
 - **`nickname` setting**: a free-text name (≤24 characters, empty string
   clears it — unlike `api_key`, where an empty string means "keep") stored
   in `settings.json` and returned by `get_settings`. It is display-only:
