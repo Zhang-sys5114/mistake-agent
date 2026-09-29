@@ -38,15 +38,37 @@
 - [x] **已验证**：DeepSeek `deepseek-flash` 的 Responses API 原生支持图片输入（`input_image` content part，base64 data URL / http(s) URL）。
 - [x] **后续（ADR-0046）**：进一步删除 `vision::read` 工具，图片以 `uploads/` 路径引用直入消息上下文（`AttachmentRef` + `AttachmentResolvingModelService`）；`grading::upload` 改为 `{items}` 只归档模型判分结果；PDF 在 GUI 边界抽文。
 
-### 3. 加入服务端：教师端班级管理 + 出题下发（学生端登录接入）
+### 3. 加入服务端：账号 + 模型中转售卖 + 多设备同步（教师端班级管理属二期）
 
-目标形态：新增**服务端 + 学生端登录接入**；服务端带账号体系，学生端登录后从服务端拉取下发题目并同步错题。
+目标形态：新增**服务端 + 学生端登录接入**；服务端带账号体系（user / teacher / admin，teacher 首期占位），学生端可选登录后走平台中转，并按需同步数据。
 
-- [ ] 账号体系：教师/学生登录，学生端登录接入，本地数据与账号绑定。
-- [ ] 教师端：创建班级、管理学生（加入/移除/重置）、查看学生错题内容与掌握度。
-- [ ] 出题下发：教师出题后下发给**全班或指定部分学生**；学生端接收获派作业（练习/试卷）并作答，结果回传。
-- [ ] 同步：错题本/事件流 ↔ 服务端（增量上传 + 下发拉取；冲突与离线策略需定）。
-- [ ] 架构决策待立 ADR：服务端技术栈、数据模型、鉴权方式、学生端（Tauri）接入路径。
+**架构决策已立（2026-09-29）**：[ADR-0047](adr/0047-server-account-package-relay.md)（服务端：账号 / 兑换码售卖 / DeepSeek 中转 / 三窗口计费）、[ADR-0048](adr/0048-client-platform-account-integration.md)（客户端接入：`account` 配置段、OOBE 可选登录、401/402 引导）、[ADR-0049](adr/0049-multi-device-sync-protocol.md)（多设备同步：outbox + change log 光标、并集 / LWW、附件后置）。定案要点：
+
+- 技术栈 Rust + axum + **sqlx** + **PostgreSQL**；`server/` 为同仓库顶层**独立 Cargo 项目**（不进客户端二进制，单 crate 红线豁免范围见 ADR-0047）
+- **无在线支付**，走兑换码（线下收款 + 管理端发码；`source=payment` 已为二期预留）
+- 商品：体验包 1 元/10 次；月卡 Lite 28 / Pro 68 / Max 128
+- 计量：**对外按次数、内账按 token**；阶梯扣次（≤32k 扣 1 / ≤64k 扣 2 / >64k 扣 3）+ 5 小时、7 天、30 天三个**滑动窗口**
+- 中转：`POST /responses` drop-in 兼容，客户端模型适配器零改动；正文不落库
+- 同步：**默认关闭**，OOBE 登录后询问；消息/事件取并集，可变记录 LWW + 本地 `conflicts/` 保留
+- 管理通道首期 CLI + REST，不做网页；教师端功能整体后置
+
+**服务端里程碑（S1–S8，S5 完成即可开卖）**：
+
+- [ ] S1 骨架：axum + sqlx + PostgreSQL 迁移 + 配置 + `/healthz` + 分级日志（本机无 `psql`，开发期用容器起库）
+- [ ] S2 账号：注册 / 登录 / 令牌（不透明串 + SHA-256）/ 三角色 / `sync_enabled`
+- [ ] S3 中转：鉴权 + 三窗口限额 + 转发 + SSE tee + usage 记账 + 402（真实 DeepSeek 链路验证）
+- [ ] S4 套餐与兑换码：plans / entitlements / redemption_codes + 阶梯扣次 + admin CLI（含 CSV 导出）
+- [ ] S5 客户端接入：登录 + OOBE 可选登录 + 兑换码 + 「账户与套餐」卡片 + 401/402 引导 → **端到端可卖**
+- [ ] S6 同步服务端：结构化表 + `changes` 光标 + push/pull + `blobs` 预留
+- [ ] S7 客户端同步引擎：storage outbox + `src/kernel/sync/` + 状态 RPC/事件 + 关闭与删除云端数据
+- [ ] S8 部署：VPS + PostgreSQL + Caddy（自动 TLS）+ systemd + 备份 + `docs/server.md`
+
+**二期（教师端，本轮不做）**：
+
+- [ ] 教师端：创建班级、管理学生（加入/移除/重置）、查看学生错题内容与掌握度（错题已结构化入库，届时基本是查询工作）
+- [ ] 出题下发：教师出题后下发给**全班或指定部分学生**；学生端接收并作答，结果回传
+- [ ] 在线支付接入（复用 `entitlements.source=payment`）
+- [ ] 附件原图同步（`blobs` 内容寻址 + 懒加载 + 存储配额）——独立计费增值项
 
 ### 4. 错题本优化（前端错题卡）
 

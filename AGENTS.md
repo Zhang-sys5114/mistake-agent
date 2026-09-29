@@ -4,6 +4,8 @@
 
 Mistake Agent v2：面向中学生的本地错题管理 + 辅助学习 Agent（Windows 桌面应用，Tauri GUI + 自研 Rust kernel，Rust 2024 edition，mistake-agent 本体单 crate；Agent 核心已按 ADR-0037 提取为独立 `so-lite-agent` crate 仓库）。
 
+自 2026-09-29 起另有**可选服务端** `server/`（账号体系、DeepSeek 中转售卖、多设备同步，ADR-0047/0048/0049）：独立 Cargo 项目，不属于本体 crate，客户端不登录时行为与纯本地完全一致。
+
 **动任何代码之前，先读一遍 [PROJECT.md](PROJECT.md)**——它是唯一入门文档，包含架构、信任模型、机制、命名规范、里程碑和分工。
 
 ## Agent 启动流程（每次开始工作前执行）
@@ -33,6 +35,7 @@ Mistake Agent v2：面向中学生的本地错题管理 + 辅助学习 Agent（W
 | 改 practice 出题（变式/真题/几何校验） | docs/variants.md + PROJECT.md §3、§9 | 出题架构与落地状态、未落地项 |
 | 改 GUI / 协议 | PROJECT.md §5 通信 + docs/adr/0013 | trigger_command 唯一命令通道、事件流 |
 | 改模型 / 设置 | PROJECT.md §6 + docs/adr/0015、0019、0045 | 单模型配置、用户独占写、明文 key 取舍 |
+| 改服务端 / 账号 / 售卖 / 中转 / 同步 | PROJECT.md §15 + docs/adr/0047、0048、0049 | 账号与角色（teacher 首期占位）、兑换码售卖、三滑动窗口计量与阶梯扣次、`server/` 独立 Cargo 项目、同步 outbox + change log 光标 |
 | 改审计 / 日志 | PROJECT.md §5 审计日志 + docs/adr/0017、0018 | 全覆盖审计、分级日志、脱敏 |
 | 抄开源代码 | 该项目 LICENSE + PROJECT.md §2 开源策略 | 保留许可声明、注明来源；机制可抄，业务自写 |
 | 写测试 | PROJECT.md §10 里程碑验收标准 + 各模块 tests | 按验收标准补测试 |
@@ -44,11 +47,14 @@ cargo check        # 快速检查
 cargo test         # 单元测试
 cargo clippy -- -D warnings
 cargo fmt --check
+
+cd server && cargo test                      # 服务端（独立 Cargo 项目，需 PostgreSQL）
+cd server && cargo clippy -- -D warnings
 ```
 
 ## 架构红线（改代码时逐条遵守）
 
-- mistake-agent 本体单 crate：`src/kernel/`（内核）与 `src/plugin/`（用户插件）分区，**不再新增 crate 拆分**；Agent 核心已按 ADR-0037 迁出至独立 `so-lite-agent` 仓库（`docs/plan/so-lite-agent.md` 仅作历史归档）
+- mistake-agent 本体单 crate：`src/kernel/`（内核）与 `src/plugin/`（用户插件）分区，**不再新增 crate 拆分**；Agent 核心已按 ADR-0037 迁出至独立 `so-lite-agent` 仓库（`docs/plan/so-lite-agent.md` 仅作历史归档）。**唯一豁免**：`server/` 服务端是独立部署单元（自带 `[workspace]`，不进客户端 crate 图与二进制），豁免留痕见 ADR-0047
 - 能力边界：内核实现用 `pub(crate)` 隐藏；用户插件只经公开 API 面交互；不引入全局可变状态绕过句柄
 - CallerPolicy：`UserAndModel` 工具必须配同名用户入口；`UserOnly` 不得进入模型工具列表
 - 入口点命名 `namespace::tool`：插件只写短名，kernel 拼全名，撞名由注册表拒绝
