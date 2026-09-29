@@ -1,0 +1,25 @@
+# Caddy 反向代理 + 自动 TLS（Let's Encrypt）
+#
+# 域名由 compose 传入的 SITE_ADDRESS 决定；Caddy 会自动申请并续期证书。
+# 服务端本身不终结 TLS（BIND_ADDR 只监听容器内网），这是刻意的：
+# 证书与 SNI 交给 Caddy，服务端只管业务。
+{$SITE_ADDRESS} {
+	# 刻意**不开** encode（gzip/zstd）：中转面是 SSE 长连接，
+	# 压缩会引入缓冲，破坏"边生成边到达"的流式体验。
+	# 文本响应的体积由客户端与业务本身决定，不值得为它冒流式退化的风险。
+
+	reverse_proxy server:8080 {
+		# SSE 关键设置：-1 表示不缓冲，每次写入立即 flush。
+		# 少了这行，模型的流式输出会被攒到最后一次性吐出（体验完全变了）。
+		flush_interval -1
+
+		# X-Forwarded-For 由 Caddy 自动追加（服务端取最后一条，防止客户端伪造）；
+		# X-Real-IP 不是自动的，这里补上，便于人工排查。
+		header_up X-Real-IP {remote_host}
+	}
+
+	log {
+		output file /data/access.log
+		format console
+	}
+}

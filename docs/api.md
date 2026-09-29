@@ -1,6 +1,10 @@
 # Mistake Agent v2 — API 文档（standalone 单文件）
 
 > 本文档自包含：GUI ↔ kernel 的 RPC 协议、内核入口点/服务契约、真实模型 API 对接方式与验收命令。代码引用均为仓库内文件名，细节以代码为准（ADR 见 docs/adr/）。
+>
+> **平台服务（可选的服务端）不在这份文档里** —— 账号 / 模型中转 / 套餐计费 / 同步的接口契约见
+> [server-api.md](server-api.md)（服务端实现见 [server/](../server/README.md)，决策见
+> [ADR-0047](adr/0047-server-account-package-relay.md)、[ADR-0048](adr/0048-client-platform-account-integration.md)）。
 
 ## 1. 架构总览
 

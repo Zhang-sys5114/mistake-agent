@@ -169,4 +169,63 @@ jobs:
             target/release/bundle/
             target/release/mistake-agent*
           if-no-files-found: warn
+
+  # 服务端（ADR-0047）：独立 Cargo 项目 + 独立 job——服务端改动不该拖慢/阻塞客户端构建，
+  # 反之亦然。S2 起的账号/令牌测试跑在真实 PostgreSQL 上（服务容器），不靠 mock。
+  server:
+    name: server (ubuntu-latest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: mistake
+          POSTGRES_PASSWORD: mistake
+          POSTGRES_DB: mistake_agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mistake -d mistake_agent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://mistake:mistake@127.0.0.1:5432/mistake_agent
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry & target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          cache-on-failure: true
+
+      - name: Install system TLS deps
+        # 服务端用 native-tls（Linux 上是 OpenSSL），刻意避开带 C 代码的 ring/aws-lc：
+        # 见 server/Cargo.toml 的说明（这类 crate 在含中文的构建路径下编不过）
+        run: |
+          sudo apt-get update -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10
+          sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo test
+        run: cargo test --all-targets --locked
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
           retention-days: 14

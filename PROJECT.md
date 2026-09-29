@@ -1,10 +1,12 @@
 # Mistake Agent v2 — 项目总览
 
-> 本文档自包含：只看这一份文件即可了解项目全貌、技术决策与分工方式。详细决策留痕见 `docs/adr/`（46 条 ADR）与 `CONTEXT.md`（术语表），但理解本项目不要求先读它们。
+> 本文档自包含：只看这一份文件即可了解项目全貌、技术决策与分工方式。详细决策留痕见 `docs/adr/`（49 条 ADR）与 `CONTEXT.md`（术语表），但理解本项目不要求先读它们。
 
 ## 1. 项目一句话
 
-面向中学生的**本地智能错题管理 + 辅助学习 Agent**：Windows 桌面应用，双击安装即用，无服务器、无 Docker、数据全本地。形态类似 Codex / Claude Code 那样的本地 Agent，但用户完全不接触命令行——一切通过图形界面完成。
+面向中学生的**本地智能错题管理 + 辅助学习 Agent**：Windows 桌面应用，双击安装即用，数据默认全本地，不装服务端也能完整使用（无服务器、无 Docker 的原形态仍是默认形态）。形态类似 Codex / Claude Code 那样的本地 Agent，但用户完全不接触命令行——一切通过图形界面完成。
+
+自 2026-09-29 起新增**可选的平台服务**（[ADR-0047](adr/0047-server-account-package-relay.md)）：账号体系 + DeepSeek 中转（学生零配置、额度可控）+ 多设备同步（默认关闭）。不登录时客户端行为与纯本地完全一致；平台服务只做增值，不构成使用前提。服务端见 §15。
 
 ## 2. 背景与动机
 
@@ -128,23 +130,26 @@ GUI → kernel：`send_user_message`、`trigger_command(entry, params)`、`edit_
 }
 ```
 
-- 单份配置承担**主对话 + 调度/摘要 + 图片理解**：模型默认 `deepseek-flash`，负责 agent loop 调度与对话；默认经 **DeepSeek Responses API**（`POST /responses`，官方 2026-08 起支持、为 agent 优化）接入，`transport: "responses"`；Ollama 等不兼容端点可配 `"chat_completions"`。
-- 图片理解不需要独立视觉端点，也**不再有独立读图工具**：上传图片以 `uploads/` 路径引用存进用户消息，请求构建时解析为 `input_image`（base64 data URL）直入上下文，与主链路共用同一配置；PDF 在 GUI 边界抽文（ADR-0046）。
+- 单份配置承担**主对话 + 调度/摘要 + 图片理解**：模型默认 `deepseek-flash`，负责 agent loop 调度与对话；默认经 **DeepSeek Responses API**（`POST /responses`，官方 2026-07-31 起支持 Flash、2026-08-13 起支持 Pro）接入，`transport: "responses"`；Ollama 等不兼容端点可配 `"chat_completions"`。
+- 图片理解不需要独立视觉端点，也**不再有独立读图工具**：上传图片以 `uploads/` 路径引用存进用户消息，请求构建时解析为 `input_image`（base64 data URL）直入上下文，与主链路共用同一配置；PDF 在 GUI 边界抽文（ADR-0046）。**注意 `deepseek-v4-pro` 不支持图片输入**（`input_modalities` 只有 text），配成 Pro 后带图消息会失败（[来源](https://api-docs.deepseek.com/zh-cn/guides/vision/)）。
 - `vision_model` 字段仅为兼容旧 `settings.json` 保留、运行时不再读取（ADR-0045）。
 
 **Responses API 速览（详见 ADR-0020）**：
 
 | 项 | 现状 |
 |---|---|
-| Endpoint | `POST https://api.deepseek.com/responses`（base_url 与 Chat Completions 相同） |
-| 模型支持 | `deepseek-flash`（V4.1-Flash）/ `deepseek-v4-pro`；旧名 `deepseek-v4-flash` 已退役 |
+| Endpoint | `POST https://api.deepseek.com/responses`（base_url 与 Chat Completions 相同；官方文档从未出现 `/v1` 前缀，但客户端会容忍传入 `/v1`） |
+| 模型支持 | `deepseek-flash`（V4.1-Flash）/ `deepseek-v4-pro`；**图片输入仅 `deepseek-flash` 支持**；旧名 `deepseek-v4-flash` 仍可调用并被路由到 V4.1-Flash（并非报错退役） |
 | 会话状态 | 无状态：不支持 `previous_response_id`/`conversation`/`store`，每回合发全量历史 |
-| 流式 | SSE 语义事件，`response.completed`/`incomplete`/`failed` 结束，无 `data: [DONE]` |
-| 思考模式 | 默认开启（`reasoning` 可调 effort）；thinking 下 `temperature`/`top_p` 无效 |
+| 流式 | SSE 语义事件，`response.completed`/`incomplete`/`failed` 结束，无 `data: [DONE]`；另有 `: keep-alive` 注释行与空行需容忍（[限速与隔离](https://api-docs.deepseek.com/zh-cn/quick_start/rate_limit/)） |
+| 思考模式 | 默认开启（`reasoning.effort`：`none`/`low`/`high`/`max`）；**thinking 下 `temperature` 无效**；`top_p` 相反——**只在 thinking 下生效**（有效区间 0.95–1.0，更低值按 0.95 处理），非 thinking 下恒为 1.0 且传入值被忽略 |
 | 工具 | `function` / `web_search`；function 名限 `^[a-zA-Z0-9_-]+$` → 内部 `namespace::tool` 经 wire name 映射（`::`→`__`） |
 | 并行工具调用 | 恒开启（参数被忽略）；v2 loop 仍串行执行（ADR-0010） |
-| 图片输入 | 支持 `input_image`（base64 data URL 或 http(s) URL；仅 user/developer 消息与 function_call_output） |
-| 来源 | [官方指南（英）](https://api-docs.deepseek.com/guides/responses_api/) / [（中）](https://api-docs.deepseek.com/zh-cn/guides/responses_api/)，2026-09-23 核对 |
+| 图片输入 | 支持 `input_image`（base64 data URL 或 http(s) URL；仅 user/developer 消息与 function_call_output；**system/assistant 消息里带图会 400**） |
+| 计费与限速 | usage 在 `response.usage`（`input_tokens` **已含**缓存命中 / `input_tokens_details.cached_tokens` / `output_tokens` / `output_tokens_details.reasoning_tokens`）；缓存命中价差约 50 倍、空闲时段半价；并发按**账号**计（flash 2500 / v4-pro 500），超限 429；`user` 字段可用于上游 KVCache 与调度隔离 |
+| 来源 | [官方指南（英）](https://api-docs.deepseek.com/guides/responses_api/) / [（中）](https://api-docs.deepseek.com/zh-cn/guides/responses_api/) / [Responses API 参考](https://api-docs.deepseek.com/api/create-response/) / [限速与隔离](https://api-docs.deepseek.com/zh-cn/quick_start/rate_limit/)，2026-09-29 复核（详见 [docs/research/deepseek-api-compat.md](docs/research/deepseek-api-compat.md)） |
+
+**Anthropic 兼容面（新增事实，2026-09-29 实测）**：官方提供 `base_url = https://api.deepseek.com/anthropic`，鉴权用 `x-api-key`（`anthropic-version` 被忽略），`tools`/`tool_use`/`tool_result`/图片块完整支持；传 `claude-opus*` 会被映射到 `deepseek-v4-pro`，`claude-sonnet*`/`claude-haiku*` 映射到 `deepseek-flash`。usage 分两处（`message_start.message.usage` 给输入、`message_delta.usage` 给终值），且 `input_tokens` **不含**缓存读取——与 Responses 口径不同，网关需归一化。详见 [ADR-0047](docs/adr/0047-server-account-package-relay.md) 的修订节与上述研究报告附录 A。
 
 - 会话新建归用户（ADR-0044：`create_session` RPC；模型侧决策已全部删除）；交接摘要与上下文压缩摘要由 `LlmSummarizer` 生成（≤300 字，保留错题 id/知识点/未完成事项，模型错误降级为计数摘要），两个调用方共享同一实例。
 - 可选 Ollama 本地模型（离线场景，不填 key）。
@@ -190,8 +195,12 @@ mistake-agent/
 │   └── plugin.rs                 ← 用户插件入口（mod plugin;）
 │       └── plugin/               ← 用户插件（hello/ grading/ practice/ report/ exam/ tracking/）
 ├── web/                          ← GUI 前端资源（Tauri 加载）
+├── server/                       ← 服务端（独立 Cargo 项目，非本 crate 的模块，ADR-0047/0049）
+│   └── src/ auth/ relay/ billing/ sync/ admin/
 └── assets/
 ```
+
+`server/` 是**独立部署单元**（自带 `[workspace]`，不进客户端 crate 图、不进客户端二进制）：客户端 `src/` 的单 crate 约束不受影响——豁免范围留痕见 [ADR-0047](adr/0047-server-account-package-relay.md)「影响」节。
 
 **边界约束**：单 crate 内没有 Cargo 依赖图边界，能力边界靠两层纪律保证：可见性（kernel 只公开 trait 与句柄类型，服务实现与内核内部用 pub(crate) 隐藏）+ 运行时调度（CallerPolicy、句柄注入、注册校验）。用户插件只允许经公开 API 面与内核交互。
 
@@ -199,7 +208,8 @@ mistake-agent/
 
 ## 9. 当前状态
 
-- **M1–M6 全部完成**（含 Windows 打包实测：`错题 Agent_0.1.0_x64-setup.exe` 在 Windows 环境安装运行通过），设计文档 46 条 ADR（0001–0043）+ 术语表（CONTEXT.md）。
+- **M1–M6 全部完成**（含 Windows 打包实测：`错题 Agent_0.1.0_x64-setup.exe` 在 Windows 环境安装运行通过），设计文档 49 条 ADR（0001–0049）+ 术语表（CONTEXT.md）。
+- **平台服务：设计已定，S1–S3 已落地**（2026-09-29，ADR-0047/0048/0049）。要点：账号（user/teacher/admin，teacher 首期占位）+ 兑换码售卖（无在线支付）+ DeepSeek 三协议中转（`/responses`·`/chat/completions`·`/v1/messages` 全部**透传**，客户端模型适配器零改动）+ 对外按次数/内账按 token + 5h/周/月三滑动窗口 + 多设备同步（默认关闭）。**S1 已交付**：`server/` 独立 Cargo 项目（axum + sqlx + PostgreSQL）、配置 fail-fast、编译期嵌入迁移、`/healthz`·`/readyz`、分级日志与连接串脱敏、CI 独立 job。**S2 已交付**：注册/登录/登出、不透明令牌（SHA-256 落库）、`Argon2id` 口令、`AuthUser`/`RequireAdmin` 提取器、`GET/PATCH /api/v1/me`、管理面账号列表、管理员种子。**S3 已交付**：三协议透传网关（路径别名 + `x-api-key` 兼容）、套餐/权益/用量三表、预扣→结算计费（事务内 advisory lock 串行化同一用户）、阶梯扣次、三滑动窗口、安全护栏（令牌桶限流 / 失败封禁 / 全局并发）。里程碑 S1–S8 见 §10，服务端概览见 §15。
 - **磁盘 IO 铁律 + 数据运行时化落地**（2026-08-10，ADR-0042）：`DomainIo`（数据根目录域内文件：域枚举 + canonicalize 兜底 + 原子写 + 审计）+ `TmpIo`（系统 temp 暂存：`mistake-agent-` 前缀白名单）+ `RelPath`（类型层无目录遍历，fail-closed）；memory 收编（中文路径 base64url 段编码经 DomainIo 落盘）；vision/grading 附件读写、practice 真题池全经 StorageHandle 语义方法（插件零文件句柄）；`data/` 子目录 + 真题池运行时化（`gaokao_pool.json` 文件优先、内置种子兜底，`read_pool_json` 真实链路测试）；verify_geometry.py 维持 include_str!（执行代码非数据）。
 - **指令加载落地**（2026-08-10）：数据根 `AGENTS.md`（教学规则，家长/老师可编辑）全文进主模型系统提示（静态基底之后、debug 段之前，`load_agents_md`，缺失/损坏/超限 64KB 回退静态文本，路径仅由数据根拼接固定文件名）；文件保存即生效（无缓存）；设置页「教学规则」卡片经 `get_rules_status` 展示加载状态 + `open_rules_file` 一键打开编辑。
 - kernel：注册表/两段式契约（用户插件 UserPlugin + 内核插件 KernelPlugin，ADR-0035）/dispatch/loop/RPC/session 调度全链路；四服务全部生产实现——storage（文件持久化：会话 JSONL/错题 JSON/审计 JSONL 轮转）、memory（文件持久化 + MemoryHandle 事件/审计）、model（Responses API + Chat Completions，LiveSettingsModelService 热更新）、compute（BridgeCompute → GUI Pyodide）。
@@ -230,6 +240,19 @@ mistake-agent/
 | M4 | 五个插件 + compute::verify | ✅ 完成：6 用户插件 + 5 内核插件注册；场景一全链路 + Pyodide 验算桥接 |
 | M5 | 消息树 / 记忆路由 / 设置向导 / 审计日志 | ✅ 完成：编辑/切分支、memory 工具、设置页、审计补全 |
 | M6 | Windows 打包 + 测试 + 文档 | ✅ 完成：142 单测 + 真实 API 链路 + 文档同步；Windows setup.exe 安装运行实测通过（2026-08-09） |
+
+**平台服务里程碑（S1–S8，ADR-0047/0048/0049；S5 完成即可开卖，S6–S8 为留存功能）**：
+
+| 里程碑 | 内容 | 验收标准 |
+|---|---|---|
+| S1 | 服务端骨架：axum + sqlx + PostgreSQL 迁移 + 配置 + `/healthz` + 分级日志 | ✅ 完成：`server/` 独立 CI 通过，根 `cargo test` 不受影响；容器 PostgreSQL 真实应用迁移 |
+| S2 | 账号：注册 / 登录 / 令牌（不透明串 + SHA-256）/ 三角色 / `sync_enabled` | ✅ 完成：40 项测试覆盖越权、令牌撤销与过期、停用账号、角色边界；真实链路手工验收通过 |
+| S3 | 中转：三协议透传 + 预扣/结算计费 + 三滑动窗口 + 安全护栏（限流/封禁/全局并发） | ✅ 完成：真实 DeepSeek 三协议端到端跑通（Responses / Chat Completions / Anthropic），流水与权益递增逐项核对；96 项测试全绿 |
+| S4 | 兑换码（注册制 + AES 静态加密）与 admin CLI + 套餐数值校准 | 并发兑换与限额边界测试；CSV 导出对账 |
+| S5 | 客户端接入：登录 + OOBE 可选登录 + 兑换码 + 「账户与套餐」卡片 + 401/402 引导 | **端到端可卖**：登录 → 兑换 → 聊天 → 额度减少 |
+| S6 | 同步服务端：结构化表 + `changes` 光标 + push/pull + `blobs` 预留 | 双客户端收敛一致性测试 |
+| S7 | 客户端同步引擎：storage outbox + `src/kernel/sync/` + 状态 RPC/事件 + 关闭与删除云端数据 | 双设备消息 / 错题 / 记忆收敛一致；既有 146 单测与 live_api 全绿 |
+| S8 | 部署：VPS + PostgreSQL + Caddy（自动 TLS）+ systemd + 备份 + `docs/server.md` | 公网可达、可发码售卖 |
 
 **已迁出（不再跟踪）**：Agent core 已按 ADR-0037 提取为独立 `so-lite-agent` crate 仓库，M1-M4 已落地并迁出（v0.1.0 起 mistake-agent 不再包含 `so-lite-agent/`）；M5（crates.io 发布）在新仓库推进。剥离过程的历史归档与 Pi 分层参照见 [docs/plan/so-lite-agent.md](plan/so-lite-agent.md) 与 [docs/adr/0037](adr/0037-so-lite-agent-crate-extraction.md)。
 
@@ -290,5 +313,36 @@ mistake-agent/
 
 ## 14. 风险与后续优化
 
-- **风险**：Windows 打包已实测通过（NSIS setup.exe 安装运行正常）；settings 明文存 key 是已知取舍（DPAPI 列后续）；主模型每回合新消息预决策 + 回合末决策共两次小调用，有少量成本（可接受）。
+- **风险**：Windows 打包已实测通过（NSIS setup.exe 安装运行正常）；settings 明文存 key 是已知取舍（DPAPI 列后续）。（原「主模型每回合两次决策小调用」的成本项已随 ADR-0044 消失——模型侧会话决策已整体下线。）
 - **后续优化**：工具并行（拓扑排序）、子 agent、wasmtime 内嵌 Python（compute 收进 kernel）、第三方插件/技能系统、数据目录可配置、家长端报表、Windows 凭据管理器。
+
+## 15. 平台服务（服务端）
+
+自 2026-09-29 起新增可选的服务端（ADR-0047/0048/0049）。**定位：只做增值，不构成使用前提**——不登录时客户端与纯本地形态完全一致。
+
+```
+┌─ 客户端（Tauri，本地优先）─────────────────────────────┐
+│  account { server_url, token, sync_enabled }          │
+│  模型链路：有令牌 → 平台中转；无令牌 → 自备 Key        │
+│  同步引擎 src/kernel/sync/：outbox → push/pull         │
+└────────────┬──────────────────────────────────────────┘
+             │ HTTPS
+┌────────────▼──────────────────────────────────────────┐
+│ 服务端（server/，Rust + axum + sqlx + PostgreSQL）      │
+│  auth    账号：user / teacher(占位) / admin + 不透明令牌│
+│  billing 套餐、兑换码、权益、三滑动窗口限额、扣次       │
+│  relay   POST /responses：DeepSeek drop-in 中转 + 计量  │
+│  sync    多设备同步：change log 光标 + 结构化入库       │
+│  admin   REST + CLI（生成兑换码 / 发放 / 撤销）         │
+└───────────────────────────────────────────────────────┘
+```
+
+- **中转（relay）**：实现 DeepSeek Responses API 的兼容子集，客户端**模型适配器零改动**（改 `api_url` + 令牌即可）。服务端不解析工具调用、不拼上下文，是纯流式管道 + 会计；**请求与响应正文不落库**；`response.completed` 的 usage 用于计量；额度不足在请求前返回 402（复用客户端既有 `QuotaExceeded` 映射）。
+- **售卖（billing）**：无在线支付，走**兑换码**（Crockford Base32 + 校验位，批量生成 + CSV 导出），线下收款后发码；月卡叠加**顺延**（新权益接在旧权益到期之后）。商品：体验包 1 元/10 次；月卡 Lite 28 / Pro 68 / Max 128。
+- **计量**：**对外按次数，内账按 token**（`usage_events` 记 input/cached/output/reasoning，用于成本核算与限额校准）；阶梯扣次防击穿（≤32k 扣 1、≤64k 扣 2、>64k 扣 3，可配）；限额为 5 小时 / 7 天 / 30 天三个**滑动窗口**；数值先占位，S3 后按真实数据收紧（`plans` 热改不发布）。
+- **防共享（轻量）**：令牌数上限（体验包 1 台 / 月卡 3 台）、同用户并发上限（默认 2，超出 429）、记录 IP 与令牌 label 供事后排查；不做自动封禁。
+- **同步（sync）**：本地是真相源，同步是后台增量副本（断网零退化、失败不阻塞本地写）。服务端 `changes` 表的光标做增量拉取，客户端 storage 写 outbox 做增量推送（会话消息用 JSONL 字节偏移作水位）。**消息与事件取并集永不冲突**；元数据 / 错题快照 / 记忆按 `updated_at` **LWW**，被覆盖版本落本地 `conflicts/` 不静默丢弃。`schedule.json` 由事件折叠重算故**不参与同步**；附件原图首期不同步（协议预留内容寻址 `blobs`，作独立计费增值项）。
+- **隐私边界**：中转正文不落库；同步数据仅在 `sync_enabled`（**默认关闭**、OOBE 登录后询问）时由客户端**主动上传**入库，支持一键删除云端数据与全量导出；服务端查询强制 `user_id` 隔离。「同步」是用户显式选择的功能，不是服务端对中转流量的记录——这条区别是隐私表述的基石。
+- **工程**：`server/` 为同仓库顶层独立 Cargo 项目（自带 `[workspace]`），验收命令独立：`cd server && cargo test && cargo clippy -- -D warnings`。里程碑 S1–S8 见 §10。
+- **接口契约**：客户端接入看 [docs/server-api.md](docs/server-api.md)（端点、字段、错误码总表、错误分流建议、尚未实现项预告）；客户端侧设计见 [ADR-0048](docs/adr/0048-client-platform-account-integration.md)。
+- **进度**：**S1–S3 已完成**（2026-09-29）。运行方式、端点、配置表与安全护栏见 [server/README.md](server/README.md)；中转面 `/responses`·`/chat/completions`·`/v1/messages`（带 `/v1` 别名）已挂载，三协议**全部透传**（无翻译层），计费口径为「对外按次数、内账按 token 四元组」；账号面 `/api/v1/auth/*`、`/api/v1/me`、`/api/v1/admin/users` 已挂载；套餐/兑换码（S4）与同步（S6）面待挂载。

@@ -12,6 +12,50 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **Platform service — DeepSeek relay, quota billing, and security guardrails (S3)**
+  ([ADR-0047](docs/adr/0047-server-account-package-relay.md)): an
+  authenticated, quota-metered **pass-through gateway** for three
+  protocol faces — OpenAI Responses, OpenAI Chat Completions, and
+  Anthropic Messages (the latter two added after research showed DeepSeek
+  serves all three natively, so no translation layer is needed). Both
+  `/v1/...` and bare paths are accepted, and both `Authorization: Bearer`
+  and `x-api-key` authenticate, so third-party Anthropic-style clients can
+  connect with the same platform token. Each request runs
+  authenticate → token-bucket rate limit → per-user and global
+  concurrency gates → **reserve** → forward → streaming tee → **settle**;
+  the reservation is serialized per user with a transaction-scoped
+  advisory lock, so concurrent requests cannot slip past a quota window.
+  Metering is "uses" outward and normalised token counts inward.
+  Security guardrails: token-bucket limits per IP, per user, and per IP
+  for relay; fail2ban-style lockout on repeated login failures (IP *and*
+  account, with a fixed log line for an external fail2ban jail, shipped
+  under `server/deploy/fail2ban/`); and a global concurrency cap.
+  Throttled responses carry `Retry-After`.
+- **Platform service — accounts and authentication (S2)**
+  ([ADR-0047](docs/adr/0047-server-account-package-relay.md)): self-service
+  registration, login, and logout on `/api/v1/auth/*`, plus `GET/PATCH
+  /api/v1/me` (account state and the `sync_enabled` toggle) and an
+  admin-only `GET /api/v1/admin/users` — the first real user of the role
+  guard. Passwords use Argon2id with a per-password random salt; access
+  tokens are opaque (`mka_` + 32 random bytes, exactly the hex form the
+  server issues), returned in plaintext once and stored only as SHA-256.
+  Failed logins are indistinguishable between "wrong password" and
+  "unknown account" (with an equal-cost dummy verification) so the
+  endpoint cannot be used to enumerate registered emails. The first admin
+  is seeded from `ADMIN_EMAIL`/`ADMIN_PASSWORD` idempotently per email,
+  and an existing account with that email is never escalated.
+- **Platform service — server skeleton (S1)**
+  ([ADR-0047](docs/adr/0047-server-account-package-relay.md),
+  [ADR-0048](docs/adr/0048-client-platform-account-integration.md),
+  [ADR-0049](docs/adr/0049-multi-device-sync-protocol.md)): an optional
+  server under `server/` (independent Cargo project, not part of the
+  client crate) for accounts, redemption-code package sales, a DeepSeek
+  Responses relay, and multi-device sync. S1 delivers the skeleton:
+  axum + sqlx + PostgreSQL, environment-variable config with fail-fast
+  validation, compile-time embedded migrations, `/healthz` (liveness,
+  does not touch the database) and `/readyz` (readiness), leveled
+  logging with connection-string redaction, and a dedicated CI job.
+  Not logging in leaves the client exactly as before.
 - **User-driven session creation**
   ([ADR-0044](docs/adr/0044-user-driven-session-creation.md)): a new
   `create_session` RPC archives the current active session and opens a

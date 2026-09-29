@@ -1,0 +1,7 @@
+# 构建上下文里不要这些：target/ 极大且无用；.env 含密钥，绝不能烤进镜像
+target
+.env
+.git
+deploy
+docker-compose*.yml
+README.md

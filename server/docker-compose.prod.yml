@@ -1,0 +1,70 @@
+# 生产栈（S8）：PostgreSQL + 服务端 + Caddy（自动 TLS）
+#
+# 用法：
+#   cd server
+#   cp .env.example .env          # 填 POSTGRES_PASSWORD / DEEPSEEK_API_KEY / ADMIN_* / SITE_ADDRESS
+#   docker compose -f docker-compose.prod.yml up -d --build
+#   docker compose -f docker-compose.prod.yml logs -f server
+#
+# 与开发用的 docker-compose.yml 分开：那个只管本地 PostgreSQL，配合 `cargo run` 使用。
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mistake}
+      # 生产必须显式设置，不给默认值：弱口令的库比没有库更危险
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-mistake_agent}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mistake} -d ${POSTGRES_DB:-mistake_agent}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  server:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        # 等库真的能用了再起：服务端启动时会应用迁移
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-mistake}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-mistake_agent}
+      BIND_ADDR: 0.0.0.0:8080
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?请设置 DEEPSEEK_API_KEY}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-flash}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # 服务在 Caddy 后面：必须信任转发头，否则所有请求的来源 IP 都是网关地址，
+      # 按 IP 的限流会把所有学生当成同一个人（fail2ban 也拿不到真实 IP）
+      SECURITY_TRUST_PROXY: "true"
+    # 只暴露给同一 compose 网络里的 Caddy，**不发布到宿主机**
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - server
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # 你的域名（先把 DNS A 记录指向本机）；Caddy 会自动申请并续期证书
+      SITE_ADDRESS: ${SITE_ADDRESS:?请设置 SITE_ADDRESS，例如 api.example.com}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

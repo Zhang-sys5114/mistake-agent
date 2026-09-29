@@ -38,15 +38,49 @@
 - [x] **已验证**：DeepSeek `deepseek-flash` 的 Responses API 原生支持图片输入（`input_image` content part，base64 data URL / http(s) URL）。
 - [x] **后续（ADR-0046）**：进一步删除 `vision::read` 工具，图片以 `uploads/` 路径引用直入消息上下文（`AttachmentRef` + `AttachmentResolvingModelService`）；`grading::upload` 改为 `{items}` 只归档模型判分结果；PDF 在 GUI 边界抽文。
 
-### 3. 加入服务端：教师端班级管理 + 出题下发（学生端登录接入）
+### 3. 加入服务端：账号 + 模型中转售卖 + 多设备同步（教师端班级管理属二期）
 
-目标形态：新增**服务端 + 学生端登录接入**；服务端带账号体系，学生端登录后从服务端拉取下发题目并同步错题。
+目标形态：新增**服务端 + 学生端登录接入**；服务端带账号体系（user / teacher / admin，teacher 首期占位），学生端可选登录后走平台中转，并按需同步数据。
 
-- [ ] 账号体系：教师/学生登录，学生端登录接入，本地数据与账号绑定。
-- [ ] 教师端：创建班级、管理学生（加入/移除/重置）、查看学生错题内容与掌握度。
-- [ ] 出题下发：教师出题后下发给**全班或指定部分学生**；学生端接收获派作业（练习/试卷）并作答，结果回传。
-- [ ] 同步：错题本/事件流 ↔ 服务端（增量上传 + 下发拉取；冲突与离线策略需定）。
-- [ ] 架构决策待立 ADR：服务端技术栈、数据模型、鉴权方式、学生端（Tauri）接入路径。
+**架构决策已立（2026-09-29）**：[ADR-0047](adr/0047-server-account-package-relay.md)（服务端：账号 / 兑换码售卖 / DeepSeek 中转 / 三窗口计费）、[ADR-0048](adr/0048-client-platform-account-integration.md)（客户端接入：`account` 配置段、OOBE 可选登录、401/402 引导）、[ADR-0049](adr/0049-multi-device-sync-protocol.md)（多设备同步：outbox + change log 光标、并集 / LWW、附件后置）。定案要点：
+
+- 技术栈 Rust + axum + **sqlx** + **PostgreSQL**；`server/` 为同仓库顶层**独立 Cargo 项目**（不进客户端二进制，单 crate 红线豁免范围见 ADR-0047）
+- **无在线支付**，走兑换码（线下收款 + 管理端发码；`source=payment` 已为二期预留）
+- 商品：体验包 1 元/10 次；月卡 Lite 28 / Pro 68 / Max 128
+- 计量：**对外按次数、内账按 token**；阶梯扣次（≤32k 扣 1 / ≤64k 扣 2 / >64k 扣 3）+ 5 小时、7 天、30 天三个**滑动窗口**
+- 中转：`POST /responses` drop-in 兼容，客户端模型适配器零改动；正文不落库
+- 同步：**默认关闭**，OOBE 登录后询问；消息/事件取并集，可变记录 LWW + 本地 `conflicts/` 保留
+- 管理通道首期 CLI + REST，不做网页；教师端功能整体后置
+
+**服务端里程碑（S1–S8，S5 完成即可开卖）**：
+
+> **环境坑（影响客户端构建，待修）**：`ring` / `aws-lc-sys` 这类**带 C 代码**的 crate 在含非 ASCII
+> 字符的构建路径下（本机是 `...\项目代码\Web与应用\...`）会编译失败（已用 ASCII 路径对照验证）。
+> 服务端已改用 `native-tls` 规避；**客户端（根 crate）仍依赖它们，目前只靠旧的构建缓存才能编译**，
+> `cargo clean` 后会暴露同样的问题——需要单独修（换 `native-tls` 或改用 ASCII 路径/目录联接）。
+
+- [x] **S1 骨架（已完成 2026-09-29）**：axum + sqlx（PostgreSQL）+ 配置 fail-fast + **编译期嵌入**迁移 + `/healthz`·`/readyz` + 分级日志与连接串脱敏；`server/` 为独立 Cargo 项目，CI 加独立 job（客户端 job 不受影响）。验收证据：`cargo test`（10 项）/ `clippy --all-targets -- -D warnings` / `fmt --check` 全绿；容器 PostgreSQL 上真实应用迁移（`_sqlx_migrations` v1、`users`/`tokens` 建表），`/readyz` 返回 `db: ok`；根 crate 165 项测试不受影响。首张迁移即 `0001_init.sql`（账号与令牌表），S2 只剩鉴权逻辑。
+- [x] **S2 账号与鉴权（已完成 2026-09-29）**：`POST /api/v1/auth/register`（自助注册，固定 `user` 角色）、`login`（返回 `mka_` + 32 字节令牌，明文只回一次，库里只存 SHA-256）、`logout`（只撤销当前令牌）、`GET/PATCH /api/v1/me`（账号状态与 `sync_enabled`）、`GET /api/v1/admin/users`（首个**角色守卫**落点，仅 admin）。口令 Argon2id + 每口令独立随机盐；登录失败对"口令错/账号不存在"返回**完全一致**的响应（并做等价耗时校验）以防邮箱枚举；`last_used_at` 写入按 5 分钟节流。管理员种子由 `ADMIN_EMAIL`/`ADMIN_PASSWORD` 幂等创建（**不提权**同邮箱普通账号）。验收证据：40 项测试全绿（24 单测 + 13 账号集成 + 3 端点），覆盖越权 / 令牌撤销 / 令牌过期 / 停用账号 / 角色边界；clippy `-D warnings` 与 `fmt --check` 干净；真实链路手工验收（201/200/204/401/403/404 逐项核对）。
+      **遗留（后续里程碑）**：登录失败限流（S4 或 S8）、邮箱验证（无邮件服务，二期）、同账号设备数上限（S4 与套餐绑定）、令牌自助管理列表（S4）。
+- [x] **S3 中转 + 计费地基 + 安全护栏（已完成 2026-09-29）**
+      **里程碑边界调整**：`plans` / `entitlements` / `usage_events` 三张表从 S4 提前到 S3（中转没有权益就无从限流，只能一律 402），S4 只剩兑换码、admin CLI 与套餐数值校准——已记入 [ADR-0047](adr/0047-server-account-package-relay.md) 修订节 R6。
+      **三协议全部透传**（推翻初判：DeepSeek 官方有 Anthropic 兼容端点，见 [研究报告](research/deepseek-api-compat.md)）：`/responses`、`/chat/completions`、`/v1/messages`，同时认带 `/v1` 与不带前缀两套路径、`Authorization: Bearer` 与 `x-api-key` 两种鉴权头。请求链路：鉴权 → 令牌桶限流 → 并发闸门（按用户 + 全局）→ **预扣**（裁决 + `reserved` 流水 + 权益 +1）→ 转发（覆盖模型名、注入平台 `user` id）→ **流式 tee**（原样转发、旁路取 usage）→ **结算**（按阶梯上调扣次；上游明确失败退回）。
+      **计费**：对外按次数、内账按 token 四元组（三面 usage 归一化）；阶梯扣次 32k/64k（可配）；三滑动窗口 5h/周/月；并发正确性由事务内 `pg_advisory_xact_lock` 串行化同一用户保证。
+      **安全护栏**：令牌桶限流（账号面按 IP、中转面按用户与按 IP）、失败封禁（fail2ban 语义，IP + 账号双维度，5 次/10 分钟 → 封 15 分钟）、全局并发上限；429 带 `Retry-After`；固定格式日志行 + [fail2ban filter/jail 配置](../server/deploy/fail2ban/)。
+      **验收证据**：96 项测试全绿（82 单测 + 13 账号集成 + 3 端点）；clippy `-D warnings` / `fmt --check` 干净；**真实 DeepSeek 三协议端到端跑通**——Responses（input 12/output 1）、Chat Completions（input 38/output 37/reasoning 35）、Anthropic（input 38/output 20，含 `ping` 未知事件被容忍），三笔流水 `billed_uses=1` 且权益 `used_uses 3/10`；预检 402（无权益）/ 400（非流式）/ 401（伪造令牌）逐项符合预期。
+      **遗留**：CI 内的中转集成测试（mock 上游 + 抓包夹具）待补——目前 CI 覆盖单测，真实链路靠手工验收。
+- [ ] S4 套餐与兑换码：`redemption_codes` + `redeem_batches`（**注册制 + AES-256-GCM 静态加密**，ADR-0047 修订 R10）+ admin CLI（生成码/发放/作废/CSV 导出）+ 套餐数值按真实用量校准 + 令牌模型白名单与软删
+- [ ] S5 客户端接入：登录 + OOBE 可选登录 + 兑换码 + 「账户与套餐」卡片 + 401/402 引导 → **端到端可卖**
+- [ ] S6 同步服务端：结构化表 + `changes` 光标 + push/pull + `blobs` 预留
+- [ ] S7 客户端同步引擎：storage outbox + `src/kernel/sync/` + 状态 RPC/事件 + 关闭与删除云端数据
+- [ ] S8 部署：VPS 实测 + 备份策略 + `docs/server.md` 运维手册。（**容器化已完成**：`server/Dockerfile`、`docker-compose.prod.yml`（PostgreSQL + 服务端 + Caddy 自动 TLS）、`deploy/Caddyfile`、`.dockerignore`；**待办**：VPS 上真机走一遍、数据库备份与恢复演练、日志轮转、fail2ban 落地、运维手册）
+
+**二期（教师端，本轮不做）**：
+
+- [ ] 教师端：创建班级、管理学生（加入/移除/重置）、查看学生错题内容与掌握度（错题已结构化入库，届时基本是查询工作）
+- [ ] 出题下发：教师出题后下发给**全班或指定部分学生**；学生端接收并作答，结果回传
+- [ ] 在线支付接入（复用 `entitlements.source=payment`）
+- [ ] 附件原图同步（`blobs` 内容寻址 + 懒加载 + 存储配额）——独立计费增值项
 
 ### 4. 错题本优化（前端错题卡）
 

@@ -1,0 +1,22 @@
+# 开发期 PostgreSQL（ADR-0047 决策 2/3）：生产用系统安装的 PostgreSQL，本文件仅服务本地开发。
+# 端口只绑回环，避免开发库暴露到局域网。
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mistake-agent-db
+    environment:
+      POSTGRES_USER: mistake
+      POSTGRES_PASSWORD: mistake
+      POSTGRES_DB: mistake_agent
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mistake -d mistake_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
