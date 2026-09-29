@@ -25,6 +25,11 @@ pub struct Config {
     /// 平台 DeepSeek 密钥：S3 中转使用；S1 允许为空（启动告警）。
     pub deepseek_api_key: String,
     pub deepseek_base_url: String,
+    /// 中转时强制使用的上游模型名（不信任客户端传来的 model）。
+    pub deepseek_model: String,
+    /// 阶梯扣次的 token 阈值（升序）：≤ 第一个阈值扣 1 次，每跨过一个阈值多扣 1 次。
+    /// 用途是防止单次超长上下文击穿"按次数售卖"（ADR-0047 决策 6）。
+    pub billing_ladder_tokens: Vec<u64>,
     /// 登录令牌有效期（天）：桌面端长期在线，默认 90 天。
     pub token_ttl_days: i64,
     /// 首个管理员种子（ADR-0047 决策 3）：两者都配齐且库中尚无管理员时创建，幂等。
@@ -37,7 +42,10 @@ const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8080";
 const DEFAULT_DB_MAX_CONNECTIONS: u32 = 10;
 const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
+const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-flash";
 const DEFAULT_TOKEN_TTL_DAYS: i64 = 90;
+/// 32k / 64k：与 ADR-0047 决策 6 的初始档位一致，数值随真实用量数据校准。
+const DEFAULT_BILLING_LADDER_TOKENS: [u64; 2] = [32 * 1024, 64 * 1024];
 
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
@@ -110,6 +118,26 @@ impl Config {
             });
         }
 
+        let billing_ladder_tokens = match lookup("BILLING_LADDER_TOKENS") {
+            None => DEFAULT_BILLING_LADDER_TOKENS.to_vec(),
+            Some(raw) => {
+                let mut ladder = Vec::new();
+                for part in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    ladder.push(part.parse::<u64>().map_err(|e| ConfigError::Invalid {
+                        name: "BILLING_LADDER_TOKENS",
+                        reason: format!("{part:?} 不是整数：{e}"),
+                    })?);
+                }
+                if ladder.windows(2).any(|w| w[0] >= w[1]) {
+                    return Err(ConfigError::Invalid {
+                        name: "BILLING_LADDER_TOKENS",
+                        reason: "阈值必须严格递增（否则档位边界无法判定）".into(),
+                    });
+                }
+                ladder
+            }
+        };
+
         Ok(Self {
             bind_addr,
             database_url,
@@ -120,6 +148,11 @@ impl Config {
                 .map(|v| v.trim().trim_end_matches('/').to_string())
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| DEFAULT_DEEPSEEK_BASE_URL.to_string()),
+            deepseek_model: lookup("DEEPSEEK_MODEL")
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| DEFAULT_DEEPSEEK_MODEL.to_string()),
+            billing_ladder_tokens,
             token_ttl_days,
             admin_email,
             admin_password,
@@ -170,9 +203,48 @@ mod tests {
         assert_eq!(cfg.log_level, DEFAULT_LOG_LEVEL);
         assert_eq!(cfg.deepseek_base_url, DEFAULT_DEEPSEEK_BASE_URL);
         assert!(cfg.deepseek_api_key.is_empty());
+        assert_eq!(cfg.deepseek_model, DEFAULT_DEEPSEEK_MODEL);
+        assert_eq!(cfg.billing_ladder_tokens, DEFAULT_BILLING_LADDER_TOKENS);
         assert_eq!(cfg.token_ttl_days, DEFAULT_TOKEN_TTL_DAYS);
         assert!(cfg.admin_email.is_none());
         assert!(cfg.admin_password.is_none());
+    }
+
+    #[test]
+    fn billing_ladder_parsing_and_validation() {
+        let cfg = Config::from_lookup(lookup(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("BILLING_LADDER_TOKENS", " 1000, 4000 ,16000 "),
+        ]))
+        .unwrap();
+        assert_eq!(cfg.billing_ladder_tokens, vec![1000, 4000, 16000]);
+
+        // 空串 = 不设阶梯（所有请求都只扣 1 次），需要能表达出来
+        let cfg = Config::from_lookup(lookup(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("BILLING_LADDER_TOKENS", "  "),
+        ]))
+        .unwrap();
+        assert!(cfg.billing_ladder_tokens.is_empty());
+
+        // 非整数、非递增都要拒绝：档位边界判定依赖严格递增
+        for bad in ["abc", "1000,abc", "4000,1000", "1000,1000"] {
+            let err = Config::from_lookup(lookup(&[
+                ("DATABASE_URL", "postgres://x"),
+                ("BILLING_LADDER_TOKENS", bad),
+            ]))
+            .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ConfigError::Invalid {
+                        name: "BILLING_LADDER_TOKENS",
+                        ..
+                    }
+                ),
+                "{bad} 应被拒绝"
+            );
+        }
     }
 
     #[test]

@@ -8,12 +8,16 @@
 //! - `db`      —— 连接池与迁移（S1）
 //! - `auth`    —— 账号、令牌与鉴权（S2）
 //! - `admin`   —— 管理面：账号查询与（后续）兑换码发放（S2 起）
+//! - `billing` —— 套餐、权益、用量与限额裁决（S3 起）
 //! - `http`    —— 路由装配与基础设施端点（S1），`/api/v1/*` 由各业务模块挂载
 //!
-//! 尚未落地（按 ADR-0047/0049）：`relay`（S3 中转）、`billing`（S4 套餐与兑换码）、`sync`（S6）。
+//! 尚未落地（按 ADR-0047/0049）：`relay`（S3 中转）、`sync`（S6 同步）。
+//! 里程碑边界在 S3 做了调整：`plans`/`entitlements`/`usage_events` 从 S4 提前到 S3
+//! （中转没有权益就无从限流），S4 保留兑换码、admin CLI 与套餐数值校准。
 
 pub mod admin;
 pub mod auth;
+pub mod billing;
 pub mod config;
 pub mod db;
 pub mod http;
