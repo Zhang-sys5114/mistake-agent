@@ -130,23 +130,26 @@ GUI → kernel：`send_user_message`、`trigger_command(entry, params)`、`edit_
 }
 ```
 
-- 单份配置承担**主对话 + 调度/摘要 + 图片理解**：模型默认 `deepseek-flash`，负责 agent loop 调度与对话；默认经 **DeepSeek Responses API**（`POST /responses`，官方 2026-08 起支持、为 agent 优化）接入，`transport: "responses"`；Ollama 等不兼容端点可配 `"chat_completions"`。
-- 图片理解不需要独立视觉端点，也**不再有独立读图工具**：上传图片以 `uploads/` 路径引用存进用户消息，请求构建时解析为 `input_image`（base64 data URL）直入上下文，与主链路共用同一配置；PDF 在 GUI 边界抽文（ADR-0046）。
+- 单份配置承担**主对话 + 调度/摘要 + 图片理解**：模型默认 `deepseek-flash`，负责 agent loop 调度与对话；默认经 **DeepSeek Responses API**（`POST /responses`，官方 2026-07-31 起支持 Flash、2026-08-13 起支持 Pro）接入，`transport: "responses"`；Ollama 等不兼容端点可配 `"chat_completions"`。
+- 图片理解不需要独立视觉端点，也**不再有独立读图工具**：上传图片以 `uploads/` 路径引用存进用户消息，请求构建时解析为 `input_image`（base64 data URL）直入上下文，与主链路共用同一配置；PDF 在 GUI 边界抽文（ADR-0046）。**注意 `deepseek-v4-pro` 不支持图片输入**（`input_modalities` 只有 text），配成 Pro 后带图消息会失败（[来源](https://api-docs.deepseek.com/zh-cn/guides/vision/)）。
 - `vision_model` 字段仅为兼容旧 `settings.json` 保留、运行时不再读取（ADR-0045）。
 
 **Responses API 速览（详见 ADR-0020）**：
 
 | 项 | 现状 |
 |---|---|
-| Endpoint | `POST https://api.deepseek.com/responses`（base_url 与 Chat Completions 相同） |
-| 模型支持 | `deepseek-flash`（V4.1-Flash）/ `deepseek-v4-pro`；旧名 `deepseek-v4-flash` 已退役 |
+| Endpoint | `POST https://api.deepseek.com/responses`（base_url 与 Chat Completions 相同；官方文档从未出现 `/v1` 前缀，但客户端会容忍传入 `/v1`） |
+| 模型支持 | `deepseek-flash`（V4.1-Flash）/ `deepseek-v4-pro`；**图片输入仅 `deepseek-flash` 支持**；旧名 `deepseek-v4-flash` 仍可调用并被路由到 V4.1-Flash（并非报错退役） |
 | 会话状态 | 无状态：不支持 `previous_response_id`/`conversation`/`store`，每回合发全量历史 |
-| 流式 | SSE 语义事件，`response.completed`/`incomplete`/`failed` 结束，无 `data: [DONE]` |
-| 思考模式 | 默认开启（`reasoning` 可调 effort）；thinking 下 `temperature`/`top_p` 无效 |
+| 流式 | SSE 语义事件，`response.completed`/`incomplete`/`failed` 结束，无 `data: [DONE]`；另有 `: keep-alive` 注释行与空行需容忍（[限速与隔离](https://api-docs.deepseek.com/zh-cn/quick_start/rate_limit/)） |
+| 思考模式 | 默认开启（`reasoning.effort`：`none`/`low`/`high`/`max`）；**thinking 下 `temperature` 无效**；`top_p` 相反——**只在 thinking 下生效**（有效区间 0.95–1.0，更低值按 0.95 处理），非 thinking 下恒为 1.0 且传入值被忽略 |
 | 工具 | `function` / `web_search`；function 名限 `^[a-zA-Z0-9_-]+$` → 内部 `namespace::tool` 经 wire name 映射（`::`→`__`） |
 | 并行工具调用 | 恒开启（参数被忽略）；v2 loop 仍串行执行（ADR-0010） |
-| 图片输入 | 支持 `input_image`（base64 data URL 或 http(s) URL；仅 user/developer 消息与 function_call_output） |
-| 来源 | [官方指南（英）](https://api-docs.deepseek.com/guides/responses_api/) / [（中）](https://api-docs.deepseek.com/zh-cn/guides/responses_api/)，2026-09-23 核对 |
+| 图片输入 | 支持 `input_image`（base64 data URL 或 http(s) URL；仅 user/developer 消息与 function_call_output；**system/assistant 消息里带图会 400**） |
+| 计费与限速 | usage 在 `response.usage`（`input_tokens` **已含**缓存命中 / `input_tokens_details.cached_tokens` / `output_tokens` / `output_tokens_details.reasoning_tokens`）；缓存命中价差约 50 倍、空闲时段半价；并发按**账号**计（flash 2500 / v4-pro 500），超限 429；`user` 字段可用于上游 KVCache 与调度隔离 |
+| 来源 | [官方指南（英）](https://api-docs.deepseek.com/guides/responses_api/) / [（中）](https://api-docs.deepseek.com/zh-cn/guides/responses_api/) / [Responses API 参考](https://api-docs.deepseek.com/api/create-response/) / [限速与隔离](https://api-docs.deepseek.com/zh-cn/quick_start/rate_limit/)，2026-09-29 复核（详见 [docs/research/deepseek-api-compat.md](docs/research/deepseek-api-compat.md)） |
+
+**Anthropic 兼容面（新增事实，2026-09-29 实测）**：官方提供 `base_url = https://api.deepseek.com/anthropic`，鉴权用 `x-api-key`（`anthropic-version` 被忽略），`tools`/`tool_use`/`tool_result`/图片块完整支持；传 `claude-opus*` 会被映射到 `deepseek-v4-pro`，`claude-sonnet*`/`claude-haiku*` 映射到 `deepseek-flash`。usage 分两处（`message_start.message.usage` 给输入、`message_delta.usage` 给终值），且 `input_tokens` **不含**缓存读取——与 Responses 口径不同，网关需归一化。详见 [ADR-0047](docs/adr/0047-server-account-package-relay.md) 的修订节与上述研究报告附录 A。
 
 - 会话新建归用户（ADR-0044：`create_session` RPC；模型侧决策已全部删除）；交接摘要与上下文压缩摘要由 `LlmSummarizer` 生成（≤300 字，保留错题 id/知识点/未完成事项，模型错误降级为计数摘要），两个调用方共享同一实例。
 - 可选 Ollama 本地模型（离线场景，不填 key）。

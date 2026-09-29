@@ -127,3 +127,58 @@ mistake-agent-server admin revoke-code --code XXXX-XXXX-XXXX
 - **限额数值待校准**：`plans` 的窗口阈值是初始占位，M3 后按真实数据收紧（见决策 6）。
 - **本机环境**：开发机当前无 `psql`，M1 需要以容器方式起 PostgreSQL。
 - **文档同步**：`PROJECT.md`（新增服务端章节、工程结构、里程碑、ADR 计数）、`CONTEXT.md`（账号 / 平台服务 / 服务包 / 兑换码 / 权益 / 中转 / 限额窗口 / 扣次 术语）、`docs/TODO.md`（第 3 条改为已立 ADR + 里程碑清单）；服务端落地后另需 `docs/server.md`（部署运维手册，M8 交付）与 `docs/usage.md` 中「纯本地、无账号体系」表述的修订。
+
+## 修订（2026-09-29，S3 开工前的研究结论）
+
+S3 动工前做了一轮一手来源研究（DeepSeek 官方文档 + 本机实测抓包 + new-api/sub2api 源码机制），成果见 [docs/research/deepseek-api-compat.md](../../docs/research/deepseek-api-compat.md) 与 [docs/research/llm-gateway-mechanisms.md](../../docs/research/llm-gateway-mechanisms.md)。据此修订以下决策：
+
+### R1. 协议面从「只做 Responses」扩为「三面全做，且全部透传」（**推翻**原先「Anthropic 需双向翻译、后置」的判断）
+
+DeepSeek 官方提供 **Anthropic 兼容端点**（`base_url = https://api.deepseek.com/anthropic`，`x-api-key` 完全支持，`anthropic-version` 被忽略，`tools`/`tool_use`/`tool_result`/图片块完整支持）。因此三个协议面对应的上游端点**都存在同名形态**：
+
+| 下游路径 | 上游路径 | 终态标记 | usage 位置 |
+|---|---|---|---|
+| `/responses`（含 `/v1/responses`） | `/responses` | `response.completed`/`incomplete`/`failed` 集合 | `response.usage` |
+| `/chat/completions`（含 `/v1/chat/completions`） | `/chat/completions` | `data: [DONE]` | `data.usage` |
+| `/v1/messages` | `/anthropic/v1/messages` | `message_delta` → `message_stop` | `message_start.message.usage`（输入）+ `message_delta.usage`（终值） |
+
+**结论**：协议适配器是薄层（路径映射 + usage 提取），**无需双向翻译**。Anthropic 纳入首期。
+代价与风险从「一周以上的翻译层」降为「一个小提取器」，但要处理三个真实差异：三面 usage 字段名不同、`input_tokens` 语义不同（Responses 已含缓存命中；Anthropic 不含，总输入 = `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`）、终态标记不同。
+
+同时采纳：中转路由**同时接受** `Authorization: Bearer` 与 `x-api-key`；路径**同时认** `/v1/...` 与无前缀形态（OpenAI SDK 与第三方客户端硬编码 `/v1`，而本项目客户端会把 `/v1` 剥掉）。
+
+### R2. 计费从「事后记账」改为「预扣 → 结算」
+
+借 new-api 的做法（`PreConsumeBilling` → 转发 → `PostConsumeQuota` 差额结算，且预扣额度可按分段结算上调）：请求开始时先写一条 `status='reserved'`、`billed_uses=1` 的用量记录（使其立即计入三窗口聚合），拿到上游 usage 后**结算**该行（更新为 `status='ok'` 与最终 `billed_uses`，阶梯可能把 1 上调为 2/3）；上游明确失败则记为 `upstream_error` 且 `billed_uses=0`（等价退款）。这样并发下不会有两个请求同时挤过窗口边界。
+
+计费安全不变量同步采纳（来自 new-api 的计费约定，逐条写进我们的测试）：乘数量必须有上界并在入口 400 拒绝；扣次与窗口换算集中在 `billing` 模块且用饱和运算；异常扣次（clamp）落审计；新增计费路径必须走「校验 → 扣次 → 预留 → 结算」全链路核对。
+
+### R3. 中断与终态判定按面分流，且终态是集合
+
+Responses 面的终态**不止** `response.completed`：工程实践还要认 `response.done`/`cancelled`/`canceled` 等变体（new-api 的累加器即按集合判定），解析器对未知事件名必须容忍（Anthropic 面实测会下发 `ping`）。中断计费规则：**流已开始且上游未明确报失败 → 至少扣 1 次**；明确失败 → 不扣。理由与 new-api 注释一致：上游一旦开始生成就已经为 prompt 计费。
+
+### R4. 计费口径归一化为四元组
+
+内部统一 `{input_total, cached, output, reasoning}`，由各协议适配器填充分解字段。对外仍只暴露「次数」。`usage_events` 的字段设计保持不变（已能容纳两个协议的形状）。
+
+### R5. 把平台用户 id 透传到上游的隔离字段
+
+三面字段名不同（Responses 顶层 `user`、Chat `user_id`、Anthropic `metadata.user_id`），填进去即可获得上游的 **KVCache 隔离、内容安全隔离与调度隔离**——免费的多租户隔离能力，默认开启。
+
+### R6. 里程碑边界调整
+
+`plans` / `entitlements` / `usage_events` 三张表**从 S4 提前到 S3**：中转没有权益就无从限流（否则只能一律 402）。S4 保留兑换码、admin CLI、CSV 导出与套餐数值校准，并承接令牌模型白名单与软删（借 new-api 的令牌设计）。
+
+### R7. 未登录的产品规则（协作开发者确认，写入实现与文档）
+
+**未登录仍可完整使用 App**；但要接入模型须**自行配置 API Key**，且**不参与消息同步**。即登录态只决定「平台模型服务」与「设备同步」两项能力，不构成 App 使用前提。这与 ADR-0048 决策 2 的「登录纯可选」一致，此处明确为可对外表述的产品规则。
+
+### R8. 对既有文档的事实纠正（已同步至 PROJECT.md）
+
+1. **`top_p` 的生效条件原先写反了**：它在 thinking 模式下**生效**（有效区间 0.95–1.0），非 thinking 下恒为 1.0 且传入值被忽略；`temperature` 才是 thinking 下不生效。
+2. **`deepseek-v4-pro` 不支持图片输入**（`input_modalities` 只有 text），配成 Pro 后带图消息会失败。
+3. **旧模型名 `deepseek-v4-flash` 并非报错退役**，仍可调用并被路由到 V4.1-Flash。
+
+### R9. 未采纳项（明确不抄）
+
+new-api / sub2api 均为多渠道平台（前者 AGPL-3.0、后者 LGPL-3.0，**只借鉴机制不复制代码**）。不采纳：渠道池与负载均衡、失败换渠道重试、分组倍率、WebSocket 传输、任务型计费、ClickHouse 日志库、多数据库兼容矩阵、Casbin 授权。Redis 亦不引入——单实例单上游用进程内状态即可；**若将来水平扩展，并发闸门与窗口预留必须挪到共享存储**（此项预先记录，避免届时遗漏）。
