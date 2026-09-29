@@ -73,7 +73,7 @@
 - [ ] S5 客户端接入：登录 + OOBE 可选登录 + 兑换码 + 「账户与套餐」卡片 + 401/402 引导 → **端到端可卖**
 - [ ] S6 同步服务端：结构化表 + `changes` 光标 + push/pull + `blobs` 预留
 - [ ] S7 客户端同步引擎：storage outbox + `src/kernel/sync/` + 状态 RPC/事件 + 关闭与删除云端数据
-- [ ] S8 部署：VPS + PostgreSQL + Caddy（自动 TLS）+ systemd + 备份 + `docs/server.md`
+- [ ] S8 部署：VPS 实测 + 备份策略 + `docs/server.md` 运维手册。（**容器化已完成**：`server/Dockerfile`、`docker-compose.prod.yml`（PostgreSQL + 服务端 + Caddy 自动 TLS）、`deploy/Caddyfile`、`.dockerignore`；**待办**：VPS 上真机走一遍、数据库备份与恢复演练、日志轮转、fail2ban 落地、运维手册）
 
 **二期（教师端，本轮不做）**：
 

@@ -80,6 +80,31 @@ usage 字段归一化、用户隔离字段名。
 3. **全局并发上限**：令牌桶管速率，管不住"同时挂着一堆长流式请求"，因此另有全局计数器保护
    上游账号与进程容量。
 
+## 部署（Docker）
+
+生产栈是 **PostgreSQL + 服务端 + Caddy（自动 TLS）** 三个容器，见
+[`docker-compose.prod.yml`](docker-compose.prod.yml)、[`Dockerfile`](Dockerfile) 与
+[`deploy/Caddyfile`](deploy/Caddyfile)：
+
+```bash
+cd server
+cp .env.example .env      # 至少要填 POSTGRES_PASSWORD / DEEPSEEK_API_KEY / SITE_ADDRESS
+docker compose -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.prod.yml logs -f server
+```
+
+几个刻意的设计点：
+
+- **服务端不发布端口**：只有 compose 内网的 Caddy 能访问它（TLS 与 SNI 交给 Caddy）。
+  8080 直接对外是没有 TLS 的裸端口，不要 `ports:` 它。
+- **Caddy 关掉压缩、`flush_interval -1`**：中转面是 SSE 长连接，缓冲或压缩都会让
+  "边生成边到达"退化成"最后一次性吐出"。
+- **`SECURITY_TRUST_PROXY=true`**：在反代后面必须开，否则所有请求的来源 IP 都是网关地址，
+  按 IP 的限流会把全校学生当成同一个人；fail2ban 也拿不到真实 IP。
+- **迁移编译期嵌入**：镜像里不需要 `migrations/` 目录，也不会因为工作目录变化漏迁移。
+- `docker-compose.yml`（开发用）与 `docker-compose.prod.yml`（生产用）**刻意的分开**：
+  前者只管本地 PostgreSQL，配合 `cargo run` 用。
+
 ## 造测试账号与发套餐（S4 之前的手工办法）
 
 兑换码与 admin CLI 属 S4，在那之前用 SQL 直接造。先注册（HTTP），再挂套餐：
